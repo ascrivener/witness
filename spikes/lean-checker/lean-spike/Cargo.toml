@@ -1,0 +1,25 @@
+[package]
+name = "lean-spike"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+authors = ["Adam Scrivener <adam@oneoff.world>"]
+
+[package.metadata.jam]
+type = "service"
+
+[dependencies]
+nanoda_lib = { path = "../nanoda" }
+codec = { package = "jam-codec", version = "0.1.1", default-features = false, features = ["derive"] }
+jam-pvm-common = { version = "0.1.29", default-features = false, features = ["service", "logging"] }
+jam-types = { version = "0.1.29", default-features = false }
+polkavm-derive = { version = "0.37.0", default-features = false }
+
+[profile.production]
+inherits = "release"
+lto = true
+codegen-units = 1
+opt-level = 3
+
+# Standalone: not part of the witness workspace.
+[workspace]

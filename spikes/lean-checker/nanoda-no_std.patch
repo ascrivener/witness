@@ -1,0 +1,1014 @@
+diff -ruN --exclude=target --exclude=.git --exclude=Cargo.lock a/Cargo.toml b/Cargo.toml
+--- a/Cargo.toml	2026-10-20 23:27:42
++++ b/Cargo.toml	2026-10-20 23:30:01
+@@ -17,21 +17,13 @@
+ opt-level=3
+ overflow-checks=true
+ 
+-[dev-dependencies]
+-rand = "0.10.2"
+-num-bigint = { version = "0.5.1", features = ["rand_0_10", "serde"] }
+-
+ [dependencies]
+-indexmap = "2.13.0"
+-rustc-hash = "1.1.0"
+-num-bigint = { version = "0.5.1", features = ["serde"] }
+-num-integer = "0.1.47"
+-num-traits = "0.2.19"
+-semver = "1.0.27"
+-serde_json = "1.0.111"
+-serde = { version = "1.0.228", features = ["derive"] }
+-
+-[[bin]]
+-name = "nanoda_bin"
+-path = "src/main.rs"
+-bench = false
+\ No newline at end of file
++indexmap = { version = "2.13.0", default-features = false }
++rustc-hash = { version = "1.1.0", default-features = false }
++hashbrown = { version = "0.15", default-features = false, features = ["inline-more", "default-hasher"] }
++num-bigint = { version = "0.5.1", default-features = false, features = ["serde"] }
++num-integer = { version = "0.1.47", default-features = false }
++num-traits = { version = "0.2.19", default-features = false }
++semver = { version = "1.0.27", default-features = false }
++serde_json = { version = "1.0.111", default-features = false, features = ["alloc"] }
++serde = { version = "1.0.228", default-features = false, features = ["derive", "alloc"] }
+diff -ruN --exclude=target --exclude=.git --exclude=Cargo.lock a/src/debug_printer.rs b/src/debug_printer.rs
+--- a/src/debug_printer.rs	2026-10-20 23:27:42
++++ b/src/debug_printer.rs	2026-10-20 23:30:01
+@@ -1,3 +1,5 @@
++#[allow(unused_imports)]
++use crate::prelude::*;
+ use crate::expr::Expr::*;
+ use crate::level::Level;
+ use crate::name::Name;
+@@ -14,8 +16,8 @@
+     }
+ }
+ 
+-impl<'x, 't, 'p> std::fmt::Debug for DebugPrinter<'x, 't, 'p, NamePtr<'t>> {
+-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++impl<'x, 't, 'p> core::fmt::Debug for DebugPrinter<'x, 't, 'p, NamePtr<'t>> {
++    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+         use Name::*;
+         match self.ctx.read_name(self.elem_to_print) {
+             Anon => Ok(()),
+@@ -34,13 +36,13 @@
+     }
+ }
+ 
+-use std::fmt;
+-impl<'x, 't, 'p, A, B> std::fmt::Debug for DebugPrinter<'x, 't, 'p, (A, B)>
++use core::fmt;
++impl<'x, 't, 'p, A, B> core::fmt::Debug for DebugPrinter<'x, 't, 'p, (A, B)>
+ where
+     A: Copy,
+     B: Copy,
+-    DebugPrinter<'x, 't, 'p, A>: std::fmt::Debug,
+-    DebugPrinter<'x, 't, 'p, B>: std::fmt::Debug,
++    DebugPrinter<'x, 't, 'p, A>: core::fmt::Debug,
++    DebugPrinter<'x, 't, 'p, B>: core::fmt::Debug,
+ {
+     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+         write!(
+@@ -51,38 +53,38 @@
+         )
+     }
+ }
+-impl<'x, 't, 'p, A> std::fmt::Debug for DebugPrinter<'x, 't, 'p, &[A]>
++impl<'x, 't, 'p, A> core::fmt::Debug for DebugPrinter<'x, 't, 'p, &[A]>
+ where
+     A: Copy,
+-    DebugPrinter<'x, 't, 'p, A>: std::fmt::Debug,
++    DebugPrinter<'x, 't, 'p, A>: core::fmt::Debug,
+ {
+     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+         f.debug_list().entries(self.elem_to_print.iter().copied().map(|x| self.ctx.debug_print(x))).finish()
+     }
+ }
+ 
+-impl<'x, 't, 'p, A> std::fmt::Debug for DebugPrinter<'x, 't, 'p, Vec<A>>
++impl<'x, 't, 'p, A> core::fmt::Debug for DebugPrinter<'x, 't, 'p, Vec<A>>
+ where
+     A: Clone,
+-    DebugPrinter<'x, 't, 'p, A>: std::fmt::Debug,
++    DebugPrinter<'x, 't, 'p, A>: core::fmt::Debug,
+ {
+     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+         f.debug_list().entries(self.elem_to_print.clone().into_iter().map(|x| self.ctx.debug_print(x))).finish()
+     }
+ }
+-impl<'x, 't, 'p, A> std::fmt::Debug for DebugPrinter<'x, 't, 'p, std::rc::Rc<A>>
++impl<'x, 't, 'p, A> core::fmt::Debug for DebugPrinter<'x, 't, 'p, alloc::rc::Rc<A>>
+ where
+     A: Clone,
+-    DebugPrinter<'x, 't, 'p, A>: std::fmt::Debug,
++    DebugPrinter<'x, 't, 'p, A>: core::fmt::Debug,
+ {
+     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+         write!(f, "{:?}", &self.ctx.debug_print(self.elem_to_print.as_ref().clone()))
+     }
+ }
+-impl<'x, 't, 'p, A> std::fmt::Debug for DebugPrinter<'x, 't, 'p, Option<A>>
++impl<'x, 't, 'p, A> core::fmt::Debug for DebugPrinter<'x, 't, 'p, Option<A>>
+ where
+     A: Copy,
+-    DebugPrinter<'x, 't, 'p, A>: std::fmt::Debug,
++    DebugPrinter<'x, 't, 'p, A>: core::fmt::Debug,
+ {
+     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+         match self.elem_to_print {
+@@ -92,8 +94,8 @@
+     }
+ }
+ 
+-impl<'x, 't, 'p> std::fmt::Debug for DebugPrinter<'x, 't, 'p, LevelPtr<'t>> {
+-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++impl<'x, 't, 'p> core::fmt::Debug for DebugPrinter<'x, 't, 'p, LevelPtr<'t>> {
++    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+         use Level::*;
+         match self.ctx.read_level(self.elem_to_print) {
+             Zero => write!(f, "0"),
+@@ -118,7 +120,7 @@
+     }
+ }
+ 
+-impl<'x, 't, 'p> std::fmt::Debug for DebugPrinter<'x, 't, 'p, ExprPtr<'t>> {
++impl<'x, 't, 'p> core::fmt::Debug for DebugPrinter<'x, 't, 'p, ExprPtr<'t>> {
+     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+         match self.ctx.read_expr(self.elem_to_print) {
+             Var { dbj_idx, .. } => write!(f, "${}", dbj_idx),
+@@ -174,24 +176,24 @@
+     }
+ }
+ 
+-impl<'x, 't, 'p> std::fmt::Debug for DebugPrinter<'x, 't, 'p, crate::util::LevelsPtr<'t>> {
+-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++impl<'x, 't, 'p> core::fmt::Debug for DebugPrinter<'x, 't, 'p, crate::util::LevelsPtr<'t>> {
++    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+         write!(f, "{:?}", self.ctx.debug_print(self.ctx.read_levels(self.elem_to_print).as_ref()))
+     }
+ }
+-impl<'x, 't, 'p> std::fmt::Debug for DebugPrinter<'x, 't, 'p, crate::util::StringPtr<'t>> {
+-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++impl<'x, 't, 'p> core::fmt::Debug for DebugPrinter<'x, 't, 'p, crate::util::StringPtr<'t>> {
++    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+         write!(f, "{:?}", self.ctx.read_string(self.elem_to_print))
+     }
+ }
+-impl<'x, 't, 'p> std::fmt::Debug for DebugPrinter<'x, 't, 'p, crate::util::BigUintPtr<'t>> {
+-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++impl<'x, 't, 'p> core::fmt::Debug for DebugPrinter<'x, 't, 'p, crate::util::BigUintPtr<'t>> {
++    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+         write!(f, "{:?}", self.ctx.read_bignum(self.elem_to_print).unwrap())
+     }
+ }
+ 
+-impl<'x, 't, 'p> std::fmt::Debug for DebugPrinter<'x, 't, 'p, &crate::env::DeclarInfo<'t>> {
+-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++impl<'x, 't, 'p> core::fmt::Debug for DebugPrinter<'x, 't, 'p, &crate::env::DeclarInfo<'t>> {
++    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+         f.debug_struct("DeclarInfo")
+             .field("name", &self.ctx.debug_print(self.elem_to_print.name))
+             .field("ty", &self.ctx.debug_print(self.elem_to_print.ty))
+@@ -200,8 +202,8 @@
+     }
+ }
+ 
+-impl<'x, 't, 'p> std::fmt::Debug for DebugPrinter<'x, 't, 'p, crate::env::RecRule<'t>> {
+-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++impl<'x, 't, 'p> core::fmt::Debug for DebugPrinter<'x, 't, 'p, crate::env::RecRule<'t>> {
++    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+         f.debug_struct("RecRule")
+             .field("ctor_name", &self.ctx.debug_print(self.elem_to_print.ctor_name))
+             .field("ctor_telescope_size_wo_params", &self.elem_to_print.ctor_telescope_size_wo_params)
+@@ -210,8 +212,8 @@
+     }
+ }
+ 
+-impl<'x, 't, 'p> std::fmt::Debug for DebugPrinter<'x, 't, 'p, crate::tc::DeltaResult<'t>> {
+-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++impl<'x, 't, 'p> core::fmt::Debug for DebugPrinter<'x, 't, 'p, crate::tc::DeltaResult<'t>> {
++    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+         match self.elem_to_print {
+             crate::tc::DeltaResult::FoundEqResult(b) => write!(f, "DeltaResult::FoundEqResult({})", b),
+             crate::tc::DeltaResult::Exhausted(e1, e2) => f
+@@ -223,6 +225,6 @@
+     }
+ }
+ 
+-impl<'x, 't, 'p> std::fmt::Debug for DebugPrinter<'x, 't, 'p, crate::env::ReducibilityHint> {
+-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { write!(f, "{:?}", self.elem_to_print) }
++impl<'x, 't, 'p> core::fmt::Debug for DebugPrinter<'x, 't, 'p, crate::env::ReducibilityHint> {
++    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result { write!(f, "{:?}", self.elem_to_print) }
+ }
+diff -ruN --exclude=target --exclude=.git --exclude=Cargo.lock a/src/env.rs b/src/env.rs
+--- a/src/env.rs	2026-10-20 23:27:42
++++ b/src/env.rs	2026-10-20 23:30:01
+@@ -1,7 +1,9 @@
++#[allow(unused_imports)]
++use crate::prelude::*;
+ use crate::util::{ExprPtr, FxHashMap, FxIndexMap, LevelsPtr, NamePtr};
+-use std::sync::Arc;
++use alloc::sync::Arc;
+ use serde::Deserialize;
+-use std::collections::HashSet;
++use hashbrown::HashSet;
+ 
+ /// Reducibility hints accompany definitions; used to determine how
+ /// to unfold expressions in order to most efficiently proceed.
+diff -ruN --exclude=target --exclude=.git --exclude=Cargo.lock a/src/expr.rs b/src/expr.rs
+--- a/src/expr.rs	2026-10-20 23:27:42
++++ b/src/expr.rs	2026-10-20 23:30:01
+@@ -1,4 +1,6 @@
+ //! Implementation of Lean expressions
++#[allow(unused_imports)]
++use crate::prelude::*;
+ use crate::util::{BigUintPtr, ExprPtr, FxHashMap, LevelPtr, LevelsPtr, NamePtr, StringPtr, TcCtx};
+ use num_bigint::BigUint;
+ use num_traits::identities::Zero;
+@@ -127,8 +129,8 @@
+         }
+     }
+ }
+-impl<'a> std::hash::Hash for Expr<'a> {
+-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) { state.write_u64(self.get_hash()) }
++impl<'a> core::hash::Hash for Expr<'a> {
++    fn hash<H: core::hash::Hasher>(&self, state: &mut H) { state.write_u64(self.get_hash()) }
+ }
+ 
+ /// The style of this binder (in Lean's vernacular, the brackets used to write it).
+diff -ruN --exclude=target --exclude=.git --exclude=Cargo.lock a/src/inductive.rs b/src/inductive.rs
+--- a/src/inductive.rs	2026-10-20 23:27:42
++++ b/src/inductive.rs	2026-10-20 23:30:01
+@@ -1,8 +1,10 @@
++#[allow(unused_imports)]
++use crate::prelude::*;
+ use crate::env::{ConstructorData, Declar, DeclarInfo, DeclarMap, InductiveData, RecRule, RecursorData};
+ use crate::expr::{BinderStyle, Expr::*};
+ use crate::tc::{InferFlag, TypeChecker};
+ use crate::util::{FxHashSet, ExportFile, ExprPtr, FxIndexMap, LevelPtr, LevelsPtr, NamePtr, TcCtx, new_fx_hash_set};
+-use std::sync::Arc;
++use alloc::sync::Arc;
+ 
+ impl<'t, 'p: 't> ExportFile<'p> {
+     pub(crate) fn is_recursive(&self, ind_name: &NamePtr<'t>) -> bool {
+@@ -144,7 +146,7 @@
+     /// Make the `_.rec` names for the base inductive type, or the base types for a mutual block
+     /// (uses the `all_ind_names` of the declaration currently being checked).
+     fn mk_base_rec_names(&mut self, all_ind_names: &[NamePtr<'t>]) -> FxHashSet<NamePtr<'t>> {
+-        let rec_str_ptr = self.alloc_string(std::borrow::Cow::Borrowed("rec"));
++        let rec_str_ptr = self.alloc_string(alloc::borrow::Cow::Borrowed("rec"));
+         let mut out = new_fx_hash_set();
+         for ind_name in all_ind_names.iter().copied() {
+             out.insert(self.str(ind_name, rec_str_ptr));
+@@ -405,7 +407,7 @@
+             match st.all_inductives_incl_specialized.get_mut(i) {
+                 // e.g. replace the base `Syntax.node` with the updated one that replaces `Array`.
+                 Some(old) => {
+-                    let _ = std::mem::replace(&mut old.ctors, new_ctors_for_i);
++                    let _ = core::mem::replace(&mut old.ctors, new_ctors_for_i);
+                 }
+                 None => panic!("inductive type {} is missing", i),
+             }
+@@ -1204,7 +1206,7 @@
+         rec_ctor_args: &[ExprPtr<'t>],
+     ) -> Vec<ExprPtr<'t>> {
+         let mut out = Vec::new();
+-        let rec_str_ptr = self.ctx.alloc_string(std::borrow::Cow::Borrowed("rec"));
++        let rec_str_ptr = self.ctx.alloc_string(alloc::borrow::Cow::Borrowed("rec"));
+         let flat_mapped_minors = st.minors.iter().flat_map(|v| v.iter().copied()).collect::<Vec<ExprPtr>>();
+         for rec_ctor_arg in rec_ctor_args.iter().copied() {
+             self.tc_cache.clear();
+@@ -1274,7 +1276,7 @@
+             match (self.env.get_old_declar(name), self.env.get_temp_declar(name)) {
+                 (Some(Declar::Inductive(old)), Some(Declar::Inductive(new))) => {
+                     assert!(old.aux_data_ck(new));
+-                    debug_assert!(!std::ptr::eq(old, new));
++                    debug_assert!(!core::ptr::eq(old, new));
+                     self.tc_cache.clear();
+                     self.assert_def_eq(old.info.ty, new.info.ty);
+                 }
+@@ -1290,7 +1292,7 @@
+                 match (self.env.get_old_declar(&ctor.name), self.env.get_temp_declar(&ctor.name)) {
+                     (Some(Declar::Constructor(old)), Some(Declar::Constructor(new))) => {
+                         assert!(old.aux_data_ck(new));
+-                        debug_assert!(!std::ptr::eq(old, new));
++                        debug_assert!(!core::ptr::eq(old, new));
+                         self.tc_cache.clear();
+                         self.assert_def_eq(old.info.ty, new.info.ty);
+                     }
+@@ -1307,7 +1309,7 @@
+         imported_rr: &RecRule<'t>,
+         constructed_rr: &RecRule<'t>,
+     ) {
+-        assert!(!std::ptr::eq(imported_rr, constructed_rr));
++        assert!(!core::ptr::eq(imported_rr, constructed_rr));
+         // Should be structurally != because they come from different envs.
+         assert_ne!(imported_rr, constructed_rr);
+         assert!(!st.is_nested());
+@@ -1328,7 +1330,7 @@
+                 ) => {
+                     self.tc_cache.clear();
+                     assert!(old_r.aux_data_ck(new_r));
+-                    assert!(!std::ptr::eq(old, new));
++                    assert!(!core::ptr::eq(old, new));
+                     // Should be structurally != because they come from different envs.
+                     assert_ne!(old, new);
+                     let imported_w_new_uparams = self.ctx.subst_expr_levels(old.info().ty, old.info().uparams, st.rec_uparams.unwrap());
+@@ -1365,7 +1367,7 @@
+         let recursor = RecursorData {
+             info: DeclarInfo {
+                 name: {
+-                    let rec_str_ptr = self.ctx.alloc_string(std::borrow::Cow::Borrowed("rec"));
++                    let rec_str_ptr = self.ctx.alloc_string(alloc::borrow::Cow::Borrowed("rec"));
+                     self.ctx.str(ind_name, rec_str_ptr)
+                 },
+                 uparams: st.rec_uparams.unwrap(),
+@@ -1422,7 +1424,7 @@
+         // The unmodified name of the "main" type being checked, e.g. `Lean.Syntax`
+         let main_ind_ty_name = base_mutuals.get(0).map(|zth| zth.name).unwrap();
+         let mut specialized_rec_names_to_unspecialized_rec_names = crate::util::new_fx_index_map();
+-        let rec_str = self.ctx.alloc_string(std::borrow::Cow::Borrowed("rec"));
++        let rec_str = self.ctx.alloc_string(alloc::borrow::Cow::Borrowed("rec"));
+ 
+         // The MODIFIED version looked up in the new environment. The modification would
+         // just be additions to `all_ind_names`, which now contains the `_nested.Array`
+@@ -1754,7 +1756,7 @@
+             ) {
+                 (Some(Declar::Inductive(old)), Some(Declar::Inductive(new))) => {
+                     assert!(old.aux_data_ck(new));
+-                    debug_assert!(!std::ptr::eq(old, new));
++                    debug_assert!(!core::ptr::eq(old, new));
+                     self.tc_cache.clear();
+                     self.assert_def_eq(old.info.ty, new.info.ty);
+                 }
+diff -ruN --exclude=target --exclude=.git --exclude=Cargo.lock a/src/level.rs b/src/level.rs
+--- a/src/level.rs	2026-10-20 23:27:42
++++ b/src/level.rs	2026-10-20 23:30:01
+@@ -1,4 +1,6 @@
+ //! Implementation of the `Level` type representing universes
++#[allow(unused_imports)]
++use crate::prelude::*;
+ use crate::util::{LevelPtr, LevelsPtr, NamePtr, TcCtx};
+ 
+ pub(crate) const ZERO_HASH: u64 = 283;
+@@ -26,8 +28,8 @@
+     }
+ }
+ 
+-impl<'a> std::hash::Hash for Level<'a> {
+-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) { state.write_u64(self.get_hash()) }
++impl<'a> core::hash::Hash for Level<'a> {
++    fn hash<H: core::hash::Hasher>(&self, state: &mut H) { state.write_u64(self.get_hash()) }
+ }
+ 
+ impl<'t, 'p: 't> TcCtx<'t, 'p> {
+@@ -101,7 +103,7 @@
+     pub fn subst_levels(&mut self, uparams: LevelsPtr<'t>, ks: LevelsPtr<'t>, vs: LevelsPtr<'t>) -> LevelsPtr<'t> {
+         let out =
+             self.read_levels(uparams).clone().iter().copied().map(|l| self.subst_level(l, ks, vs)).collect::<Vec<_>>();
+-        self.alloc_levels(std::sync::Arc::from(out))
++        self.alloc_levels(alloc::sync::Arc::from(out))
+     }
+ 
+     /// Return `uparam [ks |-> vs]`
+diff -ruN --exclude=target --exclude=.git --exclude=Cargo.lock a/src/lib.rs b/src/lib.rs
+--- a/src/lib.rs	2026-10-20 23:27:42
++++ b/src/lib.rs	2026-10-20 23:30:08
+@@ -2,8 +2,15 @@
+ //! ```ignore
+ //! Doc comment example
+ //! ```
++#![no_std]
+ #![allow(clippy::too_many_arguments)]
+ #![deny(clippy::cast_possible_truncation)]
++
++extern crate alloc;
++
++pub(crate) mod prelude {
++    pub use alloc::{borrow::ToOwned, boxed::Box, format, string::{String, ToString}, vec, vec::Vec};
++}
+ 
+ pub mod debug_printer;
+ pub mod env;
+diff -ruN --exclude=target --exclude=.git --exclude=Cargo.lock a/src/main.rs b/src/main.rs
+--- a/src/main.rs	2026-10-20 23:27:42
++++ b/src/main.rs	1970-01-01 00:00:00
+@@ -1,72 +0,0 @@
+-use nanoda_lib::util::Config;
+-use std::error::Error;
+-use std::path::Path;
+-
+-fn main() -> Result<(), MainError> {
+-    let mut args = std::env::args();
+-    let _ = args.next();
+-    let out = match args.next().as_ref() {
+-        None => Err(Box::from("This program expects a path to a configuration file.".to_string())),
+-        Some(p) if p == "-h" || p == "--help" => return Ok(println!("{}", HELP_LONG)),
+-        Some(p) => use_config(&Path::new(p)),
+-    }
+-    .map_err(|e| MainError(e))?;
+-
+-    if let Some(msg) = out {
+-        println!("{}", msg);
+-    }
+-    Ok(())
+-}
+-
+-// Returns an optional success message.
+-fn use_config(config_path: &Path) -> Result<Option<String>, Box<dyn Error>> {
+-    let cfg = Config::try_from(config_path)?;
+-    // Make sure the target pretty printer destination is accessible before doing any real work.
+-    let mut pp_destination = cfg.get_pp_destination()?;
+-    let (export_file, skipped_axioms) = cfg.to_export_file()?;
+-    // Check the environment
+-    export_file.check_all_declars();
+-    // Pretty print as necessary
+-    let pp_errs = export_file.pp_selected_declars(pp_destination.as_mut());
+-    if export_file.config.print_success_message {
+-        if pp_errs.is_empty() {
+-            if skipped_axioms.is_empty() {
+-                Ok(Some(format!("Checked {} declarations with no errors", export_file.declars.len())))
+-            } else {
+-                Ok(Some(format!("Checked {} declarations with no errors, skipping exported but unpermitted axioms {:?}",
+-                export_file.declars.len(), skipped_axioms)))
+-            }
+-        } else {
+-            Ok(Some(format!(
+-                "Checked {} declarations with no typechecker errors, {} pretty printer errors: {:#?}",
+-                export_file.declars.len(),
+-                pp_errs.len(),
+-                pp_errs
+-            )))
+-        }
+-    } else if skipped_axioms.is_empty() {
+-        Ok(None)
+-    } else {
+-        Ok(Some(format!("Skipped exported but unpermitted axioms {:?}", skipped_axioms)))
+-    }
+-}
+-
+-struct MainError(Box<dyn Error>);
+-
+-impl std::fmt::Debug for MainError {
+-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { write!(f, "{}\n\n{}", self.0, HELP_SHORT) }
+-}
+-
+-const HELP_SHORT: &str = "run with `-h` or `--help` for help";
+-const HELP_LONG: &str = concat!(
+-    "nanoda_bin",
+-    " ",
+-    env!("CARGO_PKG_VERSION"),
+-    "\n\n",
+-    env!("CARGO_PKG_DESCRIPTION"),
+-    "\n\n",
+-    "get more help at ",
+-    env!("CARGO_PKG_REPOSITORY"),
+-    "\n\n",
+-    include_str!("../README.md")
+-);
+diff -ruN --exclude=target --exclude=.git --exclude=Cargo.lock a/src/name.rs b/src/name.rs
+--- a/src/name.rs	2026-10-20 23:27:42
++++ b/src/name.rs	2026-10-20 23:30:01
+@@ -1,4 +1,6 @@
+ //! Implementaiton of the `Name` type (hierarchical names)
++#[allow(unused_imports)]
++use crate::prelude::*;
+ use crate::util::{CowStr, NamePtr, StringPtr, TcCtx};
+ use Name::*;
+ 
+@@ -13,8 +15,8 @@
+     Num(NamePtr<'a>, u64, u64),
+ }
+ 
+-impl<'a> std::hash::Hash for Name<'a> {
+-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) { state.write_u64(self.get_hash()) }
++impl<'a> core::hash::Hash for Name<'a> {
++    fn hash<H: core::hash::Hasher>(&self, state: &mut H) { state.write_u64(self.get_hash()) }
+ }
+ 
+ impl<'a> Name<'a> {
+diff -ruN --exclude=target --exclude=.git --exclude=Cargo.lock a/src/parser.rs b/src/parser.rs
+--- a/src/parser.rs	2026-10-20 23:27:42
++++ b/src/parser.rs	2026-10-20 23:30:08
+@@ -1,3 +1,5 @@
++#[allow(unused_imports)]
++use crate::prelude::*;
+ use crate::env::{
+     ConstructorData, Declar, DeclarInfo, InductiveData, Notation, RecursorData, ReducibilityHint,
+ };
+@@ -12,16 +14,15 @@
+ use num_bigint::BigUint;
+ use serde::{ Deserialize, Deserializer };
+ use serde::de::{Error as DeError, Visitor};
+-use std::error::Error;
+-use std::io::BufRead;
+-use std::sync::Arc;
+-use std::borrow::Cow;
+-use std::fmt;
++use core::error::Error;
++use alloc::sync::Arc;
++use alloc::borrow::Cow;
++use core::fmt;
+ 
+ fn check_semver<'a>(meta: &FileMeta<'a>) -> Result<(), Box<dyn Error>> {
+     const MIN_SEMVER : semver::Version = semver::Version::new(3, 1, 0);
+     const MAX_SEMVER : semver::Version = semver::Version::new(3, 2, 0);
+-    let export_file_semver = semver::Version::parse(&meta.format.version)?;
++    let export_file_semver = semver::Version::parse(&meta.format.version).map_err(|e| format!("bad export format version: {e}"))?;
+     if export_file_semver < MIN_SEMVER {
+         return Err(Box::from(format!(
+             "export format version is less than the minimum supported version. Found {}, but min supported is {}",
+@@ -37,8 +38,7 @@
+     }
+ }
+ 
+-pub struct Parser<'a, R: BufRead> {
+-    buf_reader: R,
++pub struct Parser<'a> {
+     line_num: usize,
+     dag: LeanDag<'a>,
+     declars: FxIndexMap<NamePtr<'a>, Declar<'a>>,
+@@ -91,12 +91,7 @@
+         }
+         let lhs = u32::try_from(idx).unwrap();
+         if self != BackRef::In(lhs) {
+-            eprintln!(
+-                "Declined: Name back-reference mismatch, expected {:?}, found {:?}. Back-refs must be continuous.",
+-                BackRef::In(lhs),
+-                self
+-            );
+-            std::process::exit(2);
++            panic!("Declined: Name back-reference mismatch, expected {:?}, found {:?}. Back-refs must be continuous.", BackRef::In(lhs), self);
+         }
+     }
+ 
+@@ -106,12 +101,7 @@
+         }
+         let lhs = u32::try_from(idx).unwrap();
+         if self != BackRef::Il(lhs) {
+-            eprintln!(
+-                "Declined: Level back-reference mismatch, expected {:?}, found {:?}. Back-refs must be continuous.",
+-                BackRef::Il(lhs),
+-                self
+-            );
+-            std::process::exit(2);
++            panic!("Declined: Level back-reference mismatch, expected {:?}, found {:?}. Back-refs must be continuous.", BackRef::Il(lhs), self);
+         }
+     }
+ 
+@@ -121,12 +111,7 @@
+         }
+         let lhs = u32::try_from(idx).unwrap();
+         if self != BackRef::Ie(lhs) {
+-            eprintln!(
+-                "Declined: Expr back-reference mismatch, expected {:?}, found {:?}. Back-refs must be continuous.",
+-                BackRef::Ie(lhs),
+-                self
+-            );
+-            std::process::exit(2);
++            panic!("Declined: Expr back-reference mismatch, expected {:?}, found {:?}. Back-refs must be continuous.", BackRef::Ie(lhs), self);
+         }
+     }
+ }
+@@ -381,22 +366,14 @@
+     },
+ }
+ 
+-pub(crate) fn parse_export_file<'p, R: BufRead>(
+-    buf_reader: R,
++pub(crate) fn parse_export_str<'p>(
++    export: &str,
+     config: Config,
+-
+ ) -> Result<(crate::util::ExportFile<'p>, Vec<String>), Box<dyn Error>> {
+-    let mut parser = Parser::new(buf_reader, config);
+-    let mut line_buffer = String::new();
+-
+-    loop {
+-        let amt = parser.buf_reader.read_line(&mut line_buffer)?;
+-        if amt == 0 {
+-            break
+-        }
+-        parser.go1(line_buffer.as_str())?;
++    let mut parser = Parser::new(config);
++    for line in export.lines() {
++        parser.go1(line)?;
+         parser.line_num += 1;
+-        line_buffer.clear();
+     }
+     
+     // If the execution config has `unknown_pp_declar_hard_error: true`, and a `pp_declars` 
+@@ -452,10 +429,9 @@
+     Ok((export_file, parser.skipped))
+ }
+ 
+-impl<'a, R: BufRead> Parser<'a, R> {
+-    pub fn new(buf_reader: R, config: Config) -> Self {
++impl<'a> Parser<'a> {
++    pub fn new(config: Config) -> Self {
+         Self {
+-            buf_reader,
+             line_num: 0usize,
+             dag: LeanDag::new(&config),
+             declars: new_fx_index_map(),
+@@ -555,7 +531,7 @@
+                 let pfx = self.get_name_ptr(pre);
+                 let sfx = StringPtr::from(
+                     DagMarker::ExportFile, 
+-                    self.dag.strings.insert_full(std::borrow::Cow::Owned(str.to_string())).0
++                    self.dag.strings.insert_full(alloc::borrow::Cow::Owned(str.to_string())).0
+                 );
+ 
+                 let insert_result = {
+@@ -893,7 +869,7 @@
+ /// This splits the digit string by 10^(BASE_DIGITS * 2^j) and combines with big multiplications
+ /// (Karatsuba/Toom-3), so cost is that of multiplication times a log factor. Same value as `from_str`.
+ pub(crate) fn parse_decimal_fast(s: &str) -> Result<BigUint, String> {
+-    use std::str::FromStr;
++    use core::str::FromStr;
+     const BASE_DIGITS: usize = 2048;
+     if s.is_empty() || !s.bytes().all(|b| b.is_ascii_digit()) {
+         return Err("expected a non-empty string of ASCII digits".to_string());
+@@ -929,7 +905,7 @@
+ #[cfg(test)]
+ mod parse_decimal_fast_tests {
+     use super::*;
+-    use std::str::FromStr;
++    use core::str::FromStr;
+     #[test]
+     fn matches_from_str() {
+         let mut x: u64 = 88172645463325252;
+diff -ruN --exclude=target --exclude=.git --exclude=Cargo.lock a/src/pretty_printer.rs b/src/pretty_printer.rs
+--- a/src/pretty_printer.rs	2026-10-20 23:27:42
++++ b/src/pretty_printer.rs	2026-10-20 23:30:01
+@@ -1,3 +1,5 @@
++#[allow(unused_imports)]
++use crate::prelude::*;
+ use crate::env::Declar;
+ use crate::expr::{BinderStyle, Expr::*, FVarId};
+ use crate::hash64;
+@@ -5,8 +7,8 @@
+ use crate::name::Name;
+ use crate::util::{ExportFile, ExprPtr, LevelPtr, LevelsPtr, NamePtr, StringPtr, TcCtx};
+ use serde::Deserialize;
+-use std::error::Error;
+-use std::rc::Rc;
++use core::error::Error;
++use alloc::rc::Rc;
+ use BinderStyle::*;
+ use Doc::*;
+ 
+@@ -19,14 +21,14 @@
+ // If a name uses characters that otherwise should not be valid, it's escaped with double
+ // french quotes.
+ const NOT_GREEK: &[char] = &['λ', 'Π', 'Σ'];
+-const GREEK0: std::ops::Range<char> = 'α'..'ω';
+-const GREEK1: std::ops::Range<char> = 'Α'..'Ω';
+-const GREEK2: std::ops::Range<char> = 'ἀ'..'῾';
+-const COPTIC: std::ops::Range<char> = 'ϊ'..'ϻ';
+-const LETTERLIKE_SYMBOL: std::ops::Range<char> = '℀'..'\u{214f}';
+-const SUBSCRIPT0: std::ops::Range<char> = '₀'..'₉';
+-const SUBSCRIPT1: std::ops::Range<char> = 'ₐ'..'ₜ';
+-const SUBSCRIPT2: std::ops::Range<char> = 'ᵢ'..'ᵪ';
++const GREEK0: core::ops::Range<char> = 'α'..'ω';
++const GREEK1: core::ops::Range<char> = 'Α'..'Ω';
++const GREEK2: core::ops::Range<char> = 'ἀ'..'῾';
++const COPTIC: core::ops::Range<char> = 'ϊ'..'ϻ';
++const LETTERLIKE_SYMBOL: core::ops::Range<char> = '℀'..'\u{214f}';
++const SUBSCRIPT0: core::ops::Range<char> = '₀'..'₉';
++const SUBSCRIPT1: core::ops::Range<char> = 'ₐ'..'ₜ';
++const SUBSCRIPT2: core::ops::Range<char> = 'ᵢ'..'ᵪ';
+ const fn default_width() -> usize { 120 }
+ const fn default_indent() -> usize { 2 }
+ const MAX_LEVEL: usize = 1024;
+@@ -65,7 +67,7 @@
+     Group(DocPtr),
+ }
+ 
+-impl std::convert::AsRef<Doc> for DocPtr {
++impl core::convert::AsRef<Doc> for DocPtr {
+     fn as_ref(&self) -> &Doc { self.0.as_ref() }
+ }
+ 
+@@ -270,7 +272,7 @@
+     pub declar_sep: Option<String>,
+ }
+ 
+-impl std::default::Default for PpOptions {
++impl core::default::Default for PpOptions {
+     fn default() -> Self { Self::new_default() }
+ }
+ 
+@@ -346,7 +348,7 @@
+ use crate::util::PpDestination;
+ impl<'p> ExportFile<'p> {
+     // Need to get better information about escaping/use of double french quotes.
+-    pub fn pp_selected_declars(&self, pp_destination: Option<&mut PpDestination>) -> Vec<Box<dyn std::error::Error>> {
++    pub fn pp_selected_declars(&self, pp_destination: Option<&mut PpDestination>) -> Vec<Box<dyn core::error::Error>> {
+         let mut errs = Vec::new();
+         if let Some(pp_destination) = pp_destination {
+             self.with_ctx(|ctx| {
+@@ -807,7 +809,7 @@
+             }
+         }
+         let (named_binders, rest_binders) = binders.split_at(slice_split_idx);
+-        let named_binder_tys = named_binders.iter().map(|x| x.local_const).collect::<std::vec::Vec<_>>();
++        let named_binder_tys = named_binders.iter().map(|x| x.local_const).collect::<alloc::vec::Vec<_>>();
+ 
+         let instd = self.ctx.inst(val, named_binder_tys.as_slice());
+         let pp_val = {
+@@ -935,7 +937,7 @@
+             if let Ok(n) = segment.parse::<u64>() {
+                 out = self.num(out, n)
+             } else {
+-                let sfx = self.alloc_string(std::borrow::Cow::Owned(segment.to_string()));
++                let sfx = self.alloc_string(alloc::borrow::Cow::Owned(segment.to_string()));
+                 out = self.str(out, sfx);
+             }
+         }
+diff -ruN --exclude=target --exclude=.git --exclude=Cargo.lock a/src/quot.rs b/src/quot.rs
+--- a/src/quot.rs	2026-10-20 23:27:42
++++ b/src/quot.rs	2026-10-20 23:30:01
+@@ -1,4 +1,6 @@
+ //! Construction of quotient types
++#[allow(unused_imports)]
++use crate::prelude::*;
+ 
+ use crate::env::{ConstructorData, Declar, DeclarInfo, InductiveData, EnvLimit};
+ use crate::expr::{BinderStyle, BinderStyle::*};
+diff -ruN --exclude=target --exclude=.git --exclude=Cargo.lock a/src/tc.rs b/src/tc.rs
+--- a/src/tc.rs	2026-10-20 23:27:42
++++ b/src/tc.rs	2026-10-20 23:30:01
+@@ -1,3 +1,5 @@
++#[allow(unused_imports)]
++use crate::prelude::*;
+ use crate::env::ReducibilityHint;
+ use crate::env::{ConstructorData, Declar, DeclarInfo, Env, InductiveData, RecRule, RecursorData};
+ use crate::expr::Expr;
+@@ -6,7 +8,7 @@
+     nat_xor, nat_shr, nat_shl, ExportFile, ExprPtr, LevelPtr, 
+     LevelsPtr, NamePtr, TcCache, TcCtx, StringPtr, SortedPair
+ };
+-use std::error::Error;
++use core::error::Error;
+ use num_traits::pow::Pow;
+ 
+ use DeltaResult::*;
+@@ -145,44 +147,11 @@
+         }
+     }
+ 
+-    /// Check all declarations in this export file, spawning `num_threads` as
+-    /// checkers.
+-    fn check_all_declars_par(&self, num_threads: usize) {
+-        use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
+-        use std::thread;
+-        let task_num = AtomicUsize::new(0);
+-        thread::scope(|sco| {
+-            let mut handles = Vec::new();
+-            for i in 0..num_threads {
+-                handles.push(
+-                    thread::Builder::new()
+-                        .name(format!("thread_{}", i))
+-                        .stack_size(crate::STACK_SIZE)
+-                        .spawn_scoped(sco, || loop {
+-                            let idx = task_num.fetch_add(1, Relaxed);
+-                            if let Some((_, declar)) = self.declars.get_index(idx) {
+-                                self.check_declar(declar);
+-                            } else {
+-                                break
+-                            }
+-                        })
+-                        .unwrap(),
+-                )
+-            }
+-            for t in handles {
+-                t.join().expect("A thread in `check_all_declars` panicked while being joined");
+-            }
+-        });
+-    }
+-
+     /// Check all of the declarations in this export file on the specified number
+     /// of threads (checking will be serial on the main thread is num_threads <= 1).
+     pub fn check_all_declars(&self) {
+-        if self.config.num_threads > 1 {
+-            self.check_all_declars_par(self.config.num_threads)
+-        } else {
+-            self.check_all_declars_serial()
+-        }
++        // No threads without std: always serial.
++        self.check_all_declars_serial()
+     }
+ }
+ 
+diff -ruN --exclude=target --exclude=.git --exclude=Cargo.lock a/src/tests.rs b/src/tests.rs
+--- a/src/tests.rs	2026-10-20 23:27:42
++++ b/src/tests.rs	2026-10-20 23:30:01
+@@ -1,3 +1,5 @@
++#[allow(unused_imports)]
++use crate::prelude::*;
+ mod name;
+ mod level;
+ mod natlit;
+diff -ruN --exclude=target --exclude=.git --exclude=Cargo.lock a/src/union_find.rs b/src/union_find.rs
+--- a/src/union_find.rs	2026-10-20 23:27:42
++++ b/src/union_find.rs	2026-10-20 23:30:01
+@@ -1,6 +1,8 @@
+ //! A union find data structure for caching definitional equalities
++#[allow(unused_imports)]
++use crate::prelude::*;
+ use crate::util::{new_fx_index_map, FxIndexMap};
+-use std::hash::Hash;
++use core::hash::Hash;
+ 
+ #[derive(Debug)]
+ pub(crate) struct UnionFind<A>
+diff -ruN --exclude=target --exclude=.git --exclude=Cargo.lock a/src/unique_hasher.rs b/src/unique_hasher.rs
+--- a/src/unique_hasher.rs	2026-10-20 23:27:42
++++ b/src/unique_hasher.rs	2026-10-20 23:30:01
+@@ -1,4 +1,6 @@
+ //! Hasher for unique values
++#[allow(unused_imports)]
++use crate::prelude::*;
+ pub struct UniqueHasherBuilder;
+ 
+ pub struct UniqueHasher {
+diff -ruN --exclude=target --exclude=.git --exclude=Cargo.lock a/src/util.rs b/src/util.rs
+--- a/src/util.rs	2026-10-20 23:27:42
++++ b/src/util.rs	2026-10-20 23:30:01
+@@ -1,3 +1,5 @@
++#[allow(unused_imports)]
++use crate::prelude::*;
+ use crate::env::{DeclarMap, Env, NotationMap, EnvLimit};
+ use crate::expr::{BinderStyle, Expr, FVarId};
+ use crate::level::Level;
+@@ -10,19 +12,14 @@
+ use num_traits::{ identities::Zero };
+ use num_integer::Integer;
+ use rustc_hash::FxHasher;
+-use std::borrow::Cow;
+-use std::collections::{HashMap, HashSet};
+-use std::error::Error;
+-use std::fs::OpenOptions;
+-use std::hash::BuildHasherDefault;
+-use std::io::BufReader;
+-use std::io::BufWriter;
+-use std::io::Write;
+-use std::marker::PhantomData;
+-use std::path::{Path, PathBuf};
+-use std::sync::Arc;
+-use std::ops::{ Shl, Shr };
+-use std::convert::TryFrom;
++use alloc::borrow::Cow;
++use hashbrown::{HashMap, HashSet};
++use core::error::Error;
++use core::hash::BuildHasherDefault;
++use core::marker::PhantomData;
++use alloc::sync::Arc;
++use core::ops::{ Shl, Shr };
++use core::convert::TryFrom;
+ use serde::Deserialize;
+ 
+ pub(crate) const fn default_true() -> bool { true }
+@@ -71,8 +68,8 @@
+     pub(crate) fn get_hash(&self) -> u64 { self.raw as u64 }
+ }
+ 
+-impl<A> std::hash::Hash for Ptr<A> {
+-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) { state.write_u64(self.raw as u64) }
++impl<A> core::hash::Hash for Ptr<A> {
++    fn hash<H: core::hash::Hasher>(&self, state: &mut H) { state.write_u64(self.raw as u64) }
+ }
+ 
+ #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+@@ -105,7 +102,7 @@
+ macro_rules! hash64 {
+     ( $( $x:expr ),* ) => {
+         {
+-            use std::hash::{ Hash, Hasher };
++            use core::hash::{ Hash, Hasher };
+             let mut hasher = rustc_hash::FxHasher::default();
+             $(
+                 ($x).hash(&mut hasher);
+@@ -881,7 +878,7 @@
+ #[derive(Debug, Clone, Deserialize)]
+ pub struct Config {
+     /// The path to the export file to be checked (if `none`, users must specify `use_stdin: true`)
+-    pub export_file_path: Option<PathBuf>,
++    pub export_file_path: Option<String>,
+ 
+     /// A value indicating whether the type checker should look to stdin to receive the export file.
+     #[serde(default)]
+@@ -923,7 +920,7 @@
+     pub pp_options: PpOptions,
+ 
+     /// Optionally, a path to write the pretty-printer output to.
+-    pub pp_output_path: Option<PathBuf>,
++    pub pp_output_path: Option<String>,
+ 
+     #[serde(default)]
+     pub pp_to_stdout: bool,
+@@ -942,76 +939,39 @@
+     pub unsafe_permit_all_axioms: bool,
+ }
+ 
+-impl TryFrom<&Path> for Config {
+-    type Error = Box<dyn Error>;
+-    fn try_from(p: &Path) -> Result<Config, Self::Error> {
+-        match OpenOptions::new().read(true).truncate(false).open(p) {
+-            Err(e) => Err(Box::from(format!("failed to open configuration file: {:?}", e))),
+-            Ok(config_file) => {
+-                let config = serde_json::from_reader::<_, Config>(BufReader::new(config_file))?;
+-                if config.export_file_path.is_none() && !config.use_stdin {
+-                    return Err(Box::from(format!("incompatible config options: must specify a path to an export file OR set `use_stdin: true`")))
+-                }
+-                if config.export_file_path.is_some() && config.use_stdin {
+-                    return Err(Box::from(format!("incompatible config options: if an export file path is given, `use_stdin` cannot be `true`")))
+-                }
+-                if config.unsafe_permit_all_axioms {
+-                    if config.unpermitted_axiom_hard_error {
+-                        return Err(Box::from(format!("incompatible config options: unsafe_permit_all_axioms && unpermitted_axioms_hard_error")))
+-                    }
+-                    if config.permitted_axioms.is_some() {
+-                        return Err(Box::from(format!("incompatible config options: unsafe_permit_all_axioms && nonempty permitted_axioms list")))
+-                    }
+-                }
+-                Ok(config)
+-            }
+-        }
+-    }
+-}
++/// Pretty-printer output is not supported without std; this type has no values.
++pub enum PpDestination {}
+ 
+-pub enum PpDestination {
+-    File(BufWriter<std::fs::File>),
+-    Stdout(BufWriter<std::io::Stdout>),
+-}
+-
+ impl PpDestination {
+-    pub(crate) fn stdout() -> Self { Self::Stdout(BufWriter::new(std::io::stdout())) }
+-    pub(crate) fn write_line(&mut self, s: String, sep: &str) -> Result<usize, Box<dyn Error>> {
+-        match self {
+-            PpDestination::File(f) => f.write(s.as_bytes()).and_then(|_| f.write(sep.as_bytes())).map_err(Box::from),
+-            PpDestination::Stdout(f) => f.write(s.as_bytes()).and_then(|_| f.write(sep.as_bytes())).map_err(Box::from),
+-        }
+-    }
++    pub(crate) fn write_line(&mut self, _s: String, _sep: &str) -> Result<usize, Box<dyn Error>> { match *self {} }
+ }
+ 
+ impl Config {
+-    pub fn get_pp_destination(&self) -> Result<Option<PpDestination>, Box<dyn Error>> {
+-        if let Some(pathbuf) = self.pp_output_path.as_ref() {
+-            match OpenOptions::new().write(true).truncate(false).open(pathbuf) {
+-                Ok(file) => Ok(Some(PpDestination::File(BufWriter::new(file)))),
+-                Err(e) => Err(Box::from(format!("Failed to open pretty printer destination file: {:?}", e))),
+-            }
+-        } else if self.pp_to_stdout {
+-            Ok(Some(PpDestination::stdout()))
+-        } else {
+-            Ok(None)
++    /// A configuration for checking an in-memory export: no file paths, no pretty printing.
++    pub fn in_memory(permitted_axioms: Vec<String>) -> Self {
++        Config {
++            export_file_path: None,
++            use_stdin: false,
++            permitted_axioms: Some(permitted_axioms),
++            unpermitted_axiom_hard_error: false,
++            num_threads: 1,
++            nat_extension: true,
++            string_extension: true,
++            pp_declars: None,
++            unknown_pp_declar_hard_error: false,
++            pp_options: PpOptions::default(),
++            pp_output_path: None,
++            pp_to_stdout: false,
++            print_success_message: false,
++            print_axioms: false,
++            unsafe_permit_all_axioms: false,
+         }
+     }
+ 
+-    // Returns the export file, and a list of strings representing the names of "skipped" axioms
+-    // (axioms which were in the export file, but not allowed by the execution config).
+-    pub fn to_export_file<'a>(self) -> Result<(ExportFile<'a>, Vec<String>), Box<dyn Error>> {
+-        if let Some(pathbuf) = self.export_file_path.as_ref() {
+-            match OpenOptions::new().read(true).truncate(false).open(pathbuf) {
+-                Ok(file) => crate::parser::parse_export_file(BufReader::new(file), self),
+-                Err(e) => Err(Box::from(format!("Failed to open export file: {:?}", e))),
+-            }
+-        } else if self.use_stdin {
+-            let reader = BufReader::new(std::io::stdin());
+-            crate::parser::parse_export_file(reader, self)
+-        } else {
+-            panic!("Configuration file must specify en export file path or \"use_stdin\": true")
+-        }
++    /// Parse the NDJSON export in `export`. Returns the export file, and the names of axioms
++    /// that were in the export but not permitted.
++    pub fn parse_export<'a>(self, export: &str) -> Result<(ExportFile<'a>, Vec<String>), Box<dyn Error>> {
++        crate::parser::parse_export_str(export, self)
+     }
+ }
+ 

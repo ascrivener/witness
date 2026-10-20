@@ -1,0 +1,13 @@
+[package]
+name = "host-check"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+nanoda_lib = { path = "../nanoda" }
+
+[profile.release]
+opt-level = 3
+
+# Standalone: not part of the witness workspace.
+[workspace]

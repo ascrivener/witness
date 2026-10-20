@@ -1,0 +1,5 @@
+nanoda/
+target/
+out/
+proofs/.lake/
+proofs/*.ndjson
