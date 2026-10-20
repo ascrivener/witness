@@ -38,7 +38,8 @@ uses them.
 
 ### Checks
 
-Check blobs are standard JAM programs (GP appendix A.7), without the metadata prefix. Refine
+Check blobs are JAM program blobs, as `cargo jam-build` writes them for an authorizer-type crate:
+conventional metadata, then a standard program (GP appendix A.7). Refine skips the metadata and
 builds the inner PVM's memory and registers exactly as `Y(p, args)` would
 ([service/src/check_vm.rs](service/src/check_vm.rs), [types/src/program.rs](types/src/program.rs)).
 The arguments are `E4(|params|) ++ params ++ x`, and `declare_check!` splits them back apart.
@@ -59,18 +60,21 @@ service/                   the JAM service: host-call glue around `rules` (jam-p
 check/                     `declare_check!` for writing checks as `fn(params, x) -> bool`
 checks/factor/             sample: x is a nontrivial factor of N (params: N)
 checks/blake2b-preimage/   sample: x is a Blake2b-256 preimage of H (params: H)
-tools/witness-build/       builds the service (.jam) and checks (.check)
 tools/witness-cli/         builds work-item payloads as hex, and reads state (`witness`)
 scripts/e2e.sh             end-to-end test on a local PolkaJam testnet
 ```
 
 ## Build and test
 
-Host tools build on stable Rust (1.86 or newer). PVM blobs also need `nightly-2025-05-10` with
-`rust-src`, which `witness-build` invokes itself:
+Everything builds on stable Rust (1.86 or newer). PVM blobs are built with Parity's
+[`cargo-jam-build`](https://crates.io/crates/cargo-jam-build), which needs `rust-src`:
 
 ```bash
-rustup toolchain install nightly-2025-05-10 -c rust-src
+rustup component add rust-src
+```
+
+```bash
+cargo install cargo-jam-build --version 0.1.29 --locked
 ```
 
 Unit tests cover the rules, the program layout and the checks:
@@ -79,19 +83,13 @@ Unit tests cover the rules, the program layout and the checks:
 cargo test
 ```
 
-Build the blobs into `out/`. The builder prints each blob's length and Blake2b-256 hash.
+Build the service and both checks into `out/` (as `.jam` files):
 
 ```bash
-cargo build && ./target/debug/witness-build service
+cargo jam-build --out-dir out
 ```
 
-```bash
-./target/debug/witness-build check checks/factor && ./target/debug/witness-build check checks/blake2b-preimage
-```
-
-`witness-build` does what `jam-pvm-build` does, but links with polkavm-linker 0.37. The latest
-`jam-pvm-build` on crates.io (0.1.28) links with 0.30, and PolkaJam 0.1.29 rejects its output
-("module validation failed").
+`witness hash --check out/factor-check.jam` prints the check hash a bounty on that blob uses.
 
 CI (`.github/workflows/ci.yml`) runs the unit tests and builds the blobs. The end-to-end script
 needs a PolkaJam release, so run it locally. It starts its own testnet, deploys, and checks the
@@ -109,7 +107,9 @@ fn check(params: &[u8], x: &[u8]) -> bool { /* ... */ }
 witness_check::declare_check!(check);
 ```
 
-The crate depends on `witness-check` and `polkavm-derive`. Checks get no host calls, so there is
+The crate depends on `witness-check` and `polkavm-derive`, and declares
+`[package.metadata.jam] type = "authorizer"` so `cargo jam-build` builds it with the single entry
+point a check needs. Checks get no host calls, so there is
 no allocator, logging or I/O. Constants and static tables are fine. The stack is 8 KiB unless
 the check raises it with `polkavm_derive::min_stack_size!`.
 
@@ -120,11 +120,11 @@ id `jamt create-service out/witness-service.jam 10000000000` produced:
 
 ```bash
 jamt item $SVC $($W mint --to alice --amount 1000)
-jamt item $SVC $($W create --service $SVC --maker alice --nonce 0 --check out/blake2b-preimage-check.check --params-blake2b "open sesame" --reward 500 --check-gas 10000000 --expiry $(( $(jamt inspect slot) + 100 )))
-jamt provide $SVC out/blake2b-preimage-check.check
+jamt item $SVC $($W create --service $SVC --maker alice --nonce 0 --check out/blake2b-preimage-check.jam --params-blake2b "open sesame" --reward 500 --check-gas 10000000 --expiry $(( $(jamt inspect slot) + 100 )))
+jamt provide $SVC out/blake2b-preimage-check.jam
 jamt item $SVC $($W mint --to bob --amount 100)
 jamt item $SVC $($W commit --service $SVC --bounty 0 --hunter bob --nonce 0 --salt 0x0b0b --witness-str "open sesame")
-jamt item $SVC $($W reveal --bounty 0 --check out/blake2b-preimage-check.check --params-blake2b "open sesame" --check-gas 10000000 --hunter bob --salt 0x0b0b --witness-str "open sesame")
+jamt item $SVC $($W reveal --bounty 0 --check out/blake2b-preimage-check.jam --params-blake2b "open sesame" --check-gas 10000000 --hunter bob --salt 0x0b0b --witness-str "open sesame")
 # after the claim window (30 slots by default)
 jamt item $SVC $($W finalize --bounty 0)
 ```

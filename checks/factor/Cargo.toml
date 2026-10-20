@@ -1,10 +1,14 @@
 [package]
 name = "factor-check"
-description = "Sample witness check: x is a nontrivial factor of a fixed N"
+description = "Sample witness check: x is a nontrivial factor of the bounty's N"
 edition.workspace = true
 version.workspace = true
 license.workspace = true
 authors.workspace = true
+
+# A check has one entry point at pc 0, which is the authorizer layout.
+[package.metadata.jam]
+type = "authorizer"
 
 [dependencies]
 witness-check.workspace = true

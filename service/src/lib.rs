@@ -66,7 +66,9 @@ impl jam_pvm_common::Service for Service {
 			match item {
 				AccumulateItem::WorkItem(record) => on_work_item(record, now),
 				// Points are not backed by service balance yet, so transfers are just kept.
-				AccumulateItem::Transfer(t) => debug!(target = "witness", "transfer of {}", t.amount),
+				AccumulateItem::Transfer(t) => {
+					debug!(target = "witness", "transfer of {}", t.amount);
+				},
 			}
 		}
 		None
@@ -88,7 +90,9 @@ fn on_work_item(record: WorkItemRecord, now: Slot) {
 		Ok(()) => {
 			accumulate::checkpoint();
 		},
-		Err(reason) => info!(target = "witness", "not applied: {reason}"),
+		Err(reason) => {
+			info!(target = "witness", "not applied: {reason}");
+		},
 	}
 }
 

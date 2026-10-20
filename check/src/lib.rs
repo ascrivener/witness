@@ -6,8 +6,9 @@
 //! witness_check::declare_check!(check);
 //! ```
 //!
-//! and build it with `witness-build check <crate-dir>`. `params` are the bounty's, so one check
-//! blob can serve any number of bounties; `x` is the hunter's witness.
+//! declare `type = "authorizer"` under `[package.metadata.jam]` in the crate's `Cargo.toml`, and
+//! build it with `cargo jam-build -p <crate>`. `params` are the bounty's, so one check blob can
+//! serve any number of bounties; `x` is the hunter's witness.
 //!
 //! The check runs in an inner PVM with no host calls: no allocator, no logging, no I/O. Any host
 //! call, panic, page fault or running out of gas counts as `false`.
@@ -34,8 +35,8 @@ pub fn split_args(args: &[u8]) -> Option<(&[u8], &[u8])> {
 #[macro_export]
 macro_rules! declare_check {
 	($check: path) => {
-		// The check layout has a single entry point at pc 0, as an authorizer does, and
-		// `witness-build` links it under the authorizer's export name. The name itself does not
+		// A check has a single entry point at pc 0, as an authorizer does, so check crates build
+		// as authorizers and export under the authorizer's name. The name itself does not
 		// survive linking.
 		// Only exported on the PVM; on the host it is dead code (as is `$check`, outside tests).
 		#[allow(dead_code)]

@@ -7,10 +7,9 @@ members = [
 	"service",
 	"checks/factor",
 	"checks/blake2b-preimage",
-	"tools/witness-build",
 	"tools/witness-cli",
 ]
-# The service only makes sense as a PVM blob; build it (and check blobs) with `witness-build`.
+# The service only makes sense as a PVM blob; build it (and check blobs) with `cargo jam-build`.
 # Check crates are default members so `cargo test` runs their host tests.
 default-members = [
 	"types",
@@ -18,7 +17,6 @@ default-members = [
 	"check",
 	"checks/factor",
 	"checks/blake2b-preimage",
-	"tools/witness-build",
 	"tools/witness-cli",
 ]
 
@@ -41,7 +39,7 @@ jam-pvm-common = { version = "0.1.29", default-features = false }
 jam-types = { version = "0.1.29", default-features = false }
 polkavm-derive = { version = "0.37.0", default-features = false }
 
-# `witness-build` builds PVM blobs with this profile, as `jam-pvm-build` does.
+# `cargo jam-build` builds PVM blobs with this profile.
 [profile.production]
 inherits = "release"
 lto = true

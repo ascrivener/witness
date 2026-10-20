@@ -7,11 +7,12 @@ use witness_types::{
 	program::{Access, StandardProgram, initialize},
 };
 
-/// Run `blob` (a standard program) on `args` (see `witness_types::check_args`) with at most `gas`.
+/// Run `blob` (a JAM program blob from `cargo jam-build`) on `args` (see
+/// `witness_types::check_args`) with at most `gas`.
 ///
 /// Returns `Ok(())` only if the check halted with 1 in the first return register.
 pub fn run_check(blob: &[u8], args: &[u8], gas: Gas) -> Result<(), Rejection> {
-	let program = StandardProgram::parse(blob).ok_or(Rejection::BadCheckBlob)?;
+	let program = StandardProgram::parse_jam_blob(blob).ok_or(Rejection::BadCheckBlob)?;
 	let layout = initialize(&program, args).ok_or(Rejection::BadCheckBlob)?;
 	if layout.total_pages() > MAX_CHECK_PAGES as u64 {
 		return Err(Rejection::BadCheckBlob);
