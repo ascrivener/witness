@@ -62,7 +62,8 @@ expect_still() {
 	expect "$@"
 }
 
-item() { "$JAMT" item "$SVC" "$1" >/dev/null; }
+# One item per slot: the testnet silently drops some packages submitted together in one slot.
+item() { "$JAMT" item "$SVC" "$1" >/dev/null; wait_slot $(( $(slot) + 1 )); }
 
 # Print the commitment for `witness commit ARGS...` (the CLI reports it on stderr).
 commitment_of() { $W commit "$@" 2>&1 >/dev/null | awk '{print $2}'; }
@@ -78,12 +79,13 @@ if [ -z "${JAM_RPC:-}" ]; then
 fi
 
 step "building"
+command -v cargo-jam-build >/dev/null || fail "needs cargo-jam-build: cargo install cargo-jam-build --version 0.1.29 --locked"
 cargo build -q
-./target/debug/witness-build service >/dev/null
-FACTOR_CHECK=out/factor-check.check
-PREIMAGE_CHECK=out/blake2b-preimage-check.check
-FACTOR_HASH=$(./target/debug/witness-build check checks/factor | awk '/hash/ {print $2}')
-PREIMAGE_HASH=$(./target/debug/witness-build check checks/blake2b-preimage | awk '/hash/ {print $2}')
+cargo jam-build --out-dir out >/dev/null
+FACTOR_CHECK=out/factor-check.jam
+PREIMAGE_CHECK=out/blake2b-preimage-check.jam
+FACTOR_HASH=$($W hash --check $FACTOR_CHECK)
+PREIMAGE_HASH=$($W hash --check $PREIMAGE_CHECK)
 
 step "deploying"
 before=$("$JAMT" list | wc -l)
@@ -91,8 +93,10 @@ before=$("$JAMT" list | wc -l)
 for _ in $(seq 1 40); do [ "$("$JAMT" list | wc -l)" -gt "$before" ] && break; sleep 3; done
 SVC=$((16#$("$JAMT" list | tail -1 | cut -f1)))
 echo "service $SVC"
-# Work packages anchored before the service existed cannot see its code.
-wait_slot $(( $(slot) + 2 ))
+# Work packages anchored before the service existed cannot see its code, and anchors trail the
+# best block, so wait until the service is in the finalized state, plus a margin.
+for _ in $(seq 1 40); do "$JAMT" inspect final service "$SVC" >/dev/null 2>&1 && break; sleep 3; done
+wait_slot $(( $(slot) + 3 ))
 
 step "minting"
 item "$($W mint --to alice --amount 1000)"

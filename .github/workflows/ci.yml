@@ -19,14 +19,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: |
-          rustup toolchain install stable --profile minimal
-          rustup toolchain install nightly-2025-05-10 --profile minimal -c rust-src
+          rustup toolchain install stable --profile minimal -c rust-src
+          cargo install cargo-jam-build --version 0.1.29 --locked
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --locked -p witness-build
-      - run: |
-          ./target/debug/witness-build service
-          ./target/debug/witness-build check checks/factor
-          ./target/debug/witness-build check checks/blake2b-preimage
+      - run: cargo jam-build --out-dir out -- --locked
       - uses: actions/upload-artifact@v4
         with:
           name: blobs

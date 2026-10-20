@@ -1,11 +1,12 @@
-//! The Gray Paper's standard program format and initialization (GP 0.7.1, appendix A.7, `Y`).
+//! The Gray Paper's standard program format and initialization (GP 0.8.0, appendix A.7, `Y`).
 //!
-//! Check blobs are standard programs with no metadata prefix:
-//! `E3(|o|) ++ E3(|w|) ++ E2(z) ++ E3(s) ++ o ++ w ++ E4(|c|) ++ c`.
-//! The service sets up an inner PVM to match `Y(p, a)` with the witness as `a`, so a check sees
-//! exactly the memory a service or authorizer would at entry.
+//! Check blobs are JAM program blobs, as `cargo jam-build` writes them: conventional metadata, then
+//! the standard program `E3(|o|) ++ E3(|w|) ++ E2(z) ++ E3(s) ++ o ++ w ++ E4(|c|) ++ c`.
+//! The service sets up an inner PVM to match `Y(p, a)` with the check arguments as `a`, so a check
+//! sees exactly the memory a service or authorizer would at entry.
 
 use alloc::vec::Vec;
+use codec::Decode;
 
 pub const PAGE_SIZE: u64 = 4096;
 /// `Z_Z`: the initialization zone size.
@@ -47,6 +48,13 @@ impl<'a> StandardProgram<'a> {
 		let code_len = take_le(&mut p, 4)?;
 		let code = take(&mut p, code_len as usize)?;
 		p.is_empty().then_some(Self { ro_data, rw_data, rw_padding_pages, stack_size, code })
+	}
+
+	/// Parse a JAM program blob as `cargo jam-build` writes it: `E(|m|) ++ m ++ p`, conventional
+	/// metadata `m` followed by the standard program `p`.
+	pub fn parse_jam_blob(mut blob: &'a [u8]) -> Option<Self> {
+		let metadata_len = codec::Compact::<u32>::decode(&mut blob).ok()?.0;
+		Self::parse(blob.get(metadata_len as usize..)?)
 	}
 
 	pub fn to_vec(&self) -> Vec<u8> {
@@ -166,6 +174,24 @@ mod tests {
 		let mut longer = bytes.clone();
 		longer.push(0);
 		assert_eq!(StandardProgram::parse(&longer), None);
+	}
+
+	#[test]
+	fn jam_blob_skips_metadata() {
+		use codec::Encode;
+		let p = StandardProgram {
+			ro_data: &[1],
+			rw_data: &[],
+			rw_padding_pages: 0,
+			stack_size: 4096,
+			code: &[0, 0, 2, 50, 0, 1],
+		};
+		let metadata = alloc::vec![7u8; 200];
+		let mut blob = codec::Compact(metadata.len() as u32).encode();
+		blob.extend_from_slice(&metadata);
+		blob.extend_from_slice(&p.to_vec());
+		assert_eq!(StandardProgram::parse_jam_blob(&blob), Some(p));
+		assert_eq!(StandardProgram::parse_jam_blob(&blob[..150]), None);
 	}
 
 	#[test]

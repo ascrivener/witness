@@ -15,6 +15,7 @@ const USAGE: &str = "\
 usage: witness <command> [--flag value ...]
 
   account   --seed S
+  hash      --check FILE          the check hash a bounty on FILE uses
   mint      --to S --amount N
   create    --service ID --maker S --nonce N --check FILE PARAMS --reward N --check-gas G
             --expiry SLOT [--claim-window SLOTS]
@@ -119,6 +120,10 @@ fn run(command: &str, f: &Flags) -> Result<(), String> {
 	let op = match command {
 		"account" => {
 			println!("0x{}", to_hex(&f.account("seed")?));
+			return Ok(());
+		},
+		"hash" => {
+			println!("0x{}", to_hex(&f.check()?.0));
 			return Ok(());
 		},
 		"decode" => {
