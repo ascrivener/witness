@@ -1,4 +1,4 @@
-//! Runs a bounty's check blob on a witness in an inner PVM, within the bounty's gas limit.
+//! Runs a bounty's check blob in an inner PVM, within the bounty's gas limit.
 
 use jam_pvm_common::{InvokeOutcome, imports, refine};
 use jam_types::{PageMode, PageOperation};
@@ -7,12 +7,12 @@ use witness_types::{
 	program::{Access, StandardProgram, initialize},
 };
 
-/// Run `blob` (a standard program) on `witness` with at most `gas`.
+/// Run `blob` (a standard program) on `args` (see `witness_types::check_args`) with at most `gas`.
 ///
 /// Returns `Ok(())` only if the check halted with 1 in the first return register.
-pub fn run_check(blob: &[u8], witness: &[u8], gas: Gas) -> Result<(), Rejection> {
+pub fn run_check(blob: &[u8], args: &[u8], gas: Gas) -> Result<(), Rejection> {
 	let program = StandardProgram::parse(blob).ok_or(Rejection::BadCheckBlob)?;
-	let layout = initialize(&program, witness).ok_or(Rejection::BadCheckBlob)?;
+	let layout = initialize(&program, args).ok_or(Rejection::BadCheckBlob)?;
 	if layout.total_pages() > MAX_CHECK_PAGES as u64 {
 		return Err(Rejection::BadCheckBlob);
 	}

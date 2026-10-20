@@ -2,14 +2,25 @@
 resolver = "2"
 members = [
 	"types",
+	"rules",
 	"check",
 	"service",
 	"checks/factor",
+	"checks/blake2b-preimage",
 	"tools/witness-build",
 	"tools/witness-cli",
 ]
-# The service and check crates only make sense as PVM blobs; build those with `witness-build`.
-default-members = ["types", "tools/witness-build", "tools/witness-cli"]
+# The service only makes sense as a PVM blob; build it (and check blobs) with `witness-build`.
+# Check crates are default members so `cargo test` runs their host tests.
+default-members = [
+	"types",
+	"rules",
+	"check",
+	"checks/factor",
+	"checks/blake2b-preimage",
+	"tools/witness-build",
+	"tools/witness-cli",
+]
 
 [workspace.package]
 edition = "2024"
@@ -20,6 +31,7 @@ authors = ["Adam Scrivener <adam@oneoff.world>"]
 [workspace.dependencies]
 witness-types = { path = "types", default-features = false }
 witness-check = { path = "check" }
+witness-rules = { path = "rules" }
 
 codec = { package = "jam-codec", version = "0.1.1", default-features = false, features = ["derive"] }
 blake2b_simd = { version = "1.0.5", default-features = false }

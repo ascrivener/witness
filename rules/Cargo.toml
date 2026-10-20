@@ -1,0 +1,15 @@
+[package]
+name = "witness-rules"
+description = "The witness service's refine and accumulate rules, independent of the PVM host"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+witness-types.workspace = true
+codec.workspace = true
+ed25519-dalek.workspace = true
+
+[dev-dependencies]
+witness-types = { workspace = true, features = ["std"] }
