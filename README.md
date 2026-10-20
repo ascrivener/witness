@@ -16,7 +16,7 @@ Prototype: rewards are points from a faucet (`Mint`), not tokens.
 | `Reveal` | look up the check blob; run `check(params, x)` in an inner PVM with the bounty's `check_gas` | the terms match and the commitment is older than this slot and made before expiry. The first valid reveal opens the claim window, and later ones replace the leader if their commitment is earlier. Refund the deposit |
 | `Finalize` | — | once the claim window has closed, pay the leader and release the check blob |
 | `Reclaim` | verify the maker's signature | if no one revealed by `expiry + REVEAL_GRACE`, refund the maker and release the check blob |
-| `Release` | — | delete a commitment that can no longer be revealed; its deposit stays forfeit |
+| `Release` | — | delete a commitment (named by bounty and hash) that can no longer be revealed; its deposit stays forfeit |
 
 ### Front-running
 
@@ -27,6 +27,10 @@ commitment wins. Ties within a slot go to the lower commitment hash. The remaini
 that the original reveal can't be kept off chain for the whole claim window (at least
 `MIN_CLAIM_WINDOW` = 30 slots, set per bounty), which would take sustained censorship across
 guarantor rotations. `rules/src/tests.rs` covers both cases.
+
+Commitments are stored per bounty. A commitment hash hides which bounty it is for, so with one
+global key someone could copy a hunter's in-flight commitment onto another bounty first and block
+the real one. Keyed by bounty, the copy sits apart where no reveal can ever match it.
 
 ### Spam
 
@@ -93,10 +97,19 @@ cargo jam-build --out-dir out
 
 CI (`.github/workflows/ci.yml`) runs the unit tests and builds the blobs. The end-to-end script
 needs a PolkaJam release, so run it locally. It starts its own testnet, deploys, and checks the
-chain state at each step, in about 8 minutes:
+chain state at each step. It has two modes:
+
+- **`--quick`** (about 3 minutes): one bounty, from create to a reveal. It exercises everything
+  that touches the node: deploy, refine and accumulate, the check-blob lookup and the inner PVM.
+  Run it before opening any PR that changes code.
+- **Full** (about 8 minutes, mostly waiting out claim windows): three bounties, adding the
+  front-run, finalize, reclaim, release and deposit checks. Run it when changing `service/`,
+  `check_vm`, the build setup, or anything about timing (windows, expiry, grace), and before a
+  release. The bounty logic itself is covered by the unit tests in `rules/`, so a rules-only
+  change needs only those plus `--quick`.
 
 ```bash
-POLKAJAM_DIR=../polkajam-releases/polkajam-v0.1.29-macos-aarch64 scripts/e2e.sh
+POLKAJAM_DIR=../polkajam-releases/polkajam-v0.1.29-macos-aarch64 scripts/e2e.sh --quick
 ```
 
 ## Writing a check
@@ -134,8 +147,8 @@ it. Refine reads the chain as of the package's anchor block, so an anchor that's
 with `CheckUnavailable`.
 
 To read state, get the raw value with `jamt inspect storage --raw $SVC $($W key --account bob)`,
-then decode it with `$W decode --account <value>`. The same works for `--bounty` and
-`--commitment`. The node logs (target `witness`) show each refine result, and why accumulate did
+then decode it with `$W decode --account <value>`. The same works for `--bounty`, and for
+commitments with `key --bounty ID --commitment HEX` and `decode --commitment <value>`. The node logs (target `witness`) show each refine result, and why accumulate did
 or did not apply it.
 
 ## Known gaps
