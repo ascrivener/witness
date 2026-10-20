@@ -1,17 +1,31 @@
 #!/usr/bin/env bash
 # End-to-end test against a local PolkaJam testnet (v0.1.29).
 #
-#   POLKAJAM_DIR=../polkajam-releases/polkajam-v0.1.29-macos-aarch64 scripts/e2e.sh
+#   POLKAJAM_DIR=../polkajam-releases/polkajam-v0.1.29-macos-aarch64 scripts/e2e.sh [--quick]
 #
 # Starts a testnet (unless JAM_RPC is set, in which case it uses that one), builds and deploys
-# the service and both sample checks, then runs:
+# the service and both sample checks.
+#
+# --quick (about 3 minutes, a third of it starting the testnet) then mints, creates one bounty,
+# provides its check blob, commits, and reveals a wrong and a right witness. That covers
+# everything that touches the node: deploy, refine and accumulate, the check-blob lookup and the
+# inner PVM. It skips the claim windows.
+#
+# The full run (about 8 minutes, mostly claim windows) instead does:
 #   bounty 0 (factor check):   Bob commits; Mallory copies x, commits later and reveals first;
 #                              Bob reveals inside the claim window and wins.
 #   bounty 1 (preimage check): Dave commits but never reveals; an early reclaim is refused, a
 #                              later one refunds Alice; Dave's dead commitment is released.
 #   bounty 2 (preimage check): shares bounty 1's check blob; Carol reveals and wins.
-# checking the chain state after each step. Takes about 8 minutes, mostly claim windows.
+# checking the chain state after each step.
 set -euo pipefail
+
+QUICK=
+case "${1:-}" in
+	--quick) QUICK=1 ;;
+	"") ;;
+	*) echo "usage: $0 [--quick]" >&2; exit 2 ;;
+esac
 
 cd "$(dirname "$0")/.."
 JAMT=${POLKAJAM_DIR:+$POLKAJAM_DIR/}jamt
@@ -97,6 +111,36 @@ echo "service $SVC"
 # best block, so wait until the service is in the finalized state, plus a margin.
 for _ in $(seq 1 40); do "$JAMT" inspect final service "$SVC" >/dev/null 2>&1 && break; sleep 3; done
 wait_slot $(( $(slot) + 3 ))
+
+if [ -n "$QUICK" ]; then
+	step "quick: mint, create, provide"
+	item "$($W mint --to alice --amount 1000)"
+	item "$($W mint --to bob --amount 100)"
+	expect "alice has 1000" 'balance: 1000, nonce: 0' account --account alice
+	expect "bob has 100" 'balance: 100, nonce: 0' account --account bob
+	item "$($W create --service "$SVC" --maker alice --nonce 0 --check $PREIMAGE_CHECK \
+		--params-blake2b "$SECRET" --reward 100 --check-gas $GAS --expiry $(( $(slot) + 100 )))"
+	expect "bounty 0 open" 'status: Open' bounty --bounty 0
+	expect "alice paid 100" 'balance: 900, nonce: 1' account --account alice
+	"$JAMT" provide "$SVC" $PREIMAGE_CHECK >/dev/null
+
+	step "quick: commit, reveal"
+	BOB_C=$(commitment_of --service "$SVC" --bounty 0 --hunter bob --nonce 0 --salt 0x0b0b --witness-str "$SECRET")
+	item "$($W commit --service "$SVC" --bounty 0 --hunter bob --nonce 0 --salt 0x0b0b --witness-str "$SECRET" 2>/dev/null)"
+	expect "bob committed, deposit taken" 'balance: 90, nonce: 1' account --account bob
+	wait_slot $(( $(slot) + 4 )) # MIN_COMMIT_AGE
+	# A witness the check rejects: the inner PVM runs and returns false, and nothing changes.
+	item "$($W reveal --bounty 0 --check $PREIMAGE_CHECK --params-blake2b "$SECRET" --check-gas $GAS \
+		--hunter bob --salt 0x0b0b --witness-str "wrong")"
+	expect_still "wrong witness changed nothing" 'status: Open' bounty --bounty 0
+	item "$($W reveal --bounty 0 --check $PREIMAGE_CHECK --params-blake2b "$SECRET" --check-gas $GAS \
+		--hunter bob --salt 0x0b0b --witness-str "$SECRET")"
+	expect "bob's reveal opens the window" 'Revealing' bounty --bounty 0
+	expect "bob's deposit refunded" 'balance: 100, nonce: 1' account --account bob
+	expect "bob's commitment consumed" '^none$' commitment --bounty 0 --commitment "$BOB_C"
+	printf '\nquick end-to-end checks passed (claim windows, finalize and reclaim not run)\n'
+	exit 0
+fi
 
 step "minting"
 item "$($W mint --to alice --amount 1000)"

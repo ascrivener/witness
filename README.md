@@ -97,10 +97,19 @@ cargo jam-build --out-dir out
 
 CI (`.github/workflows/ci.yml`) runs the unit tests and builds the blobs. The end-to-end script
 needs a PolkaJam release, so run it locally. It starts its own testnet, deploys, and checks the
-chain state at each step, in about 8 minutes:
+chain state at each step. It has two modes:
+
+- **`--quick`** (about 3 minutes): one bounty, from create to a reveal. It exercises everything
+  that touches the node: deploy, refine and accumulate, the check-blob lookup and the inner PVM.
+  Run it before opening any PR that changes code.
+- **Full** (about 8 minutes, mostly waiting out claim windows): three bounties, adding the
+  front-run, finalize, reclaim, release and deposit checks. Run it when changing `service/`,
+  `check_vm`, the build setup, or anything about timing (windows, expiry, grace), and before a
+  release. The bounty logic itself is covered by the unit tests in `rules/`, so a rules-only
+  change needs only those plus `--quick`.
 
 ```bash
-POLKAJAM_DIR=../polkajam-releases/polkajam-v0.1.29-macos-aarch64 scripts/e2e.sh
+POLKAJAM_DIR=../polkajam-releases/polkajam-v0.1.29-macos-aarch64 scripts/e2e.sh --quick
 ```
 
 ## Writing a check
