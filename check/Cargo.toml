@@ -1,0 +1,10 @@
+[package]
+name = "witness-check"
+description = "Helpers for writing witness check blobs: `fn check(x: &[u8]) -> bool` as a PVM program"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+polkavm-derive.workspace = true

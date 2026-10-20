@@ -1,0 +1,11 @@
+[package]
+name = "factor-check"
+description = "Sample witness check: x is a nontrivial factor of a fixed N"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+witness-check.workspace = true
+polkavm-derive.workspace = true

@@ -1,0 +1,16 @@
+[package]
+name = "witness-cli"
+description = "Builds witness work-item payloads (hex) for submission with `jamt item`"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "witness"
+path = "src/main.rs"
+
+[dependencies]
+witness-types = { workspace = true, features = ["std"] }
+codec = { workspace = true, features = ["std"] }
+ed25519-dalek = { workspace = true, features = ["std"] }

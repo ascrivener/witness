@@ -1,0 +1,15 @@
+[package]
+name = "witness-types"
+description = "Shared types for the witness bounty service: work-item payloads, refine outputs, state and check-blob layout"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+codec.workspace = true
+blake2b_simd.workspace = true
+
+[features]
+default = ["std"]
+std = ["codec/std", "blake2b_simd/std"]

@@ -1,0 +1,16 @@
+[package]
+name = "witness-build"
+description = "Builds the witness service and check blobs for the PVM"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+# Not `jam-pvm-builder`: its latest release (0.1.28) links with polkavm-linker 0.30, and PolkaJam
+# 0.1.29 rejects the result. These match the polkavm 0.37 that SDK 0.1.29 and the node use.
+[dependencies]
+polkavm-linker = "0.37.0"
+jam-program-blob-common = "0.1.29"
+codec = { workspace = true, features = ["std"] }
+serde_json = "1"
+witness-types.workspace = true

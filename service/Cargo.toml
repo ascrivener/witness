@@ -1,0 +1,18 @@
+[package]
+name = "witness-service"
+description = "Find-the-witness bounty market: makers post check(x) -> bool, hunters reveal x"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[package.metadata.jam]
+type = "service"
+
+[dependencies]
+witness-types.workspace = true
+codec.workspace = true
+ed25519-dalek.workspace = true
+jam-pvm-common = { workspace = true, features = ["service", "logging"] }
+jam-types.workspace = true
+polkavm-derive.workspace = true

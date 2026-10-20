@@ -1,0 +1,36 @@
+[workspace]
+resolver = "2"
+members = [
+	"types",
+	"check",
+	"service",
+	"checks/factor",
+	"tools/witness-build",
+	"tools/witness-cli",
+]
+# The service and check crates only make sense as PVM blobs; build those with `witness-build`.
+default-members = ["types", "tools/witness-build", "tools/witness-cli"]
+
+[workspace.package]
+edition = "2024"
+version = "0.1.0"
+license = "Apache-2.0"
+authors = ["Adam Scrivener <adam@oneoff.world>"]
+
+[workspace.dependencies]
+witness-types = { path = "types", default-features = false }
+witness-check = { path = "check" }
+
+codec = { package = "jam-codec", version = "0.1.1", default-features = false, features = ["derive"] }
+blake2b_simd = { version = "1.0.5", default-features = false }
+ed25519-dalek = { version = "2.1", default-features = false }
+
+jam-pvm-common = { version = "0.1.29", default-features = false }
+jam-types = { version = "0.1.29", default-features = false }
+polkavm-derive = { version = "0.37.0", default-features = false }
+
+# `witness-build` builds PVM blobs with this profile, as `jam-pvm-build` does.
+[profile.production]
+inherits = "release"
+lto = true
+codegen-units = 1

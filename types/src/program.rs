@@ -1,0 +1,214 @@
+//! The Gray Paper's standard program format and initialization (GP 0.7.1, appendix A.7, `Y`).
+//!
+//! Check blobs are standard programs with no metadata prefix:
+//! `E3(|o|) ++ E3(|w|) ++ E2(z) ++ E3(s) ++ o ++ w ++ E4(|c|) ++ c`.
+//! The service sets up an inner PVM to match `Y(p, a)` with the witness as `a`, so a check sees
+//! exactly the memory a service or authorizer would at entry.
+
+use alloc::vec::Vec;
+
+pub const PAGE_SIZE: u64 = 4096;
+/// `Z_Z`: the initialization zone size.
+pub const ZONE_SIZE: u64 = 1 << 16;
+/// `Z_I`: the initialization input (argument) size.
+pub const INPUT_SIZE: u64 = 1 << 24;
+
+/// A decoded standard program blob.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StandardProgram<'a> {
+	pub ro_data: &'a [u8],
+	pub rw_data: &'a [u8],
+	pub rw_padding_pages: u16,
+	pub stack_size: u32,
+	/// Instructions, opcode bitmask and jump table, as accepted by the `machine` host call.
+	pub code: &'a [u8],
+}
+
+fn take<'a>(bytes: &mut &'a [u8], n: usize) -> Option<&'a [u8]> {
+	let head = bytes.get(..n)?;
+	*bytes = &bytes[n..];
+	Some(head)
+}
+
+fn take_le(bytes: &mut &[u8], n: usize) -> Option<u32> {
+	let mut buf = [0u8; 4];
+	buf[..n].copy_from_slice(take(bytes, n)?);
+	Some(u32::from_le_bytes(buf))
+}
+
+impl<'a> StandardProgram<'a> {
+	pub fn parse(mut p: &'a [u8]) -> Option<Self> {
+		let ro_len = take_le(&mut p, 3)?;
+		let rw_len = take_le(&mut p, 3)?;
+		let rw_padding_pages = take_le(&mut p, 2)? as u16;
+		let stack_size = take_le(&mut p, 3)?;
+		let ro_data = take(&mut p, ro_len as usize)?;
+		let rw_data = take(&mut p, rw_len as usize)?;
+		let code_len = take_le(&mut p, 4)?;
+		let code = take(&mut p, code_len as usize)?;
+		p.is_empty().then_some(Self { ro_data, rw_data, rw_padding_pages, stack_size, code })
+	}
+
+	pub fn to_vec(&self) -> Vec<u8> {
+		let mut out = Vec::new();
+		out.extend_from_slice(&(self.ro_data.len() as u32).to_le_bytes()[..3]);
+		out.extend_from_slice(&(self.rw_data.len() as u32).to_le_bytes()[..3]);
+		out.extend_from_slice(&self.rw_padding_pages.to_le_bytes());
+		out.extend_from_slice(&self.stack_size.to_le_bytes()[..3]);
+		out.extend_from_slice(self.ro_data);
+		out.extend_from_slice(self.rw_data);
+		out.extend_from_slice(&(self.code.len() as u32).to_le_bytes());
+		out.extend_from_slice(self.code);
+		out
+	}
+}
+
+fn page_round(x: u64) -> u64 {
+	x.next_multiple_of(PAGE_SIZE)
+}
+
+fn zone_round(x: u64) -> u64 {
+	x.next_multiple_of(ZONE_SIZE)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Access {
+	ReadOnly,
+	ReadWrite,
+}
+
+/// A run of pages to allocate (zeroed), fill from `data` and leave with `access`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Region<'a> {
+	pub first_page: u64,
+	pub pages: u64,
+	pub data: &'a [u8],
+	pub access: Access,
+}
+
+/// The initial state of a program per `Y(p, a)`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Layout<'a> {
+	pub code: &'a [u8],
+	/// Read-only data, read-write data (incl. heap padding), stack, arguments. Empty regions are
+	/// omitted.
+	pub regions: Vec<Region<'a>>,
+	pub registers: [u64; 13],
+}
+
+impl Layout<'_> {
+	pub fn total_pages(&self) -> u64 {
+		self.regions.iter().map(|r| r.pages).sum()
+	}
+}
+
+/// `Y(p, a)`: the memory and registers a standard program starts with, given arguments `args`.
+pub fn initialize<'a>(program: &StandardProgram<'a>, args: &'a [u8]) -> Option<Layout<'a>> {
+	let ro_len = program.ro_data.len() as u64;
+	let rw_len = program.rw_data.len() as u64;
+	let padding = program.rw_padding_pages as u64 * PAGE_SIZE;
+	let stack = program.stack_size as u64;
+	let args_len = args.len() as u64;
+	if args_len > INPUT_SIZE ||
+		5 * ZONE_SIZE + zone_round(ro_len) + zone_round(rw_len + padding) + zone_round(stack) + INPUT_SIZE >
+			1 << 32
+	{
+		return None;
+	}
+
+	let region = |start: u64, len: u64, data, access| Region {
+		first_page: start / PAGE_SIZE,
+		pages: page_round(len) / PAGE_SIZE,
+		data,
+		access,
+	};
+	let stack_top = (1 << 32) - 2 * ZONE_SIZE - INPUT_SIZE;
+	let args_start = (1 << 32) - ZONE_SIZE - INPUT_SIZE;
+	let regions = [
+		region(ZONE_SIZE, ro_len, program.ro_data, Access::ReadOnly),
+		region(
+			2 * ZONE_SIZE + zone_round(ro_len),
+			page_round(rw_len) + padding,
+			program.rw_data,
+			Access::ReadWrite,
+		),
+		region(stack_top - page_round(stack), stack, &[][..], Access::ReadWrite),
+		region(args_start, args_len, args, Access::ReadOnly),
+	]
+	.into_iter()
+	.filter(|r| r.pages > 0)
+	.collect();
+
+	let mut registers = [0; 13];
+	registers[0] = (1 << 32) - (1 << 16);
+	registers[1] = stack_top;
+	registers[7] = args_start;
+	registers[8] = args_len;
+	Some(Layout { code: program.code, regions, registers })
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn round_trip() {
+		let p = StandardProgram {
+			ro_data: &[1, 2, 3],
+			rw_data: &[4, 5],
+			rw_padding_pages: 7,
+			stack_size: 8192,
+			code: &[0, 0, 2, 50, 0, 1],
+		};
+		let bytes = p.to_vec();
+		assert_eq!(StandardProgram::parse(&bytes), Some(p));
+		assert_eq!(StandardProgram::parse(&bytes[..bytes.len() - 1]), None);
+		let mut longer = bytes.clone();
+		longer.push(0);
+		assert_eq!(StandardProgram::parse(&longer), None);
+	}
+
+	#[test]
+	fn layout_matches_gp() {
+		let ro = [9u8; 5000];
+		let p = StandardProgram {
+			ro_data: &ro,
+			rw_data: &[1],
+			rw_padding_pages: 2,
+			stack_size: 4097,
+			code: &[],
+		};
+		let args = [7u8; 10];
+		let l = initialize(&p, &args).unwrap();
+		assert_eq!(l.regions.len(), 4);
+		// RO at Z_Z, two pages.
+		assert_eq!((l.regions[0].first_page, l.regions[0].pages), (16, 2));
+		// RW at 2 Z_Z + Q(5000) = 3 Z_Z, one data page plus two padding pages.
+		assert_eq!((l.regions[1].first_page, l.regions[1].pages), (3 * 16, 3));
+		// Stack: two pages ending at 2^32 - 2 Z_Z - Z_I.
+		let stack_top_page = ((1u64 << 32) - 2 * ZONE_SIZE - INPUT_SIZE) / PAGE_SIZE;
+		assert_eq!((l.regions[2].first_page, l.regions[2].pages), (stack_top_page - 2, 2));
+		// Args at 2^32 - Z_Z - Z_I.
+		assert_eq!(l.regions[3].first_page, ((1u64 << 32) - ZONE_SIZE - INPUT_SIZE) / PAGE_SIZE);
+		assert_eq!(l.registers[0], 0xffff_0000);
+		assert_eq!(l.registers[7], (1 << 32) - ZONE_SIZE - INPUT_SIZE);
+		assert_eq!(l.registers[8], 10);
+		assert_eq!(l.total_pages(), 2 + 3 + 2 + 1);
+	}
+
+	#[test]
+	fn rejects_oversized() {
+		let p = StandardProgram {
+			ro_data: &[],
+			rw_data: &[],
+			rw_padding_pages: u16::MAX,
+			stack_size: (1 << 24) - 1,
+			code: &[],
+		};
+		// The largest heap and stack the format can express still fit in 32 bits...
+		assert!(initialize(&p, &[]).is_some());
+		// ...but arguments may not exceed Z_I.
+		let too_long = alloc::vec![0u8; INPUT_SIZE as usize + 1];
+		assert!(initialize(&p, &too_long).is_none());
+	}
+}
