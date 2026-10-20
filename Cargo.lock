@@ -49,6 +49,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "blake2b-preimage-check"
+version = "0.1.0"
+dependencies = [
+ "blake2b_simd",
+ "polkavm-derive",
+ "witness-check",
+]
+
+[[package]]
 name = "blake2b_simd"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -995,6 +1004,7 @@ name = "witness-check"
 version = "0.1.0"
 dependencies = [
  "polkavm-derive",
+ "witness-types",
 ]
 
 [[package]]
@@ -1007,14 +1017,23 @@ dependencies = [
 ]
 
 [[package]]
-name = "witness-service"
+name = "witness-rules"
 version = "0.1.0"
 dependencies = [
  "ed25519-dalek",
  "jam-codec",
+ "witness-types",
+]
+
+[[package]]
+name = "witness-service"
+version = "0.1.0"
+dependencies = [
+ "jam-codec",
  "jam-pvm-common",
  "jam-types",
  "polkavm-derive",
+ "witness-rules",
  "witness-types",
 ]
 

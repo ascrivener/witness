@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install stable --profile minimal
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --locked
+
+  blobs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          rustup toolchain install stable --profile minimal
+          rustup toolchain install nightly-2025-05-10 --profile minimal -c rust-src
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --locked -p witness-build
+      - run: |
+          ./target/debug/witness-build service
+          ./target/debug/witness-build check checks/factor
+          ./target/debug/witness-build check checks/blake2b-preimage
+      - uses: actions/upload-artifact@v4
+        with:
+          name: blobs
+          path: out/

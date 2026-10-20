@@ -1,0 +1,12 @@
+[package]
+name = "blake2b-preimage-check"
+description = "Sample witness check: x is a Blake2b-256 preimage of the bounty's hash"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+witness-check.workspace = true
+polkavm-derive.workspace = true
+blake2b_simd.workspace = true
