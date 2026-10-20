@@ -23,8 +23,8 @@ usage: witness <command> [--flag value ...]
   reveal    --bounty ID --check FILE PARAMS --check-gas G --hunter S --salt HEX WITNESS
   finalize  --bounty ID
   reclaim   --service ID --bounty ID --maker S --nonce N
-  release   --commitment HEX
-  key       (--account S | --bounty ID | --commitment HEX | --check-refs HASH | --next)
+  release   --bounty ID --commitment HEX
+  key       (--account S | --bounty ID [--commitment HEX] | --check-refs HASH | --next)
             storage key, for `jamt inspect storage <service> <key>`
   decode    (--output HEX | --account HEX | --bounty HEX | --commitment HEX)
             decode a refine output or a stored value
@@ -142,10 +142,10 @@ fn run(command: &str, f: &Flags) -> Result<(), String> {
 		"key" => {
 			let key = if f.has("account") {
 				StorageKey::Account(f.account("account")?)
+			} else if f.has("commitment") {
+				StorageKey::Commitment(f.num("bounty")?, f.hash("commitment")?)
 			} else if f.has("bounty") {
 				StorageKey::Bounty(f.num("bounty")?)
-			} else if f.has("commitment") {
-				StorageKey::Commitment(f.hash("commitment")?)
 			} else if f.has("check-refs") {
 				StorageKey::CheckRefs(f.hash("check-refs")?)
 			} else {
@@ -214,7 +214,7 @@ fn run(command: &str, f: &Flags) -> Result<(), String> {
 			let signature = maker.sign(&message).to_bytes();
 			Op::Reclaim { bounty_id, maker: maker_id, nonce, signature }
 		},
-		"release" => Op::Release { commitment: f.hash("commitment")? },
+		"release" => Op::Release { bounty_id: f.num("bounty")?, commitment: f.hash("commitment")? },
 		_ => return Err(format!("unknown command {command}")),
 	};
 	println!("0x{}", to_hex(&op.encode()));

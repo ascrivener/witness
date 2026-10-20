@@ -113,7 +113,7 @@ pub enum Op {
 	Reclaim { bounty_id: BountyId, maker: AccountId, nonce: u64, signature: Signature },
 	/// Delete a commitment that can no longer be revealed. Anyone may send it; the deposit is
 	/// already forfeit.
-	Release { commitment: Hash },
+	Release { bounty_id: BountyId, commitment: Hash },
 }
 
 /// Why a check did not return true.
@@ -161,7 +161,7 @@ pub enum Verified {
 	},
 	Finalize { bounty_id: BountyId },
 	Reclaim { bounty_id: BountyId, maker: AccountId, nonce: u64 },
-	Release { commitment: Hash },
+	Release { bounty_id: BountyId, commitment: Hash },
 	Rejected(Rejection),
 }
 
@@ -206,7 +206,6 @@ pub struct Bounty {
 
 #[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
 pub struct CommitRecord {
-	pub bounty_id: BountyId,
 	/// The slot at which the commitment was accumulated.
 	pub slot: Slot,
 	pub committer: AccountId,
@@ -218,7 +217,9 @@ pub struct CommitRecord {
 pub enum StorageKey {
 	Account(AccountId),
 	Bounty(BountyId),
-	Commitment(Hash),
+	/// Keyed by bounty as well as hash: the hash hides which bounty it is for, so a global key
+	/// would let anyone copy a commitment onto another bounty first and block the real one.
+	Commitment(BountyId, Hash),
 	NextBountyId,
 	/// How many unfinished bounties use a check blob; the blob is forgotten when it reaches zero.
 	CheckRefs(Hash),

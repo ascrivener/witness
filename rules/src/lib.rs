@@ -109,7 +109,7 @@ pub fn refine(env: &impl RefineEnv, service_id: u32, op: Op) -> Verified {
 			}
 			Verified::Reclaim { bounty_id, maker, nonce }
 		},
-		Op::Release { commitment } => Verified::Release { commitment },
+		Op::Release { bounty_id, commitment } => Verified::Release { bounty_id, commitment },
 	}
 }
 
@@ -227,12 +227,12 @@ pub fn accumulate(state: &impl State, verified: Verified, now: Slot) -> Result<E
 			if !revealable(&bounty, now) || now >= bounty.terms.expiry {
 				return Err("bounty not accepting commitments");
 			}
-			let key = StorageKey::Commitment(commitment);
+			let key = StorageKey::Commitment(bounty_id, commitment);
 			if tx.get::<CommitRecord>(&key).is_some() {
 				return Err("already committed");
 			}
 			tx.charge(&committer, nonce, COMMIT_DEPOSIT)?;
-			let record = CommitRecord { bounty_id, slot: now, committer, deposit: COMMIT_DEPOSIT };
+			let record = CommitRecord { slot: now, committer, deposit: COMMIT_DEPOSIT };
 			tx.set(&key, &record);
 		},
 		Verified::Reveal {
@@ -254,11 +254,8 @@ pub fn accumulate(state: &impl State, verified: Verified, now: Slot) -> Result<E
 			if !revealable(&bounty, now) {
 				return Err("reveal window closed");
 			}
-			let key = StorageKey::Commitment(commitment);
+			let key = StorageKey::Commitment(bounty_id, commitment);
 			let record: CommitRecord = tx.get(&key).ok_or("no commitment")?;
-			if record.bounty_id != bounty_id {
-				return Err("commitment is for another bounty");
-			}
 			if record.slot.saturating_add(MIN_COMMIT_AGE) > now {
 				return Err("commitment too recent");
 			}
@@ -314,10 +311,10 @@ pub fn accumulate(state: &impl State, verified: Verified, now: Slot) -> Result<E
 			bounty.status = BountyStatus::Reclaimed;
 			tx.set(&StorageKey::Bounty(bounty_id), &bounty);
 		},
-		Verified::Release { commitment } => {
-			let key = StorageKey::Commitment(commitment);
-			let record: CommitRecord = tx.get(&key).ok_or("no commitment")?;
-			if let Ok(bounty) = tx.bounty(record.bounty_id) {
+		Verified::Release { bounty_id, commitment } => {
+			let key = StorageKey::Commitment(bounty_id, commitment);
+			tx.get::<CommitRecord>(&key).ok_or("no commitment")?;
+			if let Ok(bounty) = tx.bounty(bounty_id) {
 				if revealable(&bounty, now) {
 					return Err("commitment can still be revealed");
 				}

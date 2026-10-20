@@ -115,11 +115,16 @@ impl Chain {
 	/// `committer` commits to witness `w` for `hunter` on bounty `b`; returns the commitment.
 	fn commit_for(&mut self, b: BountyId, committer: u8, hunter: u8, w: &[u8]) -> Result<Hash> {
 		let c = commitment(b, w, &id(hunter), &[hunter; 32]);
+		self.commit_hash(b, committer, c)?;
+		Ok(c)
+	}
+
+	/// `committer` posts commitment hash `c` on bounty `b`, whatever it commits to.
+	fn commit_hash(&mut self, b: BountyId, committer: u8, c: Hash) -> Result<()> {
 		let nonce = self.account(committer).nonce;
 		let msg = witness_types::commit_message(SERVICE, b, &id(committer), nonce, &c);
 		let signature = key(committer).sign(&msg).to_bytes();
-		self.submit(Op::Commit { bounty_id: b, committer: id(committer), nonce, commitment: c, signature })?;
-		Ok(c)
+		self.submit(Op::Commit { bounty_id: b, committer: id(committer), nonce, commitment: c, signature })
 	}
 
 	fn commit(&mut self, b: BountyId, hunter: u8, w: &[u8]) -> Result<Hash> {
@@ -193,6 +198,28 @@ fn happy_path() {
 }
 
 #[test]
+fn copied_commitment_on_another_bounty_does_not_block_the_real_one() {
+	let mut c = setup();
+	let terms = c.terms();
+	c.create(terms).unwrap(); // bounty 1
+	// Mallory sees Bob's commitment for bounty 0 in flight and posts the same hash on bounty 1
+	// first. The hash hides which bounty it is for, so nothing can tell it does not belong there.
+	let bob_c = commitment(0, b"x", &id(BOB), &[BOB; 32]);
+	c.commit_hash(1, MALLORY, bob_c).unwrap();
+	// Bob's own commitment on bounty 0 still goes through, and he still wins.
+	assert_eq!(c.commit(0, BOB, b"x"), Ok(bob_c));
+	c.advance(MIN_COMMIT_AGE);
+	c.reveal(0, BOB, b"x").unwrap();
+	c.advance(MIN_CLAIM_WINDOW);
+	c.finalize(0).unwrap();
+	assert_eq!(c.winner(0), id(BOB));
+	// Mallory's copy sits apart under bounty 1, where no reveal can ever match it (a reveal on
+	// bounty 1 hashes bounty 1 in), until someone releases it.
+	assert!(c.get_typed::<CommitRecord>(&StorageKey::Commitment(1, bob_c)).is_some());
+	assert!(c.get_typed::<CommitRecord>(&StorageKey::Commitment(0, bob_c)).is_none(), "Bob's was consumed");
+}
+
+#[test]
 fn copier_loses_to_earlier_commitment_even_if_revealing_first() {
 	let mut c = setup();
 	c.commit(0, BOB, b"x").unwrap();
@@ -249,7 +276,7 @@ fn reveal_rules() {
 	assert_eq!(c.reveal(0, BOB, b"x"), Err("no commitment"));
 	c.commit(1, BOB, b"x").unwrap();
 	let c0 = commitment(0, b"x", &id(BOB), &[BOB; 32]);
-	assert!(c.get_typed::<CommitRecord>(&StorageKey::Commitment(c0)).is_none());
+	assert!(c.get_typed::<CommitRecord>(&StorageKey::Commitment(0, c0)).is_none());
 	assert_eq!(c.reveal(1, BOB, b"x"), Err("commitment too recent"));
 
 	// A witness the check rejects never reaches the state rules.
@@ -370,16 +397,18 @@ fn reclaim_rules() {
 fn release_rules() {
 	let mut c = setup();
 	let unrevealed = c.commit(0, CAROL, b"x").unwrap();
-	assert_eq!(c.submit(Op::Release { commitment: unrevealed }), Err("commitment can still be revealed"));
+	let release = Op::Release { bounty_id: 0, commitment: unrevealed };
+	assert_eq!(c.submit(release.clone()), Err("commitment can still be revealed"));
 	c.commit(0, BOB, b"x").unwrap();
 	c.advance(MIN_COMMIT_AGE);
 	c.reveal(0, BOB, b"x").unwrap();
 	c.advance(MIN_CLAIM_WINDOW);
 	// The window has closed, so Carol's commitment is dead weight; anyone may delete it.
-	c.submit(Op::Release { commitment: unrevealed }).unwrap();
-	assert!(c.get_typed::<CommitRecord>(&StorageKey::Commitment(unrevealed)).is_none());
+	assert_eq!(c.submit(Op::Release { bounty_id: 1, commitment: unrevealed }), Err("no commitment"));
+	c.submit(release.clone()).unwrap();
+	assert!(c.get_typed::<CommitRecord>(&StorageKey::Commitment(0, unrevealed)).is_none());
 	assert_eq!(c.account(CAROL).balance, 100 - COMMIT_DEPOSIT, "forfeit deposit stays forfeit");
-	assert_eq!(c.submit(Op::Release { commitment: unrevealed }), Err("no commitment"));
+	assert_eq!(c.submit(release), Err("no commitment"));
 }
 
 #[test]
@@ -405,7 +434,7 @@ fn rejected_ops_write_nothing() {
 	let c = setup();
 	for v in [
 		Verified::Finalize { bounty_id: 0 },
-		Verified::Release { commitment: [0; 32] },
+		Verified::Release { bounty_id: 0, commitment: [0; 32] },
 		Verified::Rejected(Rejection::BadPayload),
 	] {
 		assert!(accumulate(&c, v, c.now).is_err());

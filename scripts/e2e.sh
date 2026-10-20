@@ -150,12 +150,12 @@ expect "mallory's deposit refunded" 'balance: 100, nonce: 1' account --account m
 item "$($W reveal --bounty 0 --check $FACTOR_CHECK --params-u128 $N --check-gas $GAS \
 	--hunter bob --salt 0x0b0b --witness-u64 $FACTOR)"
 expect "bob's deposit refunded" 'balance: 100, nonce: 1' account --account bob
-expect "bob's commitment consumed" '^none$' commitment --commitment "$BOB_C"
+expect "bob's commitment consumed" '^none$' commitment --bounty 0 --commitment "$BOB_C"
 expect "carol's wrong witness changed nothing" 'Open' bounty --bounty 2
 item "$($W reveal --bounty 2 --check $PREIMAGE_CHECK --params-blake2b "$SECRET" --check-gas $GAS \
 	--hunter carol --salt 0xca --witness-str "$SECRET")"
 expect "carol's reveal opens bounty 2's window" 'Revealing' bounty --bounty 2
-expect "carol's commitment consumed" '^none$' commitment --commitment "$CAROL_C"
+expect "carol's commitment consumed" '^none$' commitment --bounty 2 --commitment "$CAROL_C"
 
 step "finalizing too early"
 item "$($W finalize --bounty 0)"
@@ -180,8 +180,8 @@ expect "alice refunded bounty 1" 'balance: 300, nonce: 4' account --account alic
 [ -z "$(storage --check-refs "$FACTOR_HASH")" ] || fail "factor check still referenced"
 [ -z "$(storage --check-refs "$PREIMAGE_HASH")" ] || fail "preimage check still referenced"
 echo "ok: both check blobs released"
-item "$($W release --commitment "$DAVE_C")"
-expect "dave's dead commitment deleted" '^none$' commitment --commitment "$DAVE_C"
+item "$($W release --bounty 1 --commitment "$DAVE_C")"
+expect "dave's dead commitment deleted" '^none$' commitment --bounty 1 --commitment "$DAVE_C"
 expect "dave's deposit forfeit" 'balance: 90, nonce: 1' account --account dave
 
 printf '\nall end-to-end checks passed\n'
