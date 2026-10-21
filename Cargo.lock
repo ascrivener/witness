@@ -576,6 +576,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "sorted-words-check"
+version = "0.1.0"
+dependencies = [
+ "blake2b_simd",
+ "polkavm-derive",
+ "witness-check",
+ "witness-types",
+]
+
+[[package]]
 name = "spki"
 version = "0.7.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"

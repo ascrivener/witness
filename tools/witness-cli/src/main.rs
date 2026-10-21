@@ -7,8 +7,8 @@ use codec::{Decode, Encode};
 use ed25519_dalek::{Signer, SigningKey};
 use std::{collections::HashMap, process::ExitCode};
 use witness_types::{
-	Account, AccountId, BlobRef, Bounty, BountyTerms, CommitRecord, Hash, MIN_CLAIM_WINDOW, Op,
-	StorageKey, Verified, blake2b256,
+	Account, AccountId, Attestation, AttestationClaim, Bounty, BountyTerms, CommitRecord, Hash,
+	MIN_CLAIM_WINDOW, Op, Preimage, RevealBlob, StorageKey, Verified, blake2b256,
 };
 
 const USAGE: &str = "\
@@ -25,14 +25,20 @@ usage: witness <command> [--flag value ...]
   finalize  --bounty ID
   reclaim   --service ID --bounty ID --maker S --nonce N
   release   --bounty ID --commitment HEX
-  key       (--account S | --bounty ID [--commitment HEX] | --refs HASH | --next)
+  pin       --service ID --owner S --nonce N --blob FILE
+  attest    --service ID --attester S --nonce N --check FILE [PARAMS] --subject FILE
+            [--parents CLAIMS] --check-gas G --claim-out CLAIM
+            writes the claim to CLAIM, for citing the attestation later
+  key       (--account S | --bounty ID [--commitment HEX] | --refs HASH | --attestation CLAIM
+            | --next)
             storage key, for `jamt inspect storage <service> <key>`
-  decode    (--output HEX | --account HEX | --bounty HEX | --commitment HEX)
+  decode    (--output HEX | --account HEX | --bounty HEX | --commitment HEX | --attestation HEX)
             decode a refine output or a stored value
 
 PARAMS:  --params HEX | --params-u128 N | --params-blake2b STRING (the hash of STRING)
 WITNESS: --witness HEX | --witness-u64 N | --witness-str STRING
-FILES:   comma-separated paths of the bounty's extra blobs, in order
+FILES:   comma-separated, in order: paths of plain blobs, or claim:CLAIM for an attested one
+CLAIMS:  comma-separated paths of claim files that `attest --claim-out` wrote
 
 Seeds S are any string; hex may have a 0x prefix. A salt of other than 32 bytes is hashed to 32.
 The committer pays the commit deposit and signs; it defaults to the hunter.";
@@ -111,17 +117,35 @@ impl Flags {
 		let blob = file_ref(self.str("check")?)?;
 		Ok((blob.hash, blob.len))
 	}
-	fn blobs(&self) -> Result<Vec<BlobRef>, String> {
-		if !self.has("blobs") {
+	/// A comma-separated list flag, empty if absent.
+	fn list(&self, name: &str) -> Result<Vec<&str>, String> {
+		if !self.has(name) {
 			return Ok(vec![]);
 		}
-		self.str("blobs")?.split(',').map(file_ref).collect()
+		Ok(self.str(name)?.split(',').collect())
+	}
+	fn blobs(&self) -> Result<Vec<RevealBlob>, String> {
+		self.list("blobs")?
+			.into_iter()
+			.map(|blob| match blob.strip_prefix("claim:") {
+				Some(path) => read_claim(path).map(RevealBlob::Attested),
+				None => file_ref(blob).map(RevealBlob::Blob),
+			})
+			.collect()
 	}
 }
 
-fn file_ref(path: &str) -> Result<BlobRef, String> {
-	let blob = std::fs::read(path).map_err(|e| format!("cannot read {path}: {e}"))?;
-	Ok(BlobRef { hash: blake2b256(&blob), len: blob.len() as u32 })
+fn read(path: &str) -> Result<Vec<u8>, String> {
+	std::fs::read(path).map_err(|e| format!("cannot read {path}: {e}"))
+}
+
+fn file_ref(path: &str) -> Result<Preimage, String> {
+	let blob = read(path)?;
+	Ok(Preimage { hash: blake2b256(&blob), len: blob.len() as u32 })
+}
+
+fn read_claim(path: &str) -> Result<AttestationClaim, String> {
+	AttestationClaim::decode(&mut &read(path)?[..]).map_err(|e| format!("{path} is not a claim: {e}"))
 }
 
 fn decode<T: Decode + std::fmt::Debug>(bytes: &[u8]) -> Result<String, String> {
@@ -145,6 +169,8 @@ fn run(command: &str, f: &Flags) -> Result<(), String> {
 				decode::<Bounty>(&f.hex("bounty")?)
 			} else if f.has("commitment") {
 				decode::<CommitRecord>(&f.hex("commitment")?)
+			} else if f.has("attestation") {
+				decode::<Attestation>(&f.hex("attestation")?)
 			} else {
 				decode::<Verified>(&f.hex("output")?)
 			}?;
@@ -160,6 +186,8 @@ fn run(command: &str, f: &Flags) -> Result<(), String> {
 				StorageKey::Bounty(f.num("bounty")?)
 			} else if f.has("refs") {
 				StorageKey::PreimageRefs(f.hash("refs")?)
+			} else if f.has("attestation") {
+				StorageKey::Attestation(read_claim(f.str("attestation")?)?.id())
 			} else {
 				StorageKey::NextBountyId
 			};
@@ -178,7 +206,7 @@ fn run(command: &str, f: &Flags) -> Result<(), String> {
 				check_hash,
 				check_len,
 				params: f.params()?,
-				blobs: f.blobs()?,
+				blobs: f.blobs()?.iter().map(RevealBlob::blob_ref).collect(),
 				reward: f.num("reward")?,
 				check_gas: f.num("check-gas")?,
 				expiry: f.num("expiry")?,
@@ -229,6 +257,47 @@ fn run(command: &str, f: &Flags) -> Result<(), String> {
 			Op::Reclaim { bounty_id, maker: maker_id, nonce, signature }
 		},
 		"release" => Op::Release { bounty_id: f.num("bounty")?, commitment: f.hash("commitment")? },
+		"pin" => {
+			let service: u32 = f.num("service")?;
+			let owner = f.key("owner")?;
+			let nonce = f.num("nonce")?;
+			let blob = file_ref(f.str("blob")?)?;
+			let owner_id = owner.verifying_key().to_bytes();
+			let signature = owner.sign(&witness_types::pin_message(service, &owner_id, nonce, &blob)).to_bytes();
+			Op::Pin { owner: owner_id, nonce, blob, signature }
+		},
+		"attest" => {
+			let service: u32 = f.num("service")?;
+			let attester = f.key("attester")?;
+			let nonce = f.num("nonce")?;
+			let check_hash = f.check()?.0;
+			let has_params = ["params", "params-u128", "params-blake2b"].iter().any(|p| f.has(p));
+			let params = if has_params { f.params()? } else { vec![] };
+			let subject = file_ref(f.str("subject")?)?;
+			let parents = f.list("parents")?.into_iter().map(read_claim).collect::<Result<Vec<_>, _>>()?;
+			let claim = AttestationClaim {
+				check_hash,
+				params_hash: blake2b256(&params),
+				subject,
+				parents: parents.iter().map(AttestationClaim::id).collect(),
+			};
+			let out = f.str("claim-out")?;
+			std::fs::write(out, claim.encode()).map_err(|e| format!("cannot write {out}: {e}"))?;
+			eprintln!("attestation 0x{}", to_hex(&claim.id()));
+			let attester_id = attester.verifying_key().to_bytes();
+			let message = witness_types::attest_message(service, &attester_id, nonce, &claim.id());
+			let signature = attester.sign(&message).to_bytes();
+			Op::Attest {
+				attester: attester_id,
+				nonce,
+				check_hash,
+				params,
+				subject,
+				parents,
+				check_gas: f.num("check-gas")?,
+				signature,
+			}
+		},
 		_ => return Err(format!("unknown command {command}")),
 	};
 	println!("0x{}", to_hex(&op.encode()));
