@@ -1,0 +1,13 @@
+[package]
+name = "full-gas-spec"
+description = "Raises a PolkaJam chain spec's refine gas limit to the full spec's 5e9"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[dependencies]
+jam-types = { version = "0.1.29", features = ["serde"] }
+serde_json = "1"
+
+# Standalone: a host tool with its own dependencies, not part of the witness workspace.
+[workspace]

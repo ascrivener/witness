@@ -13,38 +13,48 @@ Prototype: rewards are points from a faucet (`Mint`), not tokens.
 | `Mint` | — | credit points (faucet, at most `MAX_MINT`) |
 | `CreateBounty` | verify the maker's Ed25519 signature | check nonce, balance and limits, and that cited attestations exist and are by the bounty's check; debit the reward; solicit the check blob and the bounty's plain blobs, except those already held; store the bounty |
 | `Commit` | verify the committer's signature | the bounty takes commitments; debit `COMMIT_DEPOSIT`; record the slot of `blake2b(bounty_id, x, hunter, salt)` |
-| `Reveal` | look up the check blob and the extra blobs; run the check on them (attested ones marked trusted), `params` and `x` in an inner PVM with the bounty's `check_gas` | the terms match and the commitment is older than this slot and made before expiry. The first valid reveal opens the claim window, and later ones replace the leader if their commitment is earlier. Refund the deposit |
+| `Reveal` | look up the check blob, the extra blobs and any extra attested layers the reveal adds; run the check on them (attested ones marked trusted), `params` and `x` in an inner PVM with the bounty's `check_gas` | the terms match and the commitment is older than this slot and made before expiry. The first valid reveal opens the claim window, and later ones replace the leader if their commitment is earlier. Refund the deposit |
 | `Finalize` | — | once the claim window has closed, pay the leader and release the bounty's blobs |
 | `Reclaim` | verify the maker's signature | if no one revealed by `expiry + REVEAL_GRACE`, refund the maker and release the bounty's blobs |
 | `Release` | — | delete a commitment (named by bounty and hash) that can no longer be revealed; its deposit stays forfeit |
 | `Pin` | verify the owner's signature | debit `PIN_DEPOSIT`; hold the preimage for good (solicit it unless already held) |
-| `Attest` | verify the attester's signature; look up the check, the parents' subjects and the subject; run the check in attest mode | the parents were attested and this wasn't yet; debit `ATTEST_DEPOSIT`; hold the subject for good; record the attestation |
+| `Attest` | verify the attester's signature and the chain it extends; look up the check, the chain's subjects and the subject; run the check in attest mode | the chain's tip was attested and this wasn't yet; debit `ATTEST_DEPOSIT`; hold the subject for good; record the attestation |
 
 ### Attestations
 
 An attestation records that a check, run once in attest mode with some params, accepted a subject
-blob given the subjects of its parent attestations: "check C verified B, given P". Its id hashes
-all of that, so the same blob verified by another check, other params or other parents is another
-attestation. Later work can then rely on B without verifying it again:
+blob right after a chain of earlier attestations: "check C verified B, following chain P". Each
+attestation names one parent (none for a root), and its id hashes the check, the params hash, the
+subject and the parent's id, so it commits to the whole chain. Later work can then rely on B
+without verifying it again:
 
-- **Bounties cite them.** A bounty's blob can be `Attested(id)` instead of a plain preimage. Its
-  check receives the subject marked trusted, and can skip whatever its attest mode verified.
-  For a Lean checker that means type-checking the statement environment once, instead of on
-  every reveal.
-- **Attestations build on each other.** An attestation names parents; the check receives their
-  subjects trusted and verifies only the new layer. A large library can be attested layer by
-  layer, each in one refine.
+- **Chains build layer by layer.** The check receives the chain's subjects, trusted and oldest
+  first, and verifies only the new layer. A large library can be attested this way, each layer in
+  one refine.
+- **Bounties cite chains.** A bounty's first blobs can be `Attested(id)`, one chain from its
+  root, in order; plain blobs may follow. Its check receives the attested subjects marked
+  trusted, and can skip whatever its attest mode verified. For a Lean checker that means
+  type-checking the statement environment once, instead of on every reveal.
+- **Reveals can extend the chain.** A reveal may add attested layers continuing the bounty's
+  chain, such as library layers its proof uses that the bounty didn't name. They're passed as
+  trusted after the bounty's chain and before its plain blobs.
 
-A check only ever trusts its own attestations. Parents must be by the same check with the same
-params, and a bounty may only cite attestations by its own check. So a trusted blob always means
-"my own attest mode accepted this", and an attester can't slip in a layer verified by a lenient
-check, or by this check with lenient params. A bounty's maker chooses which attestations it cites,
-and so which params they were made with.
+A subject is trusted only where it was verified: right after its own chain. Formats like Lean
+exports number their items on from the layers before, so a layer checked after one prefix can
+mean something else after another. That's why a bounty cites whole chains from their root, and
+extra layers must continue the bounty's chain exactly.
 
-Refine can't read state, so `Attest` and `Reveal` carry the claims of the attestations they rely
-on (check, params hash, subject, parents). Refine runs the check on the claimed subjects, and
-accumulate makes sure the claims' ids were really recorded: for `Attest` by looking the parents
-up, for `Reveal` by matching the bounty's terms, which were checked when it was created.
+A check only ever trusts its own attestations. A chain is one check with one set of params, and a
+bounty may only cite chains by its own check. So a trusted blob always means "my own attest mode
+accepted this", and an attester can't slip in a layer verified by a lenient check, or by this
+check with lenient params. A bounty's maker chooses which chain it cites, and so which params it
+was made with.
+
+Refine can't read state, so `Attest` and `Reveal` carry the claims of the chains they rely on
+(check, params hash, subject, parent), and refine checks they link up. Accumulate makes sure they
+were really recorded: for `Attest` by finding the parent, for `Reveal` by matching the bounty's
+terms (whose chain was checked when it was created) and finding the extra layers' tip. An
+attestation is only recorded after its parent, so finding a chain's tip means all of it was.
 
 The subject must be on chain before refine can look it up, so it's pinned first (`Pin`), and
 the check blob too unless a bounty already holds it. Pins and attestations are permanent for now,
@@ -83,16 +93,17 @@ The arguments (interface version 2) are:
 E1(2) ++ E1(mode) ++ E4(n) ++ [E1(trusted) ++ hash ++ E4(|data|) ++ data]^n ++ E4(|params|) ++ params ++ x
 ```
 
-`mode` is 0 to reveal and 1 to attest. When revealing, the `n` blobs are the bounty's extra blobs,
-in order, with `trusted` set on attested ones. When attesting, they are the parents' subjects,
-trusted, then the subject, untrusted, and `x` is empty. At most `MAX_BLOBS` blobs and
+`mode` is 0 to reveal and 1 to attest. When revealing, the `n` blobs are the bounty's attested
+chain, then the reveal's extra layers, both trusted, then the bounty's plain blobs. When
+attesting, they are the chain's subjects, trusted and oldest first, then the subject, untrusted,
+and `x` is empty. At most `MAX_BLOBS` blobs and
 `MAX_BLOBS_LEN` bytes in all. `witness_check` parses the arguments back. Halting with 1 in `φ7` means true. Anything else
 (0, panic, page fault, out of gas, any host call but `grow_heap`) means false. `check_gas` is
 capped at `MAX_CHECK_GAS` and passed to `invoke` as the inner VM's limit.
 
 A check may call `grow_heap` (host call 1). Refine maps the pages it asks for, after the check's
 read-write data and short of its stack, charges the check the gas `grow_heap` costs a service, and
-resumes it. Everything the check uses, arguments included, must fit in `MAX_CHECK_PAGES` (16 MiB);
+resumes it. Everything the check uses, arguments included, must fit in `MAX_CHECK_PAGES` (64 MiB);
 past that the call returns the heap's current end and the allocation fails.
 
 Because the check gets the bounty's `params` and blobs, one check blob serves many bounties.
@@ -115,6 +126,7 @@ checks/dictionary/         sample: x is dictionary words hashing to D leading ze
                            dictionary; params: D)
 checks/sorted-words/       sample that attests: as dictionary, over attested sorted word volumes
 tools/witness-cli/         builds work-item payloads as hex, and reads state (`witness`)
+tools/full-gas-spec/       raises a PolkaJam dev chain spec's refine limit to the full spec's
 scripts/e2e.sh             end-to-end test on a local PolkaJam testnet
 ```
 
@@ -164,9 +176,33 @@ POLKAJAM_DIR=../polkajam-releases/polkajam-v0.1.29-macos-aarch64 scripts/e2e.sh 
 ```
 
 On Linux without IPv6 (some containers), the nodes need `--listen-ip 0.0.0.0 --external-ip
-127.0.0.1`, and if the PVM recompiler can't run there, `--pvm-backend interpreter`. The testnet
-doesn't pass node flags through, so put a wrapper script named `polkajam` that adds them next to
-copies of `polkajam-testnet` and `jamt`, and point `POLKAJAM_DIR` at that directory.
+127.0.0.1`. The testnet doesn't pass node flags through, so put a wrapper script named `polkajam`
+that adds them next to copies of `polkajam-testnet` and `jamt`, and point `POLKAJAM_DIR` at that
+directory.
+
+The PVM recompiler's sandbox needs `userfaultfd`. Where unprivileged processes may not create one
+(work packages then fail with `AuthorizationInvalid`), allow it with
+`sysctl vm.unprivileged_userfaultfd=1`. `--pvm-backend interpreter` also works, but it's too slow
+for big refines: guarantors drop reports whose refine takes more than a few seconds, which the
+interpreter reaches at under 10⁹ gas.
+
+The testnet's dev chain uses PolkaJam's "tiny" protocol parameters, with a refine limit of 10⁹
+gas; the full spec allows 5×10⁹. To test with the full limit, dump the dev spec, raise its limit
+with `tools/full-gas-spec` (a standalone crate), and have the wrapper swap the testnet's
+`--chain=dev:...` argument for the patched spec:
+
+```bash
+polkajam --chain dev:40000 dump-spec dev.json
+(cd tools/full-gas-spec && cargo run --release -- ../../dev.json ../../full-gas.json)
+# in the wrapper: replace an argument --chain=dev:* with --chain=/path/to/full-gas.json
+```
+
+## Checks built on witness
+
+- **Lean 4 proofs:** [witness-lean](https://github.com/ascrivener/witness-lean) checks Lean proofs
+  with an independent kernel, attesting library layers once (Mathlib's, say) and binding a
+  solver's proof to the bounty's statement. It has proved "there are infinitely many primes" on
+  a local testnet, from Mathlib, in 66 attested layers.
 
 ## Writing a check
 
@@ -221,6 +257,7 @@ jamt item $SVC $($W pin --service $SVC --owner pat --nonce 0 --blob out/sorted-w
 jamt item $SVC $($W pin --service $SVC --owner pat --nonce 1 --blob volume1.bin)
 jamt provide $SVC out/sorted-words-check.jam; jamt provide $SVC volume1.bin
 jamt item $SVC $($W attest --service $SVC --attester pat --nonce 2 --check out/sorted-words-check.jam --subject volume1.bin --check-gas 10000000 --claim-out volume1.claim)
+# a next layer names the chain it follows: --chain volume1.claim (then volume1.claim,volume2.claim, ...)
 jamt item $SVC $($W create --service $SVC --maker alice --nonce 2 --check out/sorted-words-check.jam --params 0x00 --blobs claim:volume1.claim --reward 100 --check-gas 10000000 --expiry $(( $(jamt inspect slot) + 100 )))
 # after the claim window (30 slots by default)
 jamt item $SVC $($W finalize --bounty 0)
@@ -253,3 +290,7 @@ or did not apply it.
 - Pins and attestations, and the preimages they hold, are never released.
 - A check only trusts its own attestations. Building on another checker's attested layers would
   need the check to learn which checker made each one.
+- Attestations form linear chains, and a check receives a subject's whole chain, so a refine must
+  load (and typically parse) everything before the subject. A chain's total size is bounded by
+  what one refine can process. Libraries too big for that need attestations that form a DAG, with
+  each subject naming only what it uses.
