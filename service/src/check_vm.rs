@@ -1,6 +1,6 @@
 //! Runs a bounty's check blob in an inner PVM, within the bounty's gas limit.
 
-use jam_pvm_common::{InvokeOutcome, imports, refine};
+use jam_pvm_common::{InvokeOutcome, imports, info, refine};
 use jam_types::{
 	PageMode, PageOperation,
 	gas_costs::{GROW_HEAP_BASE, GROW_HEAP_LINEAR},
@@ -25,6 +25,8 @@ pub fn run_check(blob: &[u8], args: &[u8], gas: Gas) -> Result<(), Rejection> {
 	}
 
 	let vm = refine::machine(layout.code, 0).map_err(|_| Rejection::BadCheckBlob)?;
+	let limit = i64::try_from(gas).map_err(|_| Rejection::CheckGasTooHigh)?;
+	let mut gas = limit;
 	let result = (|| {
 		for region in &layout.regions {
 			// `poke` needs writable pages, so allocate everything writable, fill it, then drop
@@ -46,7 +48,6 @@ pub fn run_check(blob: &[u8], args: &[u8], gas: Gas) -> Result<(), Rejection> {
 		}
 
 		let mut heap = Heap::new(&layout, MAX_CHECK_PAGES as u64);
-		let mut gas = i64::try_from(gas).map_err(|_| Rejection::CheckGasTooHigh)?;
 		let mut regs = layout.registers;
 		let failure = loop {
 			let (outcome, gas_left, new_regs) =
@@ -80,5 +81,6 @@ pub fn run_check(blob: &[u8], args: &[u8], gas: Gas) -> Result<(), Rejection> {
 		Err(Rejection::CheckFailed(failure))
 	})();
 	let _ = refine::expunge(vm);
+	info!(target = "witness", "check used {} gas of {limit}", limit - gas.max(0));
 	result
 }

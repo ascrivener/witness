@@ -37,8 +37,8 @@ usage: witness <command> [--flag value ...]
   decode    (--output HEX | --account HEX | --bounty HEX | --commitment HEX | --attestation HEX)
             decode a refine output or a stored value
 
-PARAMS:  --params HEX | --params-u128 N | --params-blake2b STRING (the hash of STRING)
-WITNESS: --witness HEX | --witness-u64 N | --witness-str STRING
+PARAMS:  --params HEX | --params-str STRING | --params-u128 N | --params-blake2b STRING (its hash)
+WITNESS: --witness HEX | --witness-str STRING | --witness-u64 N | --witness-file FILE
 FILES:   comma-separated, in order: claim:CLAIM for each attested blob, a chain from its root,
          then paths of plain blobs
 CLAIMS:  comma-separated paths of claim files that `attest --claim-out` wrote
@@ -95,7 +95,9 @@ impl Flags {
 		Ok(self.key(name)?.verifying_key().to_bytes())
 	}
 	fn params(&self) -> Result<Vec<u8>, String> {
-		if self.has("params-u128") {
+		if self.has("params-str") {
+			Ok(self.str("params-str")?.as_bytes().to_vec())
+		} else if self.has("params-u128") {
 			Ok(self.num::<u128>("params-u128")?.to_le_bytes().to_vec())
 		} else if self.has("params-blake2b") {
 			Ok(blake2b256(self.str("params-blake2b")?.as_bytes()).to_vec())
@@ -108,6 +110,8 @@ impl Flags {
 			Ok(self.num::<u64>("witness-u64")?.to_le_bytes().to_vec())
 		} else if self.has("witness-str") {
 			Ok(self.str("witness-str")?.as_bytes().to_vec())
+		} else if self.has("witness-file") {
+			read(self.str("witness-file")?)
 		} else {
 			self.hex("witness")
 		}
@@ -278,7 +282,7 @@ fn run(command: &str, f: &Flags) -> Result<(), String> {
 			let attester = f.key("attester")?;
 			let nonce = f.num("nonce")?;
 			let check_hash = f.check()?.0;
-			let has_params = ["params", "params-u128", "params-blake2b"].iter().any(|p| f.has(p));
+			let has_params = ["params", "params-str", "params-u128", "params-blake2b"].iter().any(|p| f.has(p));
 			let params = if has_params { f.params()? } else { vec![] };
 			let subject = file_ref(f.str("subject")?)?;
 			let ancestors = f.claims("chain")?;

@@ -103,7 +103,7 @@ capped at `MAX_CHECK_GAS` and passed to `invoke` as the inner VM's limit.
 
 A check may call `grow_heap` (host call 1). Refine maps the pages it asks for, after the check's
 read-write data and short of its stack, charges the check the gas `grow_heap` costs a service, and
-resumes it. Everything the check uses, arguments included, must fit in `MAX_CHECK_PAGES` (16 MiB);
+resumes it. Everything the check uses, arguments included, must fit in `MAX_CHECK_PAGES` (64 MiB);
 past that the call returns the heap's current end and the allocation fails.
 
 Because the check gets the bounty's `params` and blobs, one check blob serves many bounties.
@@ -126,6 +126,7 @@ checks/dictionary/         sample: x is dictionary words hashing to D leading ze
                            dictionary; params: D)
 checks/sorted-words/       sample that attests: as dictionary, over attested sorted word volumes
 tools/witness-cli/         builds work-item payloads as hex, and reads state (`witness`)
+tools/full-gas-spec/       raises a PolkaJam dev chain spec's refine limit to the full spec's
 scripts/e2e.sh             end-to-end test on a local PolkaJam testnet
 ```
 
@@ -175,9 +176,33 @@ POLKAJAM_DIR=../polkajam-releases/polkajam-v0.1.29-macos-aarch64 scripts/e2e.sh 
 ```
 
 On Linux without IPv6 (some containers), the nodes need `--listen-ip 0.0.0.0 --external-ip
-127.0.0.1`, and if the PVM recompiler can't run there, `--pvm-backend interpreter`. The testnet
-doesn't pass node flags through, so put a wrapper script named `polkajam` that adds them next to
-copies of `polkajam-testnet` and `jamt`, and point `POLKAJAM_DIR` at that directory.
+127.0.0.1`. The testnet doesn't pass node flags through, so put a wrapper script named `polkajam`
+that adds them next to copies of `polkajam-testnet` and `jamt`, and point `POLKAJAM_DIR` at that
+directory.
+
+The PVM recompiler's sandbox needs `userfaultfd`. Where unprivileged processes may not create one
+(work packages then fail with `AuthorizationInvalid`), allow it with
+`sysctl vm.unprivileged_userfaultfd=1`. `--pvm-backend interpreter` also works, but it's too slow
+for big refines: guarantors drop reports whose refine takes more than a few seconds, which the
+interpreter reaches at under 10⁹ gas.
+
+The testnet's dev chain uses PolkaJam's "tiny" protocol parameters, with a refine limit of 10⁹
+gas; the full spec allows 5×10⁹. To test with the full limit, dump the dev spec, raise its limit
+with `tools/full-gas-spec` (a standalone crate), and have the wrapper swap the testnet's
+`--chain=dev:...` argument for the patched spec:
+
+```bash
+polkajam --chain dev:40000 dump-spec dev.json
+(cd tools/full-gas-spec && cargo run --release -- ../../dev.json ../../full-gas.json)
+# in the wrapper: replace an argument --chain=dev:* with --chain=/path/to/full-gas.json
+```
+
+## Checks built on witness
+
+- **Lean 4 proofs:** [witness-lean](https://github.com/ascrivener/witness-lean) checks Lean proofs
+  with an independent kernel, attesting library layers once (Mathlib's, say) and binding a
+  solver's proof to the bounty's statement. It has proved "there are infinitely many primes" on
+  a local testnet, from Mathlib, in 66 attested layers.
 
 ## Writing a check
 
@@ -265,3 +290,7 @@ or did not apply it.
 - Pins and attestations, and the preimages they hold, are never released.
 - A check only trusts its own attestations. Building on another checker's attested layers would
   need the check to learn which checker made each one.
+- Attestations form linear chains, and a check receives a subject's whole chain, so a refine must
+  load (and typically parse) everything before the subject. A chain's total size is bounded by
+  what one refine can process. Libraries too big for that need attestations that form a DAG, with
+  each subject naming only what it uses.

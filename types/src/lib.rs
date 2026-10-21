@@ -49,8 +49,10 @@ pub type Gas = u64;
 pub type AttestationId = Hash;
 
 /// Most gas a bounty may give its check. Must leave refine enough headroom for the rest of a
-/// Reveal (lookup, hashing, setting up the inner PVM) within one work-item's refine gas.
-pub const MAX_CHECK_GAS: Gas = 1_000_000_000;
+/// Reveal (lookup, hashing, setting up the inner PVM) within one work-item's refine gas: the full
+/// spec allows 5×10⁹. On a network with less (PolkaJam's "tiny" parameters allow 10⁹), a check
+/// given more than refine can spend just runs out of gas.
+pub const MAX_CHECK_GAS: Gas = 4_500_000_000;
 /// Largest check blob a bounty may solicit.
 pub const MAX_CHECK_LEN: u32 = 1 << 20;
 /// Largest check parameters a bounty may carry.
@@ -61,8 +63,9 @@ pub const MAX_BLOBS: u32 = 128;
 /// Largest total length of a bounty's extra blobs. They are copied into the check's memory, so
 /// this must leave room within [`MAX_CHECK_PAGES`] for the check's own code, data, stack and heap.
 pub const MAX_BLOBS_LEN: u32 = 4 << 20;
-/// Most memory pages a check may use (16 MiB), counting its arguments and any heap it grows.
-pub const MAX_CHECK_PAGES: u32 = 4096;
+/// Most memory pages a check may use (64 MiB), counting its arguments and any heap it grows.
+/// Real verifiers, such as proof checkers, want deep stacks and allocate heavily.
+pub const MAX_CHECK_PAGES: u32 = 16384;
 /// Largest witness accepted in a Reveal payload.
 pub const MAX_WITNESS_LEN: u32 = 1 << 16;
 /// A commitment must be on chain before its reveal, so a reveal can only use a commitment from an
