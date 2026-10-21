@@ -2,8 +2,8 @@
 //!
 //! The protocol, in short:
 //! - A maker posts a bounty: a check blob `check(params, x) -> bool` (stored as a preimage of the
-//!   service), the `params` to run it with, a reward in points, a gas limit for the check, an
-//!   expiry slot and a claim window.
+//!   service), the `params` to run it with, any extra preimage blobs the check reads, a reward in
+//!   points, a gas limit for the check, an expiry slot and a claim window.
 //! - A hunter commits to `blake2b(bounty_id, x, hunter, salt)`, paying [`COMMIT_DEPOSIT`], then
 //!   reveals `x` at least [`MIN_COMMIT_AGE`] slots later. Refine runs the check in an inner PVM.
 //! - The first valid reveal opens the claim window. Every valid reveal before it closes competes,
@@ -40,7 +40,12 @@ pub const MAX_CHECK_GAS: Gas = 1_000_000_000;
 pub const MAX_CHECK_LEN: u32 = 1 << 20;
 /// Largest check parameters a bounty may carry.
 pub const MAX_PARAMS_LEN: u32 = 4096;
-/// Most memory pages a check may be given (16 MiB).
+/// Most extra blobs a bounty may give its check.
+pub const MAX_BLOBS: u32 = 16;
+/// Largest total length of a bounty's extra blobs. They are copied into the check's memory, so
+/// this must leave room within [`MAX_CHECK_PAGES`] for the check's own code, data, stack and heap.
+pub const MAX_BLOBS_LEN: u32 = 4 << 20;
+/// Most memory pages a check may use (16 MiB), counting its arguments and any heap it grows.
 pub const MAX_CHECK_PAGES: u32 = 4096;
 /// Largest witness accepted in a Reveal payload.
 pub const MAX_WITNESS_LEN: u32 = 1 << 16;
@@ -67,6 +72,13 @@ pub fn blake2b256(data: &[u8]) -> Hash {
 	out
 }
 
+/// A preimage of the service, by hash and length.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
+pub struct BlobRef {
+	pub hash: Hash,
+	pub len: u32,
+}
+
 /// What a maker puts up, and what a hunter must reproduce exactly when revealing.
 #[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
 pub struct BountyTerms {
@@ -75,6 +87,9 @@ pub struct BountyTerms {
 	pub check_len: u32,
 	/// Passed to the check alongside the witness, so one check blob can serve many bounties.
 	pub params: Vec<u8>,
+	/// Preimages refine passes to the check, in order, such as a statement environment or a
+	/// library. Solicited and released along with the check blob.
+	pub blobs: Vec<BlobRef>,
 	pub reward: Points,
 	pub check_gas: Gas,
 	/// Commitments made at or after this slot are not accepted.
@@ -103,6 +118,7 @@ pub enum Op {
 		/// and accumulate checks them.
 		check_hash: Hash,
 		params: Vec<u8>,
+		blobs: Vec<BlobRef>,
 		check_gas: Gas,
 		hunter: AccountId,
 		salt: Hash,
@@ -137,6 +153,10 @@ pub enum Rejection {
 	ParamsTooLong,
 	/// The check blob is not (yet) available as a preimage at the lookup anchor.
 	CheckUnavailable,
+	/// One of the bounty's blobs is not (yet) available as a preimage at the lookup anchor.
+	BlobUnavailable,
+	/// More than [`MAX_BLOBS`] blobs, or more than [`MAX_BLOBS_LEN`] bytes of them.
+	BlobsTooLarge,
 	/// The check blob is not a valid standard program, or needs more memory than allowed.
 	BadCheckBlob,
 	CheckFailed(CheckFailure),
@@ -154,6 +174,8 @@ pub enum Verified {
 		bounty_id: BountyId,
 		check_hash: Hash,
 		params_hash: Hash,
+		/// Blake2b-256 of the encoded blob references.
+		blobs_hash: Hash,
 		check_gas: Gas,
 		commitment: Hash,
 		hunter: AccountId,
@@ -221,8 +243,9 @@ pub enum StorageKey {
 	/// would let anyone copy a commitment onto another bounty first and block the real one.
 	Commitment(BountyId, Hash),
 	NextBountyId,
-	/// How many unfinished bounties use a check blob; the blob is forgotten when it reaches zero.
-	CheckRefs(Hash),
+	/// How many uses by unfinished bounties a preimage has, as a check blob or an extra blob; the
+	/// preimage is forgotten when it reaches zero.
+	PreimageRefs(Hash),
 }
 
 /// The commitment a hunter posts before revealing `witness`.
@@ -251,10 +274,48 @@ pub fn reclaim_message(service_id: u32, bounty_id: BountyId, maker: &AccountId, 
 	(b"witness/reclaim", service_id, bounty_id, maker, nonce).encode()
 }
 
-/// The arguments a check receives: `E4(|params|) ++ params ++ witness`.
-/// `witness_check::declare_check!` splits them back apart.
-pub fn check_args(params: &[u8], witness: &[u8]) -> Vec<u8> {
-	let mut args = Vec::with_capacity(4 + params.len() + witness.len());
+/// The version of the check arguments' layout, the first byte of [`check_args`].
+pub const CHECK_INTERFACE_VERSION: u8 = 2;
+
+/// Why a check is being run, the second byte of [`check_args`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum CheckMode {
+	/// Does the witness solve the bounty?
+	Reveal = 0,
+	/// Reserved for attestations: does the subject blob verify? Not sent yet.
+	Attest = 1,
+}
+
+/// A blob as a check receives it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CheckBlob<'a> {
+	/// Reserved for attestations: the blob was already verified, so the check may rely on it.
+	/// Always false for now.
+	pub trusted: bool,
+	pub hash: Hash,
+	pub data: &'a [u8],
+}
+
+/// The arguments a check receives:
+///
+/// ```text
+/// E1(version) ++ E1(mode) ++ E4(n) ++ [E1(trusted) ++ hash ++ E4(|data|) ++ data]^n
+///     ++ E4(|params|) ++ params ++ witness
+/// ```
+///
+/// `witness_check` parses them back.
+pub fn check_args(mode: CheckMode, blobs: &[CheckBlob], params: &[u8], witness: &[u8]) -> Vec<u8> {
+	let blobs_len: usize = blobs.iter().map(|b| 1 + 32 + 4 + b.data.len()).sum();
+	let mut args = Vec::with_capacity(2 + 4 + blobs_len + 4 + params.len() + witness.len());
+	args.extend_from_slice(&[CHECK_INTERFACE_VERSION, mode as u8]);
+	args.extend_from_slice(&(blobs.len() as u32).to_le_bytes());
+	for blob in blobs {
+		args.push(blob.trusted as u8);
+		args.extend_from_slice(&blob.hash);
+		args.extend_from_slice(&(blob.data.len() as u32).to_le_bytes());
+		args.extend_from_slice(blob.data);
+	}
 	args.extend_from_slice(&(params.len() as u32).to_le_bytes());
 	args.extend_from_slice(params);
 	args.extend_from_slice(witness);

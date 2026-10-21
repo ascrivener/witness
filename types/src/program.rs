@@ -102,11 +102,51 @@ pub struct Layout<'a> {
 	/// omitted.
 	pub regions: Vec<Region<'a>>,
 	pub registers: [u64; 13],
+	/// The page just past the read-write data, where the heap grows from.
+	pub heap_start_page: u64,
+	/// The first page of the stack: the heap may grow up to, but not into, it.
+	pub heap_limit_page: u64,
 }
 
 impl Layout<'_> {
 	pub fn total_pages(&self) -> u64 {
 		self.regions.iter().map(|r| r.pages).sum()
+	}
+}
+
+/// A program's heap: pages mapped after its read-write data as it asks for them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Heap {
+	/// The page just past the heap.
+	pub end_page: u64,
+	/// The heap may not grow into this page (the stack's first).
+	pub limit_page: u64,
+	/// How many more pages may be mapped.
+	pub pages_left: u64,
+}
+
+impl Heap {
+	/// A heap starting where `layout` says, with `max_pages` pages for everything.
+	pub fn new(layout: &Layout, max_pages: u64) -> Self {
+		Heap {
+			end_page: layout.heap_start_page,
+			limit_page: layout.heap_limit_page,
+			pages_left: max_pages.saturating_sub(layout.total_pages()),
+		}
+	}
+
+	/// Grow the heap to end at page `target`, as `grow_heap(target)` asks. Returns the pages to
+	/// map, as (first page, count), which is empty if the heap already reaches `target`, or
+	/// `None` if growing would pass a limit.
+	pub fn grow(&mut self, target: u64) -> Option<(u64, u64)> {
+		let first = self.end_page;
+		let count = target.saturating_sub(first);
+		if target > self.limit_page || count > self.pages_left {
+			return None;
+		}
+		self.end_page = self.end_page.max(target);
+		self.pages_left -= count;
+		Some((first, count))
 	}
 }
 
@@ -131,16 +171,14 @@ pub fn initialize<'a>(program: &StandardProgram<'a>, args: &'a [u8]) -> Option<L
 		access,
 	};
 	let stack_top = (1 << 32) - 2 * ZONE_SIZE - INPUT_SIZE;
+	let stack_start = stack_top - page_round(stack);
 	let args_start = (1 << 32) - ZONE_SIZE - INPUT_SIZE;
+	let rw_start = 2 * ZONE_SIZE + zone_round(ro_len);
+	let rw_size = page_round(rw_len) + padding;
 	let regions = [
 		region(ZONE_SIZE, ro_len, program.ro_data, Access::ReadOnly),
-		region(
-			2 * ZONE_SIZE + zone_round(ro_len),
-			page_round(rw_len) + padding,
-			program.rw_data,
-			Access::ReadWrite,
-		),
-		region(stack_top - page_round(stack), stack, &[][..], Access::ReadWrite),
+		region(rw_start, rw_size, program.rw_data, Access::ReadWrite),
+		region(stack_start, stack, &[][..], Access::ReadWrite),
 		region(args_start, args_len, args, Access::ReadOnly),
 	]
 	.into_iter()
@@ -152,7 +190,13 @@ pub fn initialize<'a>(program: &StandardProgram<'a>, args: &'a [u8]) -> Option<L
 	registers[1] = stack_top;
 	registers[7] = args_start;
 	registers[8] = args_len;
-	Some(Layout { code: program.code, regions, registers })
+	Some(Layout {
+		code: program.code,
+		regions,
+		registers,
+		heap_start_page: (rw_start + rw_size) / PAGE_SIZE,
+		heap_limit_page: stack_start / PAGE_SIZE,
+	})
 }
 
 #[cfg(test)]
@@ -220,6 +264,24 @@ mod tests {
 		assert_eq!(l.registers[7], (1 << 32) - ZONE_SIZE - INPUT_SIZE);
 		assert_eq!(l.registers[8], 10);
 		assert_eq!(l.total_pages(), 2 + 3 + 2 + 1);
+		// The heap starts after the RW region and may grow up to the stack.
+		assert_eq!(l.heap_start_page, 3 * 16 + 3);
+		assert_eq!(l.heap_limit_page, stack_top_page - 2);
+	}
+
+	#[test]
+	fn heap_grows_within_limits() {
+		let mut heap = Heap { end_page: 10, limit_page: 20, pages_left: 8 };
+		assert_eq!(heap.grow(5), Some((10, 0)), "already there");
+		assert_eq!(heap.grow(14), Some((10, 4)));
+		assert_eq!(heap.grow(14), Some((14, 0)));
+		assert_eq!(heap.grow(19), None, "more pages than are left");
+		assert_eq!(heap.grow(18), Some((14, 4)));
+		assert_eq!(heap, Heap { end_page: 18, limit_page: 20, pages_left: 0 });
+		let mut heap = Heap { end_page: 10, limit_page: 20, pages_left: 100 };
+		assert_eq!(heap.grow(21), None, "into the stack");
+		assert_eq!(heap.grow(20), Some((10, 10)));
+		assert_eq!(heap.grow(u64::MAX), None);
 	}
 
 	#[test]

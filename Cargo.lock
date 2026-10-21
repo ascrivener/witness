@@ -176,6 +176,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "dictionary-check"
+version = "0.1.0"
+dependencies = [
+ "blake2b_simd",
+ "polkavm-derive",
+ "witness-check",
+ "witness-types",
+]
+
+[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -682,6 +692,7 @@ dependencies = [
 name = "witness-check"
 version = "0.1.0"
 dependencies = [
+ "picoalloc",
  "polkavm-derive",
  "witness-types",
 ]

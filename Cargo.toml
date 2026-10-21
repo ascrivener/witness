@@ -7,6 +7,7 @@ members = [
 	"service",
 	"checks/factor",
 	"checks/blake2b-preimage",
+	"checks/dictionary",
 	"tools/witness-cli",
 ]
 # The service only makes sense as a PVM blob; build it (and check blobs) with `cargo jam-build`.
@@ -17,6 +18,7 @@ default-members = [
 	"check",
 	"checks/factor",
 	"checks/blake2b-preimage",
+	"checks/dictionary",
 	"tools/witness-cli",
 ]
 

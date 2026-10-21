@@ -1,0 +1,19 @@
+[package]
+name = "dictionary-check"
+description = "Sample witness check: x is a sentence of words from the bounty's dictionary blob, hashing to enough leading zero bits"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+# A check has one entry point at pc 0, which is the authorizer layout.
+[package.metadata.jam]
+type = "authorizer"
+
+[dependencies]
+witness-check = { workspace = true, features = ["alloc"] }
+polkavm-derive.workspace = true
+blake2b_simd.workspace = true
+
+[dev-dependencies]
+witness-types = { workspace = true, features = ["std"] }
