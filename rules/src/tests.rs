@@ -5,51 +5,76 @@ use witness_types::{BountyTerms, CHECK_INTERFACE_VERSION, CheckFailure, check_ar
 
 const SERVICE: u32 = 7;
 const CHECK: Hash = [0xc0; 32];
+/// Another check, with the same mock behaviour.
+const OTHER_CHECK: Hash = [0xc1; 32];
 const BLOB: &[u8] = b"check blob";
-/// Extra blobs the environment can look up.
-const EXTRA: [(Hash, &[u8]); 2] = [([0xe1; 32], b"one"), ([0xe2; 32], b"two")];
+/// Extra blobs the environment can look up. The mock check attests those starting "good".
+const EXTRA: [(Hash, &[u8]); 5] = [
+	([0xe1; 32], b"one"),
+	([0xe2; 32], b"two"),
+	([0xa1; 32], b"good one"),
+	([0xa2; 32], b"good two"),
+	([0xa3; 32], b"bad"),
+];
+const GOOD1: usize = 2;
+const GOOD2: usize = 3;
+const BAD: usize = 4;
 const MISSING: Hash = [0xee; 32];
 
-fn extra(i: usize) -> BlobRef {
-	BlobRef { hash: EXTRA[i].0, len: EXTRA[i].1.len() as u32 }
+fn extra(i: usize) -> Preimage {
+	Preimage { hash: EXTRA[i].0, len: EXTRA[i].1.len() as u32 }
 }
 
-/// The mock check accepts witness `b"x"`, or a witness equal to its blobs' data concatenated.
+fn plain(i: usize) -> BlobRef {
+	BlobRef::Blob(extra(i))
+}
+
+/// The mock check:
+/// - in reveal mode, accepts witness `b"x"`; a witness equal to its blobs' data concatenated;
+///   or witness `b"trusted"` if it was given blobs and all of them are trusted;
+/// - in attest mode, accepts a subject (the last blob, untrusted) starting with `b"good"`, if
+///   every other blob is trusted.
 struct Env {
 	blob_available: bool,
 }
 
-/// Split `args` (see `check_args`) into the blobs' data and the witness.
-fn parse_args(args: &[u8]) -> (Vec<Vec<u8>>, Vec<u8>) {
+/// Split `args` (see `check_args`) into the mode, the blobs (trusted, data) and the witness.
+fn parse_args(args: &[u8]) -> (u8, Vec<(bool, Vec<u8>)>, Vec<u8>) {
 	let u32_at = |at: usize| u32::from_le_bytes(args[at..at + 4].try_into().unwrap()) as usize;
-	assert_eq!(args[..2], [CHECK_INTERFACE_VERSION, CheckMode::Reveal as u8]);
+	assert_eq!(args[0], CHECK_INTERFACE_VERSION);
 	let mut at = 6;
 	let blobs = (0..u32_at(2))
 		.map(|_| {
-			assert_eq!(args[at], 0, "nothing is trusted yet");
+			let trusted = args[at] == 1;
 			let len = u32_at(at + 33);
 			at += 37 + len;
-			args[at - len..at].to_vec()
+			(trusted, args[at - len..at].to_vec())
 		})
 		.collect();
-	(blobs, args[at + 4 + u32_at(at)..].to_vec())
+	(args[1], blobs, args[at + 4 + u32_at(at)..].to_vec())
 }
 
 impl RefineEnv for Env {
 	fn lookup(&self, hash: &Hash) -> Option<Vec<u8>> {
-		if *hash == CHECK {
+		if *hash == CHECK || *hash == OTHER_CHECK {
 			return self.blob_available.then(|| BLOB.to_vec());
 		}
 		EXTRA.iter().find(|(h, _)| h == hash).map(|(_, data)| data.to_vec())
 	}
 	fn run_check(&self, blob: &[u8], args: &[u8], _gas: Gas) -> core::result::Result<(), Rejection> {
 		assert_eq!(blob, BLOB);
-		let (blobs, witness) = parse_args(args);
-		if witness == b"x" || (!blobs.is_empty() && witness == blobs.concat()) {
-			Ok(())
+		let (mode, blobs, witness) = parse_args(args);
+		let data: Vec<u8> = blobs.iter().flat_map(|(_, d)| d.clone()).collect();
+		let accept = if mode == CheckMode::Attest as u8 {
+			assert!(witness.is_empty());
+			let (subject, parents) = blobs.split_last().unwrap();
+			!subject.0 && parents.iter().all(|(t, _)| *t) && subject.1.starts_with(b"good")
 		} else {
-			Err(Rejection::CheckFailed(CheckFailure::False))
-		}
+			witness == b"x" ||
+				(!blobs.is_empty() && witness == data) ||
+				(!blobs.is_empty() && witness == b"trusted" && blobs.iter().all(|(t, _)| *t))
+		};
+		if accept { Ok(()) } else { Err(Rejection::CheckFailed(CheckFailure::False)) }
 	}
 }
 
@@ -61,6 +86,8 @@ struct Chain {
 	solicited: Vec<Hash>,
 	forgotten: Vec<Hash>,
 	now: Slot,
+	/// Claims of the attestations recorded so far, as a hunter would keep them to reveal with.
+	claims: BTreeMap<AttestationId, AttestationClaim>,
 }
 
 impl State for Chain {
@@ -158,18 +185,104 @@ impl Chain {
 		self.commit_for(b, hunter, hunter, w)
 	}
 
+	/// `blobs` as a reveal names them, with the claims of attested ones.
+	fn reveal_blobs(&self, blobs: &[BlobRef]) -> Vec<RevealBlob> {
+		blobs
+			.iter()
+			.map(|b| match b {
+				BlobRef::Blob(p) => RevealBlob::Blob(*p),
+				BlobRef::Attested(id) => RevealBlob::Attested(self.claims[id].clone()),
+			})
+			.collect()
+	}
+
 	fn reveal(&mut self, b: BountyId, hunter: u8, w: &[u8]) -> Result<()> {
 		let terms = self.bounty(b).terms;
 		self.submit(Op::Reveal {
 			bounty_id: b,
 			check_hash: terms.check_hash,
 			params: terms.params,
-			blobs: terms.blobs,
+			blobs: self.reveal_blobs(&terms.blobs),
 			check_gas: terms.check_gas,
 			hunter: id(hunter),
 			salt: [hunter; 32],
 			witness: w.to_vec(),
 		})
+	}
+
+	fn pin(&mut self, owner: u8, blob: Preimage) -> Result<()> {
+		let nonce = self.account(owner).nonce;
+		let msg = witness_types::pin_message(SERVICE, &id(owner), nonce, &blob);
+		let signature = key(owner).sign(&msg).to_bytes();
+		self.submit(Op::Pin { owner: id(owner), nonce, blob, signature })
+	}
+
+	/// The op for `attester` to attest `subject` with `check` and params `b"layer"` on `parents`,
+	/// and its claim.
+	fn attest_op(
+		&self,
+		attester: u8,
+		check: Hash,
+		subject: Preimage,
+		parents: &[AttestationClaim],
+	) -> (Op, AttestationClaim) {
+		self.attest_op_with_params(attester, check, b"layer", subject, parents)
+	}
+
+	fn attest_op_with_params(
+		&self,
+		attester: u8,
+		check: Hash,
+		params: &[u8],
+		subject: Preimage,
+		parents: &[AttestationClaim],
+	) -> (Op, AttestationClaim) {
+		let claim = AttestationClaim {
+			check_hash: check,
+			params_hash: blake2b256(params),
+			subject,
+			parents: parents.iter().map(AttestationClaim::id).collect(),
+		};
+		let nonce = self.account(attester).nonce;
+		let msg = witness_types::attest_message(SERVICE, &id(attester), nonce, &claim.id());
+		let op = Op::Attest {
+			attester: id(attester),
+			nonce,
+			check_hash: check,
+			params: params.to_vec(),
+			subject,
+			parents: parents.to_vec(),
+			check_gas: 1000,
+			signature: key(attester).sign(&msg).to_bytes(),
+		};
+		(op, claim)
+	}
+
+	/// `attester` attests `subject` with `check` on `parents`; returns the claim it made.
+	fn attest_with(
+		&mut self,
+		attester: u8,
+		check: Hash,
+		subject: Preimage,
+		parents: &[AttestationClaim],
+	) -> Result<AttestationClaim> {
+		let (op, claim) = self.attest_op(attester, check, subject, parents);
+		self.submit(op)?;
+		self.claims.insert(claim.id(), claim.clone());
+		Ok(claim)
+	}
+
+	/// What refine makes of `subject` attested by Carol with the bounty check on `parents`.
+	fn refine_attest(&self, subject: Preimage, parents: &[AttestationClaim]) -> Verified {
+		refine(&ENV, SERVICE, self.attest_op(CAROL, CHECK, subject, parents).0)
+	}
+
+	fn attest(&mut self, subject: Preimage, parents: &[AttestationClaim]) -> Result<AttestationClaim> {
+		self.attest_with(CAROL, CHECK, subject, parents)
+	}
+
+	fn refs(&self, h: Hash) -> Option<u32> {
+		self.get_typed(&StorageKey::PreimageRefs(h))
 	}
 
 	fn finalize(&mut self, b: BountyId) -> Result<()> {
@@ -325,7 +438,7 @@ fn reveal_rules() {
 		bounty_id: 0,
 		check_hash: CHECK,
 		params: op_terms.params,
-		blobs: op_terms.blobs,
+		blobs: vec![],
 		check_gas: op_terms.check_gas,
 		hunter: id(BOB),
 		salt: [BOB; 32],
@@ -487,7 +600,7 @@ fn check_args_layout() {
 fn with_blobs() -> Chain {
 	let mut c = setup();
 	let mut terms = c.terms();
-	terms.blobs = vec![extra(0), extra(1)];
+	terms.blobs = vec![plain(0), plain(1)];
 	terms.reward = 100;
 	c.create(terms).unwrap();
 	c
@@ -512,7 +625,7 @@ fn blobs_are_solicited_and_released_with_the_bounty() {
 	assert_eq!(c.solicited, vec![CHECK, EXTRA[0].0, EXTRA[1].0]);
 	// Bounty 2 shares blob 0 (twice) with bounty 1, and adds nothing new.
 	let mut terms = c.terms();
-	terms.blobs = vec![extra(0), extra(0)];
+	terms.blobs = vec![plain(0), plain(0)];
 	terms.reward = 100;
 	c.create(terms).unwrap();
 	assert_eq!(c.solicited.len(), 3, "shared blobs are solicited once");
@@ -545,7 +658,8 @@ fn reveal_must_name_the_bounty_blobs() {
 	c.commit(1, BOB, b"x").unwrap();
 	c.advance(MIN_COMMIT_AGE);
 	let terms = c.bounty(1).terms;
-	for blobs in [vec![], vec![extra(1), extra(0)], vec![extra(0)]] {
+	let b = |i| RevealBlob::Blob(extra(i));
+	for blobs in [vec![], vec![b(1), b(0)], vec![b(0)]] {
 		let op = Op::Reveal {
 			bounty_id: 1,
 			check_hash: CHECK,
@@ -573,20 +687,159 @@ fn blob_limits() {
 		salt: [0; 32],
 		witness: b"x".to_vec(),
 	};
-	let missing = BlobRef { hash: MISSING, len: 1 };
-	assert_eq!(refine(&ENV, SERVICE, reveal(vec![extra(0), missing])), Verified::Rejected(Rejection::BlobUnavailable));
-	let too_many = vec![extra(0); MAX_BLOBS as usize + 1];
+	let missing = RevealBlob::Blob(Preimage { hash: MISSING, len: 1 });
+	let one = RevealBlob::Blob(extra(0));
+	assert_eq!(refine(&ENV, SERVICE, reveal(vec![one.clone(), missing])), Verified::Rejected(Rejection::BlobUnavailable));
+	let too_many = vec![one; MAX_BLOBS as usize + 1];
 	assert_eq!(refine(&ENV, SERVICE, reveal(too_many)), Verified::Rejected(Rejection::BlobsTooLarge));
 
 	let mut c = setup();
 	let mut terms = c.terms();
-	terms.blobs = vec![extra(0); MAX_BLOBS as usize + 1];
+	terms.blobs = vec![plain(0); MAX_BLOBS as usize + 1];
 	assert_eq!(c.create(terms), Err("blobs too large"));
 	let mut terms = c.terms();
-	terms.blobs = vec![BlobRef { hash: MISSING, len: MAX_BLOBS_LEN / 2 + 1 }; 2];
+	terms.blobs = vec![BlobRef::Blob(Preimage { hash: MISSING, len: MAX_BLOBS_LEN / 2 + 1 }); 2];
 	assert_eq!(c.create(terms), Err("blobs too large"));
 	let mut terms = c.terms();
-	terms.blobs = vec![BlobRef { hash: MISSING, len: MAX_BLOBS_LEN / 2 }; 2];
+	terms.blobs = vec![BlobRef::Blob(Preimage { hash: MISSING, len: MAX_BLOBS_LEN / 2 }); 2];
 	terms.reward = 100;
 	c.create(terms).unwrap();
+}
+
+#[test]
+fn pins_hold_a_preimage_for_good() {
+	let mut c = setup();
+	c.pin(CAROL, extra(GOOD1)).unwrap();
+	assert_eq!(c.solicited, vec![CHECK, EXTRA[GOOD1].0]);
+	assert_eq!(c.account(CAROL), Account { balance: 100 - PIN_DEPOSIT, nonce: 1 });
+	// Pinning the check too keeps it once bounty 0 is over.
+	c.pin(CAROL, Preimage { hash: CHECK, len: BLOB.len() as u32 }).unwrap();
+	assert_eq!(c.refs(CHECK), Some(2));
+	let expiry = c.bounty(0).terms.expiry;
+	c.advance(expiry + REVEAL_GRACE - c.now);
+	c.reclaim(0).unwrap();
+	assert_eq!(c.refs(CHECK), Some(1));
+	assert!(c.forgotten.is_empty());
+
+	let too_big = Preimage { hash: MISSING, len: MAX_BLOBS_LEN + 1 };
+	assert_eq!(c.pin(CAROL, too_big), Err("blob too large"));
+	let forged = Op::Pin { owner: id(CAROL), nonce: 2, blob: extra(0), signature: key(MALLORY).sign(b"x").to_bytes() };
+	assert_eq!(refine(&ENV, SERVICE, forged), Verified::Rejected(Rejection::BadSignature));
+}
+
+#[test]
+fn attesting_a_layer() {
+	let mut c = setup();
+	let claim = c.attest(extra(GOOD1), &[]).unwrap();
+	let recorded: Attestation = c.get_typed(&StorageKey::Attestation(claim.id())).unwrap();
+	assert_eq!(recorded, Attestation { claim: claim.clone(), slot: c.now, attester: id(CAROL) });
+	assert_eq!(c.account(CAROL), Account { balance: 100 - ATTEST_DEPOSIT, nonce: 1 });
+	assert_eq!(c.refs(EXTRA[GOOD1].0), Some(1), "the subject is held for good");
+
+	assert_eq!(c.attest(extra(GOOD1), &[]), Err("already attested"));
+	assert_eq!(c.account(CAROL).balance, 100 - ATTEST_DEPOSIT, "nothing charged twice");
+	let rejected = |f| Verified::Rejected(Rejection::CheckFailed(f));
+	assert_eq!(c.refine_attest(extra(BAD), &[]), rejected(CheckFailure::False), "the check says no");
+	let missing = Preimage { hash: MISSING, len: 1 };
+	assert_eq!(c.refine_attest(missing, &[]), Verified::Rejected(Rejection::BlobUnavailable));
+	// The signature covers the claim, so it can't be replayed for another subject.
+	let (Op::Attest { signature, .. }, _) = c.attest_op(CAROL, CHECK, extra(GOOD2), &[]) else { unreachable!() };
+	let (Op::Attest { attester, nonce, check_hash, params, subject, parents, check_gas, .. }, _) =
+		c.attest_op(CAROL, CHECK, extra(GOOD1), &[])
+	else {
+		unreachable!()
+	};
+	let replayed = Op::Attest { attester, nonce, check_hash, params, subject, parents, check_gas, signature };
+	assert_eq!(refine(&ENV, SERVICE, replayed), Verified::Rejected(Rejection::BadSignature));
+}
+
+#[test]
+fn attesting_on_parents() {
+	let mut c = setup();
+	let layer1 = c.attest(extra(GOOD1), &[]).unwrap();
+	let layer2 = c.attest(extra(GOOD2), &[layer1.clone()]).unwrap();
+	assert_eq!(layer2.parents, vec![layer1.id()]);
+	assert_ne!(layer2.id(), c.attest(extra(GOOD2), &[]).unwrap().id(), "other foundations, other id");
+
+	// A parent nobody attested: refine runs the check on the claimed subject, and accumulate
+	// finds no such record.
+	let made_up = AttestationClaim { check_hash: CHECK, params_hash: blake2b256(b"layer"), subject: extra(BAD), parents: vec![] };
+	assert_eq!(c.attest(extra(GOOD2), &[made_up]), Err("no such parent attestation"));
+	// A parent by another check is refused outright, recorded or not.
+	let foreign = c.attest_with(CAROL, OTHER_CHECK, extra(GOOD1), &[]).unwrap();
+	assert_eq!(c.refine_attest(extra(GOOD2), &[foreign]), Verified::Rejected(Rejection::ForeignAttestation));
+	// So is a parent attested with other params, which might have been more lenient.
+	let (op, lenient) = c.attest_op_with_params(CAROL, CHECK, b"lenient", extra(GOOD1), &[]);
+	c.submit(op).unwrap();
+	assert_eq!(c.refine_attest(extra(GOOD2), &[lenient]), Verified::Rejected(Rejection::ForeignAttestation));
+	let too_many = vec![layer1; MAX_BLOBS as usize];
+	assert_eq!(c.refine_attest(extra(GOOD2), &too_many), Verified::Rejected(Rejection::BlobsTooLarge));
+}
+
+/// Bounty 1 cites a two-layer chain attested by its check; bounty 2 another check's attestation.
+fn with_attested_blobs() -> (Chain, AttestationClaim, AttestationClaim) {
+	let mut c = setup();
+	let layer1 = c.attest(extra(GOOD1), &[]).unwrap();
+	let layer2 = c.attest(extra(GOOD2), &[layer1.clone()]).unwrap();
+	let mut terms = c.terms();
+	terms.blobs = vec![BlobRef::Attested(layer1.id()), BlobRef::Attested(layer2.id())];
+	terms.reward = 100;
+	c.create(terms).unwrap();
+	(c, layer1, layer2)
+}
+
+#[test]
+fn bounties_cite_attested_blobs_as_trusted() {
+	let (mut c, layer1, _) = with_attested_blobs();
+	assert_eq!(c.solicited, vec![CHECK, EXTRA[GOOD1].0, EXTRA[GOOD2].0]);
+	assert_eq!(c.refs(EXTRA[GOOD1].0), Some(1), "a citing bounty adds no hold");
+	c.commit(1, BOB, b"trusted").unwrap();
+	c.advance(MIN_COMMIT_AGE);
+	c.reveal(1, BOB, b"trusted").unwrap();
+	c.advance(MIN_CLAIM_WINDOW);
+	c.finalize(1).unwrap();
+	assert_eq!(c.winner(1), id(BOB));
+	assert!(c.forgotten.is_empty(), "attested subjects stay");
+
+	// A bounty can mix plain and attested blobs; a plain one is never trusted.
+	let mut terms = c.terms();
+	terms.blobs = vec![BlobRef::Attested(layer1.id()), plain(0)];
+	terms.reward = 100;
+	c.create(terms).unwrap(); // bounty 2
+	c.commit(2, BOB, b"trusted").unwrap();
+	c.advance(MIN_COMMIT_AGE);
+	assert_eq!(c.reveal(2, BOB, b"trusted"), Err("rejected in refine"));
+}
+
+#[test]
+fn bounties_cite_only_their_own_check_attestations() {
+	let (mut c, layer1, _) = with_attested_blobs();
+	let mut terms = c.terms();
+	terms.blobs = vec![BlobRef::Attested([9; 32])];
+	assert_eq!(c.create(terms), Err("no such attestation"));
+	let foreign = c.attest_with(CAROL, OTHER_CHECK, extra(GOOD1), &[]).unwrap();
+	let mut terms = c.terms();
+	terms.blobs = vec![BlobRef::Attested(foreign.id())];
+	assert_eq!(c.create(terms), Err("attested by another check"));
+
+	// At reveal, a claim by another check is refused in refine, and a plain blob in place of an
+	// attested one doesn't match the terms.
+	c.commit(1, BOB, b"trusted").unwrap();
+	c.advance(MIN_COMMIT_AGE);
+	let reveal = |blobs| Op::Reveal {
+		bounty_id: 1,
+		check_hash: CHECK,
+		params: b"params".to_vec(),
+		blobs,
+		check_gas: 1000,
+		hunter: id(BOB),
+		salt: [BOB; 32],
+		witness: b"x".to_vec(),
+	};
+	let BlobRef::Attested(layer2_id) = c.bounty(1).terms.blobs[1] else { unreachable!() };
+	let layer2 = c.claims[&layer2_id].clone();
+	let foreign_blob = RevealBlob::Attested(foreign);
+	assert_eq!(refine(&ENV, SERVICE, reveal(vec![foreign_blob])), Verified::Rejected(Rejection::ForeignAttestation));
+	let as_plain = vec![RevealBlob::Blob(layer1.subject), RevealBlob::Attested(layer2)];
+	assert_eq!(c.submit(reveal(as_plain)), Err("revealed against different terms"));
 }

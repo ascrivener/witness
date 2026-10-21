@@ -19,6 +19,24 @@
 //! witness_check::declare_full_check!(check);
 //! ```
 //!
+//! A full check can also attest: in [`Mode::Attest`] it verifies a subject blob once, and the
+//! service records that it did. Bounties on the same check can then cite the attestation, and
+//! the check receives the subject marked trusted, so it can skip re-verifying it:
+//!
+//! ```ignore
+//! fn check(input: &witness_check::Input) -> bool {
+//!     match input.mode {
+//!         // Parents are trusted; verify the subject on top of them.
+//!         Mode::Attest => input.subject().is_some_and(|s| layer_is_valid(&input, s)),
+//!         // Verify only what isn't trusted, then the witness against it all.
+//!         Mode::Reveal => input.blobs().all(|b| b.trusted || layer_is_valid(&input, b)) && solves(&input),
+//!     }
+//! }
+//! ```
+//!
+//! A trusted blob was attested by this same check (the service makes sure of it), so the check
+//! can rely on whatever its own attest mode verified.
+//!
 //! The check runs in an inner PVM with no host calls but one: with this crate's `alloc` feature
 //! it gets a global allocator, and the service grows its heap on request. No logging, no I/O.
 //! Any other host call, a panic, a page fault or running out of gas counts as `false`.
@@ -42,15 +60,16 @@ pub const INTERFACE_VERSION: u8 = 2;
 pub enum Mode {
 	/// Does the witness solve the bounty?
 	Reveal,
-	/// Reserved for attestations: does the subject blob verify? The service does not send it yet.
+	/// Does the subject, the last blob, verify given the others (the subjects of its parent
+	/// attestations, all trusted)? The witness is empty. Returning true records an attestation.
 	Attest,
 }
 
 /// One of the blobs the bounty names, in the order it names them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Blob<'a> {
-	/// Reserved for attestations: the blob was already verified, so the check may rely on it.
-	/// Always false for now.
+	/// The blob is the subject of an attestation by this same check, so the check may rely on
+	/// whatever it verified in attest mode.
 	pub trusted: bool,
 	pub hash: &'a [u8; 32],
 	pub data: &'a [u8],
@@ -117,6 +136,14 @@ impl<'a> Input<'a> {
 	/// The bounty's `i`th blob.
 	pub fn blob(&self, i: usize) -> Option<Blob<'a>> {
 		self.blobs().nth(i)
+	}
+
+	/// In attest mode, the blob being attested: the last one. `None` in reveal mode.
+	pub fn subject(&self) -> Option<Blob<'a>> {
+		match self.mode {
+			Mode::Attest => self.blobs().last(),
+			Mode::Reveal => None,
+		}
 	}
 }
 
@@ -228,6 +255,12 @@ mod tests {
 		let args = check_args(CheckMode::Attest, &[], b"", b"");
 		let input = Input::parse(&args).unwrap();
 		assert_eq!((input.mode, input.params, input.witness, input.blobs().len()), (Mode::Attest, &b""[..], &b""[..], 0));
+		assert_eq!(input.subject(), None);
+
+		let args = check_args(CheckMode::Attest, &blobs, b"", b"");
+		assert_eq!(Input::parse(&args).unwrap().subject(), Some(Blob { trusted: true, hash: &[2; 32], data: b"" }));
+		let args = check_args(CheckMode::Reveal, &blobs, b"", b"");
+		assert_eq!(Input::parse(&args).unwrap().subject(), None, "no subject when revealing");
 	}
 
 	#[test]

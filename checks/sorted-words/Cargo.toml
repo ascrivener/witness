@@ -1,0 +1,19 @@
+[package]
+name = "sorted-words-check"
+description = "Sample witness check that attests: sorted word volumes, verified once and then binary-searched"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+# A check has one entry point at pc 0, which is the authorizer layout.
+[package.metadata.jam]
+type = "authorizer"
+
+[dependencies]
+witness-check.workspace = true
+polkavm-derive.workspace = true
+blake2b_simd.workspace = true
+
+[dev-dependencies]
+witness-types = { workspace = true, features = ["std"] }

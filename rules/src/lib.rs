@@ -18,11 +18,12 @@ mod tests;
 use alloc::{collections::BTreeMap, vec::Vec};
 use codec::{Decode, Encode};
 use witness_types::{
-	Account, AccountId, BlobRef, Bounty, BountyId, BountyStatus, BountyTerms, COMMIT_DEPOSIT,
-	CheckBlob, CheckMode, Claim, CommitRecord, Gas, Hash, MAX_BLOBS, MAX_BLOBS_LEN, MAX_CHECK_GAS,
-	MAX_CHECK_LEN, MAX_CLAIM_WINDOW, MAX_MINT, MAX_PARAMS_LEN, MAX_WITNESS_LEN, MIN_CLAIM_WINDOW,
-	MIN_COMMIT_AGE, Op, Points, REVEAL_GRACE, Rejection, Signature, Slot, StorageKey, Verified,
-	blake2b256,
+	ATTEST_DEPOSIT, Account, AccountId, Attestation, AttestationClaim, AttestationId, BlobRef,
+	Bounty, BountyId, BountyStatus, BountyTerms, COMMIT_DEPOSIT, CheckBlob, CheckMode, Claim,
+	CommitRecord, Gas, Hash, MAX_BLOBS, MAX_BLOBS_LEN, MAX_CHECK_GAS, MAX_CHECK_LEN,
+	MAX_CLAIM_WINDOW, MAX_MINT, MAX_PARAMS_LEN, MAX_WITNESS_LEN, MIN_CLAIM_WINDOW, MIN_COMMIT_AGE,
+	Op, PIN_DEPOSIT, Points, Preimage, REVEAL_GRACE, RevealBlob, Rejection, Signature, Slot,
+	StorageKey, Verified, blake2b256,
 };
 
 /// What refine needs from the host.
@@ -54,6 +55,52 @@ pub type Result<T> = core::result::Result<T, &'static str>;
 fn verify_signature(key: &AccountId, message: &[u8], signature: &Signature) -> bool {
 	let Ok(key) = ed25519_dalek::VerifyingKey::from_bytes(key) else { return false };
 	key.verify_strict(message, &ed25519_dalek::Signature::from_bytes(signature)).is_ok()
+}
+
+/// Look up each of `blobs` (with whether the check may trust it), stopping as soon as their total
+/// length passes [`MAX_BLOBS_LEN`]: refine can't tell yet whether they are the ones it should be
+/// given, so it must not copy unbounded data.
+fn fetch_blobs(
+	env: &impl RefineEnv,
+	blobs: impl Iterator<Item = (Preimage, bool)>,
+) -> core::result::Result<Vec<(Preimage, bool, Vec<u8>)>, Rejection> {
+	let mut fetched = Vec::new();
+	let mut total = 0;
+	for (blob, trusted) in blobs {
+		let data = env.lookup(&blob.hash).ok_or(Rejection::BlobUnavailable)?;
+		total += data.len();
+		if total > MAX_BLOBS_LEN as usize {
+			return Err(Rejection::BlobsTooLarge);
+		}
+		fetched.push((blob, trusted, data));
+	}
+	Ok(fetched)
+}
+
+/// Run check blob `check_hash` in `mode` on `blobs`, `params` and `witness`.
+fn run(
+	env: &impl RefineEnv,
+	check_hash: &Hash,
+	mode: CheckMode,
+	blobs: &[(Preimage, bool, Vec<u8>)],
+	params: &[u8],
+	witness: &[u8],
+	gas: Gas,
+) -> core::result::Result<(), Rejection> {
+	let check = env.lookup(check_hash).ok_or(Rejection::CheckUnavailable)?;
+	let blobs: Vec<CheckBlob> = blobs
+		.iter()
+		.map(|(blob, trusted, data)| CheckBlob { trusted: *trusted, hash: blob.hash, data })
+		.collect();
+	env.run_check(&check, &witness_types::check_args(mode, &blobs, params, witness), gas)
+}
+
+/// The preimage a reveal blob is, and whether the check may trust it.
+fn reveal_blob(blob: &RevealBlob) -> (Preimage, bool) {
+	match blob {
+		RevealBlob::Blob(p) => (*p, false),
+		RevealBlob::Attested(claim) => (claim.subject, true),
+	}
 }
 
 /// Verify `op`, received by service `service_id`.
@@ -88,36 +135,23 @@ pub fn refine(env: &impl RefineEnv, service_id: u32, op: Op) -> Verified {
 			if blobs.len() > MAX_BLOBS as usize {
 				return Verified::Rejected(Rejection::BlobsTooLarge);
 			}
-			let Some(check) = env.lookup(&check_hash) else {
-				return Verified::Rejected(Rejection::CheckUnavailable);
-			};
-			let mut data = Vec::with_capacity(blobs.len());
-			let mut total = 0;
-			for blob in &blobs {
-				let Some(bytes) = env.lookup(&blob.hash) else {
-					return Verified::Rejected(Rejection::BlobUnavailable);
-				};
-				// Stop early: the blobs need not be the bounty's, and accumulate checks that later.
-				total += bytes.len();
-				if total > MAX_BLOBS_LEN as usize {
-					return Verified::Rejected(Rejection::BlobsTooLarge);
-				}
-				data.push(bytes);
+			// Trust only this check's own attestations. Accumulate checks the claims are the
+			// bounty's, and the bounty only cites attestations that were recorded.
+			if blobs.iter().any(|b| matches!(b, RevealBlob::Attested(c) if c.check_hash != check_hash)) {
+				return Verified::Rejected(Rejection::ForeignAttestation);
 			}
-			let check_blobs: Vec<CheckBlob> = blobs
-				.iter()
-				.zip(&data)
-				.map(|(blob, data)| CheckBlob { trusted: false, hash: blob.hash, data })
-				.collect();
-			let args = witness_types::check_args(CheckMode::Reveal, &check_blobs, &params, &witness);
-			if let Err(rejection) = env.run_check(&check, &args, check_gas) {
+			let result = fetch_blobs(env, blobs.iter().map(reveal_blob)).and_then(|fetched| {
+				run(env, &check_hash, CheckMode::Reveal, &fetched, &params, &witness, check_gas)
+			});
+			if let Err(rejection) = result {
 				return Verified::Rejected(rejection);
 			}
+			let refs: Vec<BlobRef> = blobs.iter().map(RevealBlob::blob_ref).collect();
 			Verified::Reveal {
 				bounty_id,
 				check_hash,
 				params_hash: blake2b256(&params),
-				blobs_hash: blake2b256(&blobs.encode()),
+				blobs_hash: blake2b256(&refs.encode()),
 				check_gas,
 				commitment: witness_types::commitment(bounty_id, &witness, &hunter, &salt),
 				hunter,
@@ -133,6 +167,48 @@ pub fn refine(env: &impl RefineEnv, service_id: u32, op: Op) -> Verified {
 			Verified::Reclaim { bounty_id, maker, nonce }
 		},
 		Op::Release { bounty_id, commitment } => Verified::Release { bounty_id, commitment },
+		Op::Pin { owner, nonce, blob, signature } => {
+			let message = witness_types::pin_message(service_id, &owner, nonce, &blob);
+			if !verify_signature(&owner, &message, &signature) {
+				return Verified::Rejected(Rejection::BadSignature);
+			}
+			Verified::Pin { owner, nonce, blob }
+		},
+		Op::Attest { attester, nonce, check_hash, params, subject, parents, check_gas, signature } => {
+			let claim = AttestationClaim {
+				check_hash,
+				params_hash: blake2b256(&params),
+				subject,
+				parents: parents.iter().map(AttestationClaim::id).collect(),
+			};
+			let message = witness_types::attest_message(service_id, &attester, nonce, &claim.id());
+			if !verify_signature(&attester, &message, &signature) {
+				return Verified::Rejected(Rejection::BadSignature);
+			}
+			if check_gas > MAX_CHECK_GAS {
+				return Verified::Rejected(Rejection::CheckGasTooHigh);
+			}
+			if params.len() > MAX_PARAMS_LEN as usize {
+				return Verified::Rejected(Rejection::ParamsTooLong);
+			}
+			if parents.len() >= MAX_BLOBS as usize {
+				return Verified::Rejected(Rejection::BlobsTooLarge);
+			}
+			// A chain is verified under one check and one set of params: otherwise a layer
+			// attested with lenient params (or by a lenient check) would be trusted by a strict one.
+			if parents.iter().any(|p| p.check_hash != check_hash || p.params_hash != claim.params_hash) {
+				return Verified::Rejected(Rejection::ForeignAttestation);
+			}
+			// The parents' subjects, trusted, then the subject.
+			let blobs = parents.iter().map(|p| (p.subject, true)).chain([(subject, false)]);
+			let result = fetch_blobs(env, blobs).and_then(|fetched| {
+				run(env, &check_hash, CheckMode::Attest, &fetched, &params, &[], check_gas)
+			});
+			if let Err(rejection) = result {
+				return Verified::Rejected(rejection);
+			}
+			Verified::Attest { attester, nonce, claim }
+		},
 	}
 }
 
@@ -186,8 +262,12 @@ impl<S: State> Tx<'_, S> {
 		self.get(&StorageKey::Bounty(id)).ok_or("no such bounty")
 	}
 
+	fn attestation(&self, id: &AttestationId) -> Result<Attestation> {
+		self.get(&StorageKey::Attestation(*id)).ok_or("no such attestation")
+	}
+
 	/// Record a use of preimage `blob`, soliciting it if nothing used it yet.
-	fn acquire(&mut self, blob: BlobRef) {
+	fn acquire(&mut self, blob: Preimage) {
 		let key = StorageKey::PreimageRefs(blob.hash);
 		let refs: u32 = self.get(&key).unwrap_or(0);
 		if refs == 0 {
@@ -197,7 +277,7 @@ impl<S: State> Tx<'_, S> {
 	}
 
 	/// Drop a use of preimage `blob`, forgetting it once nothing uses it.
-	fn release(&mut self, blob: BlobRef) {
+	fn release(&mut self, blob: Preimage) {
 		let key = StorageKey::PreimageRefs(blob.hash);
 		match self.get::<u32>(&key).unwrap_or(0) {
 			0 | 1 => {
@@ -216,10 +296,15 @@ impl<S: State> Tx<'_, S> {
 	}
 }
 
-/// The preimages a bounty's reveals need: its check blob, then its extra blobs.
-fn preimages(terms: &BountyTerms) -> impl Iterator<Item = BlobRef> + '_ {
-	let check = BlobRef { hash: terms.check_hash, len: terms.check_len };
-	core::iter::once(check).chain(terms.blobs.iter().copied())
+/// The preimages a bounty holds while unfinished: its check blob, then its plain blobs. Attested
+/// blobs are held for good by their attestations.
+fn preimages(terms: &BountyTerms) -> impl Iterator<Item = Preimage> + '_ {
+	let check = Preimage { hash: terms.check_hash, len: terms.check_len };
+	let plain = terms.blobs.iter().filter_map(|b| match b {
+		BlobRef::Blob(p) => Some(*p),
+		BlobRef::Attested(_) => None,
+	});
+	core::iter::once(check).chain(plain)
 }
 
 /// Whether a reveal could still change `bounty`'s outcome at `now`.
@@ -249,7 +334,19 @@ pub fn accumulate(state: &impl State, verified: Verified, now: Slot) -> Result<E
 			{
 				return Err("check too large");
 			}
-			let blobs_len = terms.blobs.iter().map(|b| b.len as u64).sum::<u64>();
+			let mut blobs_len = 0u64;
+			for blob in &terms.blobs {
+				blobs_len += match blob {
+					BlobRef::Blob(p) => p.len,
+					BlobRef::Attested(id) => {
+						let attestation = tx.attestation(id)?;
+						if attestation.claim.check_hash != terms.check_hash {
+							return Err("attested by another check");
+						}
+						attestation.claim.subject.len
+					},
+				} as u64;
+			}
 			if terms.blobs.len() > MAX_BLOBS as usize || blobs_len > MAX_BLOBS_LEN as u64 {
 				return Err("blobs too large");
 			}
@@ -369,6 +466,28 @@ pub fn accumulate(state: &impl State, verified: Verified, now: Slot) -> Result<E
 				}
 			}
 			tx.remove(&key);
+		},
+		Verified::Pin { owner, nonce, blob } => {
+			if blob.len > MAX_BLOBS_LEN.max(MAX_CHECK_LEN) {
+				return Err("blob too large");
+			}
+			tx.charge(&owner, nonce, PIN_DEPOSIT)?;
+			tx.acquire(blob);
+		},
+		Verified::Attest { attester, nonce, claim } => {
+			let id = claim.id();
+			if tx.attestation(&id).is_ok() {
+				return Err("already attested");
+			}
+			// Refine ran the check on the parents' claimed subjects; the ids bind those claims,
+			// so this makes sure they were really attested.
+			for parent in &claim.parents {
+				tx.attestation(parent).map_err(|_| "no such parent attestation")?;
+			}
+			tx.charge(&attester, nonce, ATTEST_DEPOSIT)?;
+			// Attestations are kept for good, so their subjects are too.
+			tx.acquire(claim.subject);
+			tx.set(&StorageKey::Attestation(id), &Attestation { claim, slot: now, attester });
 		},
 	}
 	Ok(tx.fx)

@@ -1,7 +1,9 @@
 # Design: attestations and multi-blob checks
 
-Status: phase 1 is partly implemented: extra blobs, check interface v2 and the check heap. Extrinsic witnesses and limits as parameters are not done yet.
-Phase 2 is a proposal.
+Status: phase 1 is partly implemented: extra blobs, check interface v2 and the check heap.
+Extrinsic witnesses and limits as parameters are not done yet. Phase 2 is implemented for
+bounties citing attestations and for chains of them; see "As built" below for where it differs
+from this proposal. Reveals citing extra attestations of their own are not done.
 
 ## Summary
 
@@ -114,6 +116,35 @@ check panics.
 defaults. The Lean checker blob alone is 629 KB, and a medium proof uses most of a refine.
 
 ## Phase 2: attestations
+
+### As built
+
+What follows is the proposal. The implementation settled these differently:
+
+- **A check only trusts its own attestations.** Parents must be by the same check with the same
+  params, and a bounty may only cite attestations by its own check. Without this, an attester
+  could name as a parent a layer "verified" by a check that accepts anything, or by this check
+  with lenient params (say, more axioms allowed), and the strict check would trust it. A bounty's
+  maker picks the attestations it cites, params included. With
+  it, a trusted blob always means "my own attest mode accepted this", so checks don't need to
+  recognize other checkers (the last security note below no longer applies).
+- **The id covers the params too:** `blake2b256(encode("witness/attest", claim))`, where the
+  claim is `(check_hash, params_hash, subject, parents)`. Params can change what a check accepts.
+- **Subjects are pinned first.** Refine has to look the subject up before accumulate ever sees the
+  attestation, so a new `Pin` op (signed, `PIN_DEPOSIT`) holds a preimage for good. The check
+  blob needs a pin too unless a bounty holds it.
+- **Pins and attestations are permanent,** with deposits that aren't refunded, so the preimages
+  they hold are too. Children don't need to count references to their parents.
+- **Refine gets the claims.** It can't read state, so `Attest` carries the parents' full claims,
+  and a reveal carries the claims of the bounty's attested blobs. Refine runs the check on the
+  claimed subjects. Accumulate then makes sure the claims were recorded: for `Attest` by looking
+  up the parents' ids, for `Reveal` by matching the bounty's terms, whose attestations were
+  checked when it was created.
+- **In attest mode** the check gets the parents' subjects, trusted and in order, then the subject,
+  untrusted, last. The witness is empty. `witness_check::Input::subject()` returns the subject.
+- **Parents are listed in full.** An attestation names every layer it relies on, not only the
+  one below it, since the check needs all their data. Nothing enforces that a parent's own
+  parents are included. If they're missing, the check sees less data and most likely fails.
 
 ### What one is
 

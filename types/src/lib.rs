@@ -14,6 +14,16 @@
 //!   revealed for can be reclaimed by its maker.
 //! - A valid reveal refunds its commitment's deposit; unrevealed commitments forfeit theirs, which
 //!   is what makes spamming commitments cost something.
+//!
+//! Attestations let checks reuse verification across refines:
+//! - `Pin` holds a preimage for good, so refine can look it up.
+//! - `Attest` runs a check in attest mode on a pinned subject blob, trusting the subjects of the
+//!   parent attestations it names. If the check returns true, accumulate records an
+//!   [`Attestation`]: "check C, with these params, verified this blob given these parents".
+//! - A bounty can name an attestation instead of a plain blob. Its check then receives the
+//!   attested blob marked trusted, and can skip re-verifying it.
+//! - A check only ever trusts its own attestations: parents must be by the same check with the
+//!   same params, and a bounty may only cite attestations by its own check.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
@@ -32,6 +42,8 @@ pub type BountyId = u64;
 pub type Slot = u32;
 pub type Points = u64;
 pub type Gas = u64;
+/// See [`AttestationClaim::id`].
+pub type AttestationId = Hash;
 
 /// Most gas a bounty may give its check. Must leave refine enough headroom for the rest of a
 /// Reveal (lookup, hashing, setting up the inner PVM) within one work-item's refine gas.
@@ -62,6 +74,10 @@ pub const MAX_CLAIM_WINDOW: Slot = 14_400;
 pub const REVEAL_GRACE: Slot = 20;
 /// Points a commitment locks up; refunded on a valid reveal, forfeited otherwise.
 pub const COMMIT_DEPOSIT: Points = 10;
+/// Points a pin costs. Pins are permanent, so this is never refunded.
+pub const PIN_DEPOSIT: Points = 10;
+/// Points an attestation costs. Attestations are permanent, so this is never refunded.
+pub const ATTEST_DEPOSIT: Points = 10;
 /// Largest single faucet mint.
 pub const MAX_MINT: Points = 1_000_000;
 
@@ -74,9 +90,66 @@ pub fn blake2b256(data: &[u8]) -> Hash {
 
 /// A preimage of the service, by hash and length.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
-pub struct BlobRef {
+pub struct Preimage {
 	pub hash: Hash,
 	pub len: u32,
+}
+
+/// A blob a bounty gives its check.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
+pub enum BlobRef {
+	/// A plain preimage: the check must verify whatever it relies on in it.
+	Blob(Preimage),
+	/// The subject of an attestation by the bounty's own check, passed to it as trusted.
+	Attested(AttestationId),
+}
+
+/// What an attestation says: check `check_hash`, run in attest mode with params hashing to
+/// `params_hash`, returned true for `subject`, trusting the subjects of `parents`.
+#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
+pub struct AttestationClaim {
+	pub check_hash: Hash,
+	pub params_hash: Hash,
+	pub subject: Preimage,
+	/// Attestations by the same check with the same params, whose subjects the check received as
+	/// trusted, in order.
+	pub parents: Vec<AttestationId>,
+}
+
+impl AttestationClaim {
+	/// The attestation's id. It covers the check, the params, the subject and the parents, so
+	/// the same blob verified by another check version or on other foundations is another
+	/// attestation.
+	pub fn id(&self) -> AttestationId {
+		blake2b256(&(b"witness/attest", self).encode())
+	}
+}
+
+/// A recorded attestation. Kept for good.
+#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
+pub struct Attestation {
+	pub claim: AttestationClaim,
+	/// The slot it was accumulated.
+	pub slot: Slot,
+	pub attester: AccountId,
+}
+
+/// A blob as a reveal names it. Refine can't read state, so for an attested blob the hunter
+/// supplies the claim; its id must match the bounty's.
+#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
+pub enum RevealBlob {
+	Blob(Preimage),
+	Attested(AttestationClaim),
+}
+
+impl RevealBlob {
+	/// How the bounty's terms name this blob.
+	pub fn blob_ref(&self) -> BlobRef {
+		match self {
+			RevealBlob::Blob(p) => BlobRef::Blob(*p),
+			RevealBlob::Attested(claim) => BlobRef::Attested(claim.id()),
+		}
+	}
 }
 
 /// What a maker puts up, and what a hunter must reproduce exactly when revealing.
@@ -87,8 +160,9 @@ pub struct BountyTerms {
 	pub check_len: u32,
 	/// Passed to the check alongside the witness, so one check blob can serve many bounties.
 	pub params: Vec<u8>,
-	/// Preimages refine passes to the check, in order, such as a statement environment or a
-	/// library. Solicited and released along with the check blob.
+	/// Blobs refine passes to the check, in order, such as a statement environment or a library.
+	/// Plain blobs are solicited and released along with the check blob; attested ones are
+	/// already held for good.
 	pub blobs: Vec<BlobRef>,
 	pub reward: Points,
 	pub check_gas: Gas,
@@ -118,7 +192,7 @@ pub enum Op {
 		/// and accumulate checks them.
 		check_hash: Hash,
 		params: Vec<u8>,
-		blobs: Vec<BlobRef>,
+		blobs: Vec<RevealBlob>,
 		check_gas: Gas,
 		hunter: AccountId,
 		salt: Hash,
@@ -130,6 +204,22 @@ pub enum Op {
 	/// Delete a commitment that can no longer be revealed. Anyone may send it; the deposit is
 	/// already forfeit.
 	Release { bounty_id: BountyId, commitment: Hash },
+	/// Hold `blob` as a preimage for good, paying [`PIN_DEPOSIT`], so attestations can use it.
+	Pin { owner: AccountId, nonce: u64, blob: Preimage, signature: Signature },
+	/// Attest that check `check_hash` accepts `subject` given `parents`, paying
+	/// [`ATTEST_DEPOSIT`]. The check and every subject must already be held, by a pin or a
+	/// bounty. Refine can't read state, so the attester supplies the parents' claims; accumulate
+	/// checks they were recorded.
+	Attest {
+		attester: AccountId,
+		nonce: u64,
+		check_hash: Hash,
+		params: Vec<u8>,
+		subject: Preimage,
+		parents: Vec<AttestationClaim>,
+		check_gas: Gas,
+		signature: Signature,
+	},
 }
 
 /// Why a check did not return true.
@@ -157,6 +247,8 @@ pub enum Rejection {
 	BlobUnavailable,
 	/// More than [`MAX_BLOBS`] blobs, or more than [`MAX_BLOBS_LEN`] bytes of them.
 	BlobsTooLarge,
+	/// An attestation by a check other than the one being run.
+	ForeignAttestation,
 	/// The check blob is not a valid standard program, or needs more memory than allowed.
 	BadCheckBlob,
 	CheckFailed(CheckFailure),
@@ -184,6 +276,9 @@ pub enum Verified {
 	Finalize { bounty_id: BountyId },
 	Reclaim { bounty_id: BountyId, maker: AccountId, nonce: u64 },
 	Release { bounty_id: BountyId, commitment: Hash },
+	Pin { owner: AccountId, nonce: u64, blob: Preimage },
+	/// The check returned true in attest mode; accumulate records `claim` if its parents were.
+	Attest { attester: AccountId, nonce: u64, claim: AttestationClaim },
 	Rejected(Rejection),
 }
 
@@ -243,9 +338,10 @@ pub enum StorageKey {
 	/// would let anyone copy a commitment onto another bounty first and block the real one.
 	Commitment(BountyId, Hash),
 	NextBountyId,
-	/// How many uses by unfinished bounties a preimage has, as a check blob or an extra blob; the
-	/// preimage is forgotten when it reaches zero.
+	/// How many holders a preimage has: unfinished bounties using it as a check blob or a plain
+	/// blob, pins, and attestations of it. The preimage is forgotten when it reaches zero.
 	PreimageRefs(Hash),
+	Attestation(AttestationId),
 }
 
 /// The commitment a hunter posts before revealing `witness`.
@@ -269,6 +365,16 @@ pub fn commit_message(
 	(b"witness/commit", service_id, bounty_id, committer, nonce, commitment).encode()
 }
 
+/// The message an owner signs to pin `blob` on service `service_id`.
+pub fn pin_message(service_id: u32, owner: &AccountId, nonce: u64, blob: &Preimage) -> Vec<u8> {
+	(b"witness/pin", service_id, owner, nonce, blob).encode()
+}
+
+/// The message an attester signs to attest the claim with id `id` on service `service_id`.
+pub fn attest_message(service_id: u32, attester: &AccountId, nonce: u64, id: &AttestationId) -> Vec<u8> {
+	(b"witness/attest", service_id, attester, nonce, id).encode()
+}
+
 /// The message a maker signs to reclaim bounty `bounty_id` on service `service_id`.
 pub fn reclaim_message(service_id: u32, bounty_id: BountyId, maker: &AccountId, nonce: u64) -> Vec<u8> {
 	(b"witness/reclaim", service_id, bounty_id, maker, nonce).encode()
@@ -283,15 +389,14 @@ pub const CHECK_INTERFACE_VERSION: u8 = 2;
 pub enum CheckMode {
 	/// Does the witness solve the bounty?
 	Reveal = 0,
-	/// Reserved for attestations: does the subject blob verify? Not sent yet.
+	/// Does the subject, the last blob, verify given the others? The witness is empty.
 	Attest = 1,
 }
 
 /// A blob as a check receives it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CheckBlob<'a> {
-	/// Reserved for attestations: the blob was already verified, so the check may rely on it.
-	/// Always false for now.
+	/// The blob is the subject of an attestation by this same check, so the check may rely on it.
 	pub trusted: bool,
 	pub hash: Hash,
 	pub data: &'a [u8],

@@ -6,10 +6,12 @@
 # Starts a testnet (unless JAM_RPC is set, in which case it uses that one), builds and deploys
 # the service and the sample checks.
 #
-# --quick (about 4 minutes, a third of it starting the testnet) then mints, creates two bounties,
+# --quick (about 6 minutes, a third of it starting the testnet) then mints, creates two bounties,
 # provides their check blobs and the dictionary blob, commits, and reveals a wrong and a right
-# witness on each. That covers everything that touches the node: deploy, refine and accumulate,
-# the preimage lookups, the inner PVM and growing its heap. It skips the claim windows.
+# witness on each. Then it attests two word volumes, one on the other, refuses a bad one, and
+# reveals on a bounty that cites the two. That covers everything that touches the node: deploy,
+# refine and accumulate, pins and preimage lookups, the inner PVM in both modes and growing its
+# heap. It skips the claim windows.
 #
 # The full run (about 8 minutes, mostly claim windows) instead does:
 #   bounty 0 (factor check):     Bob commits; Mallory copies x, commits later and reveals first;
@@ -18,6 +20,7 @@
 #                                later one refunds Alice; Dave's dead commitment is released.
 #   bounty 2 (preimage check):   shares bounty 1's check blob; Carol reveals and wins.
 #   bounty 3 (dictionary check): reads a dictionary blob and allocates; Erin reveals and wins.
+#   bounty 4 (sorted-words check): the attestation steps above, with Erin revealing.
 # checking the chain state after each step.
 set -euo pipefail
 
@@ -37,6 +40,12 @@ LOG=$TMP/testnet.log
 DICT=$TMP/dictionary.txt
 printf 'open\nsesame\nsome\nwords\n' >"$DICT"
 SENTENCE="open sesame some words"
+# Word volumes for the sorted-words check: 16-byte records, padded with spaces.
+VOL1=$TMP/volume1.bin VOL2=$TMP/volume2.bin BADVOL=$TMP/bad-volume.bin
+printf '%-16s' apple banana cherry >"$VOL1"
+printf '%-16s' grape lemon mango >"$VOL2"
+printf '%-16s' zebra yak >"$BADVOL" # not sorted
+CLAIM1=$TMP/volume1.claim CLAIM2=$TMP/volume2.claim BADCLAIM=$TMP/bad-volume.claim
 
 N=9903520302753827148829556741 # (2^61 - 1) * 4294967291
 FACTOR=4294967291
@@ -104,6 +113,7 @@ cargo jam-build --out-dir out >/dev/null
 FACTOR_CHECK=out/factor-check.jam
 PREIMAGE_CHECK=out/blake2b-preimage-check.jam
 DICT_CHECK=out/dictionary-check.jam
+WORDS_CHECK=out/sorted-words-check.jam
 FACTOR_HASH=$($W hash --check $FACTOR_CHECK)
 PREIMAGE_HASH=$($W hash --check $PREIMAGE_CHECK)
 DICT_CHECK_HASH=$($W hash --check $DICT_CHECK)
@@ -119,6 +129,50 @@ create_dictionary_bounty() {
 	echo "ok: dictionary referenced"
 	"$JAMT" provide "$SVC" $DICT_CHECK >/dev/null
 	"$JAMT" provide "$SVC" "$DICT" >/dev/null
+}
+
+# Pat pins the sorted-words check and the volumes, attests volume 1 and then volume 2 on it, and
+# fails to attest the unsorted volume. Then bounty $1 (Alice, nonce $2) cites the two
+# attestations, and hunter $3 (nonce $4) reveals a wrong and a right witness.
+attestations() {
+	local bounty=$1 alice_nonce=$2 hunter=$3 hunter_nonce=$4
+	step "attesting word volumes"
+	item "$($W mint --to pat --amount 100)"
+	expect "pat has 100" 'balance: 100, nonce: 0' account --account pat
+	local nonce=0
+	for f in $WORDS_CHECK "$VOL1" "$VOL2" "$BADVOL"; do
+		item "$($W pin --service "$SVC" --owner pat --nonce $nonce --blob "$f")"
+		nonce=$((nonce + 1))
+	done
+	expect "pat paid for four pins" 'balance: 60, nonce: 4' account --account pat
+	for f in $WORDS_CHECK "$VOL1" "$VOL2" "$BADVOL"; do "$JAMT" provide "$SVC" "$f" >/dev/null; done
+	wait_slot $(( $(slot) + 2 ))
+	item "$($W attest --service "$SVC" --attester pat --nonce 4 --check $WORDS_CHECK --subject "$VOL1" \
+		--check-gas $GAS --claim-out "$CLAIM1" 2>/dev/null)"
+	expect "volume 1 attested" 'Attestation \{ claim' attestation --attestation "$CLAIM1"
+	item "$($W attest --service "$SVC" --attester pat --nonce 5 --check $WORDS_CHECK --subject "$VOL2" \
+		--parents "$CLAIM1" --check-gas $GAS --claim-out "$CLAIM2" 2>/dev/null)"
+	expect "volume 2 attested on volume 1" 'Attestation \{ claim' attestation --attestation "$CLAIM2"
+	item "$($W attest --service "$SVC" --attester pat --nonce 6 --check $WORDS_CHECK --subject "$BADVOL" \
+		--parents "$CLAIM1,$CLAIM2" --check-gas $GAS --claim-out "$BADCLAIM" 2>/dev/null)"
+	expect_still "unsorted volume not attested" '^none$' attestation --attestation "$BADCLAIM"
+	expect "pat paid for two attestations" 'balance: 40, nonce: 6' account --account pat
+
+	step "a bounty citing the attestations"
+	local blobs="claim:$CLAIM1,claim:$CLAIM2"
+	item "$($W create --service "$SVC" --maker alice --nonce "$alice_nonce" --check $WORDS_CHECK --params 0x00 \
+		--blobs "$blobs" --reward 100 --check-gas $GAS --expiry $(( $(slot) + 100 )))"
+	expect "bounty $bounty open" 'status: Open' bounty --bounty "$bounty"
+	item "$($W commit --service "$SVC" --bounty "$bounty" --hunter "$hunter" --nonce "$hunter_nonce" --salt 0x77 \
+		--witness-str "cherry lemon" 2>/dev/null)"
+	expect "$hunter committed to bounty $bounty" "nonce: $((hunter_nonce + 1))" account --account "$hunter"
+	wait_slot $(( $(slot) + 4 )) # MIN_COMMIT_AGE
+	item "$($W reveal --bounty "$bounty" --check $WORDS_CHECK --params 0x00 --blobs "$blobs" --check-gas $GAS \
+		--hunter "$hunter" --salt 0x77 --witness-str "cherry kiwi")"
+	expect_still "word in no volume changed nothing" 'status: Open' bounty --bounty "$bounty"
+	item "$($W reveal --bounty "$bounty" --check $WORDS_CHECK --params 0x00 --blobs "$blobs" --check-gas $GAS \
+		--hunter "$hunter" --salt 0x77 --witness-str "cherry lemon")"
+	expect "$hunter's reveal on attested volumes opens the window" 'Revealing' bounty --bounty "$bounty"
 }
 
 # Reveal on dictionary bounty $1 as hunter $2 with salt $3 and witness $4.
@@ -174,6 +228,8 @@ if [ -n "$QUICK" ]; then
 	expect_still "non-dictionary witness changed nothing" 'status: Open' bounty --bounty 1
 	reveal_dictionary 1 bob 0x0b0b "$SENTENCE"
 	expect "bob's dictionary reveal opens the window" 'Revealing' bounty --bounty 1
+
+	attestations 2 2 bob 2
 	printf '\nquick end-to-end checks passed (claim windows, finalize and reclaim not run)\n'
 	exit 0
 fi
@@ -276,5 +332,7 @@ echo "ok: every check blob and the dictionary released"
 item "$($W release --bounty 1 --commitment "$DAVE_C")"
 expect "dave's dead commitment deleted" '^none$' commitment --bounty 1 --commitment "$DAVE_C"
 expect "dave's deposit forfeit" 'balance: 90, nonce: 1' account --account dave
+
+attestations 4 5 erin 1
 
 printf '\nall end-to-end checks passed\n'
