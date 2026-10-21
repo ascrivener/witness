@@ -1,13 +1,16 @@
 # Design: attestations and multi-blob checks
 
-Status: proposal. Not implemented.
+Status: phase 1 is partly implemented on the `multi-blob-checks` branch: extra blobs, check
+interface v2 and the check heap. Extrinsic witnesses and limits as parameters are not done yet.
+Phase 2 is a proposal.
 
 ## Summary
 
 Today a check sees one blob (itself), the bounty's `params` (at most 4 KB) and the witness (at most
 64 KB). It must do all its verification inside one refine, from scratch, on every reveal.
 
-The [Lean checker spike](../../spikes/lean-checker/README.md) showed where that breaks:
+The [Lean checker spike](https://github.com/ascrivener/witness/blob/spike/lean-checker/spikes/lean-checker/README.md)
+(on the unmerged `spike/lean-checker` branch) showed where that breaks:
 - Real proof bounties need large supporting data, such as a statement environment or library
   layers.
 - Much of the work is the same on every reveal (checking that data), and some of it is too big for
@@ -32,6 +35,10 @@ It depends on proof size, measured with the Lean checker on PolkaJam v0.1.29:
 | Small (`2 + 2 = 4`, list and induction lemmas) | 50–110 M gas | the delta alone: ~1.6 M for `2 + 2 = 4` |
 | Medium (`Nat.gcd_comm`) | ~1.42×10⁹ gas | 948 M gas |
 | Mathlib-backed, professional | the library alone exceeds any single refine | pay per new declaration (~3.4 M gas each) |
+
+The "environment attested" column is measured by having the spike service skip checking the
+environment (its `BindPrechecked` op), since nothing can attest it yet. It's the per-reveal cost
+attestations would give, not something witness can do today.
 
 - **Not critical for a first version.** Small proofs fit easily. Medium ones fit in the full
   spec's 5×10⁹ refine budget, though not the testnet's 10⁹, assuming one work item can use most of
@@ -74,22 +81,33 @@ payload carries only the witness's hash. Refine fetches the extrinsic and checks
 The arguments the check receives become:
 
 ```
-E1(version = 2) ++ E1(mode) ++ E(n) ++ [E1(trusted) ++ hash ++ E(len) ++ bytes] × n ++ E(len) ++ params ++ witness
+E1(version = 2) ++ E1(mode) ++ E4(n) ++ [E1(trusted) ++ hash ++ E4(len) ++ bytes] × n ++ E4(len) ++ params ++ witness
 ```
+
+Lengths are fixed 4-byte little-endian, as in version 1, so a check can parse them without a
+codec.
 
 - **`mode`:** `0` for reveal; `1` for attest (phase 2). In phase 1 it's always 0.
 - **`trusted`:** always 0 in phase 1. In phase 2, 1 marks a blob covered by an attestation the
   caller relies on.
 
-`witness-check` gains a `declare_check_v2!` that hands the check a parsed view of all this. The
-version byte lets the service keep accepting today's checks, which become version 1, during a
-transition.
+`witness-check` parses this into an `Input`, and gains `declare_full_check!`, which hands the check
+the whole `Input`. `declare_check!` keeps today's `fn(params, x) -> bool` form on top of version 2,
+and returns false in any mode but reveal, so a simple check can never attest anything.
+
+The service sends only version 2. Witness only runs on test networks so far, so existing checks
+are rebuilt rather than kept working. The version byte is for future changes.
 
 ### Memory
 
 The service answers `grow_heap` from the inner VM by mapping more pages, up to a per-check page
 cap, then resumes it. `witness-check` provides an allocator built on it. This makes ordinary `alloc`
 Rust (`Vec`, `BTreeMap`, parsers) usable in checks.
+
+As implemented, the heap grows from the end of the check's read-write data and may not reach its
+stack, and the check pays `grow_heap`'s gas (275 plus 121 per page). Past `MAX_CHECK_PAGES`,
+counting the arguments, the call returns the heap's current end, so the allocation fails and the
+check panics.
 
 ### Limits
 
