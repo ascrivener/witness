@@ -20,15 +20,17 @@ usage: witness <command> [--flag value ...]
   create    --service ID --maker S --nonce N --check FILE PARAMS [--blobs FILES] --reward N
             --check-gas G --expiry SLOT [--claim-window SLOTS]
   commit    --service ID --bounty ID --hunter S [--committer S] --nonce N --salt HEX WITNESS
-  reveal    --bounty ID --check FILE PARAMS [--blobs FILES] --check-gas G --hunter S --salt HEX
-            WITNESS
+  reveal    --bounty ID --check FILE PARAMS [--blobs FILES] [--extra CLAIMS] --check-gas G
+            --hunter S --salt HEX WITNESS
+            --extra: attested layers continuing the bounty's chain
   finalize  --bounty ID
   reclaim   --service ID --bounty ID --maker S --nonce N
   release   --bounty ID --commitment HEX
   pin       --service ID --owner S --nonce N --blob FILE
   attest    --service ID --attester S --nonce N --check FILE [PARAMS] --subject FILE
-            [--parents CLAIMS] --check-gas G --claim-out CLAIM
-            writes the claim to CLAIM, for citing the attestation later
+            [--chain CLAIMS] --check-gas G --claim-out CLAIM
+            attests FILE after the chain CLAIMS (oldest first; none for a new root), and writes
+            the claim to CLAIM, for citing the attestation later
   key       (--account S | --bounty ID [--commitment HEX] | --refs HASH | --attestation CLAIM
             | --next)
             storage key, for `jamt inspect storage <service> <key>`
@@ -37,7 +39,8 @@ usage: witness <command> [--flag value ...]
 
 PARAMS:  --params HEX | --params-u128 N | --params-blake2b STRING (the hash of STRING)
 WITNESS: --witness HEX | --witness-u64 N | --witness-str STRING
-FILES:   comma-separated, in order: paths of plain blobs, or claim:CLAIM for an attested one
+FILES:   comma-separated, in order: claim:CLAIM for each attested blob, a chain from its root,
+         then paths of plain blobs
 CLAIMS:  comma-separated paths of claim files that `attest --claim-out` wrote
 
 Seeds S are any string; hex may have a 0x prefix. A salt of other than 32 bytes is hashed to 32.
@@ -123,6 +126,9 @@ impl Flags {
 			return Ok(vec![]);
 		}
 		Ok(self.str(name)?.split(',').collect())
+	}
+	fn claims(&self, name: &str) -> Result<Vec<AttestationClaim>, String> {
+		self.list(name)?.into_iter().map(read_claim).collect()
 	}
 	fn blobs(&self) -> Result<Vec<RevealBlob>, String> {
 		self.list("blobs")?
@@ -240,6 +246,7 @@ fn run(command: &str, f: &Flags) -> Result<(), String> {
 			check_hash: f.check()?.0,
 			params: f.params()?,
 			blobs: f.blobs()?,
+			extra: f.claims("extra")?,
 			check_gas: f.num("check-gas")?,
 			hunter: f.account("hunter")?,
 			salt: f.salt()?,
@@ -274,12 +281,12 @@ fn run(command: &str, f: &Flags) -> Result<(), String> {
 			let has_params = ["params", "params-u128", "params-blake2b"].iter().any(|p| f.has(p));
 			let params = if has_params { f.params()? } else { vec![] };
 			let subject = file_ref(f.str("subject")?)?;
-			let parents = f.list("parents")?.into_iter().map(read_claim).collect::<Result<Vec<_>, _>>()?;
+			let ancestors = f.claims("chain")?;
 			let claim = AttestationClaim {
 				check_hash,
 				params_hash: blake2b256(&params),
 				subject,
-				parents: parents.iter().map(AttestationClaim::id).collect(),
+				parent: ancestors.last().map(AttestationClaim::id),
 			};
 			let out = f.str("claim-out")?;
 			std::fs::write(out, claim.encode()).map_err(|e| format!("cannot write {out}: {e}"))?;
@@ -293,7 +300,7 @@ fn run(command: &str, f: &Flags) -> Result<(), String> {
 				check_hash,
 				params,
 				subject,
-				parents,
+				ancestors,
 				check_gas: f.num("check-gas")?,
 				signature,
 			}

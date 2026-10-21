@@ -151,10 +151,10 @@ attestations() {
 		--check-gas $GAS --claim-out "$CLAIM1" 2>/dev/null)"
 	expect "volume 1 attested" 'Attestation \{ claim' attestation --attestation "$CLAIM1"
 	item "$($W attest --service "$SVC" --attester pat --nonce 5 --check $WORDS_CHECK --subject "$VOL2" \
-		--parents "$CLAIM1" --check-gas $GAS --claim-out "$CLAIM2" 2>/dev/null)"
+		--chain "$CLAIM1" --check-gas $GAS --claim-out "$CLAIM2" 2>/dev/null)"
 	expect "volume 2 attested on volume 1" 'Attestation \{ claim' attestation --attestation "$CLAIM2"
 	item "$($W attest --service "$SVC" --attester pat --nonce 6 --check $WORDS_CHECK --subject "$BADVOL" \
-		--parents "$CLAIM1,$CLAIM2" --check-gas $GAS --claim-out "$BADCLAIM" 2>/dev/null)"
+		--chain "$CLAIM1,$CLAIM2" --check-gas $GAS --claim-out "$BADCLAIM" 2>/dev/null)"
 	expect_still "unsorted volume not attested" '^none$' attestation --attestation "$BADCLAIM"
 	expect "pat paid for two attestations" 'balance: 40, nonce: 6' account --account pat
 

@@ -1,9 +1,9 @@
 # Design: attestations and multi-blob checks
 
 Status: phase 1 is partly implemented: extra blobs, check interface v2 and the check heap.
-Extrinsic witnesses and limits as parameters are not done yet. Phase 2 is implemented for
-bounties citing attestations and for chains of them; see "As built" below for where it differs
-from this proposal. Reveals citing extra attestations of their own are not done.
+Extrinsic witnesses and limits as parameters are not done yet. Phase 2 is implemented: chains of
+attestations, bounties citing them, and reveals extending them. See "As built" below for where it
+differs from this proposal.
 
 ## Summary
 
@@ -121,30 +121,41 @@ defaults. The Lean checker blob alone is 629 KB, and a medium proof uses most of
 
 What follows is the proposal. The implementation settled these differently:
 
-- **A check only trusts its own attestations.** Parents must be by the same check with the same
-  params, and a bounty may only cite attestations by its own check. Without this, an attester
+- **Attestations form linear chains.** Each names one parent (none for a root), and its id
+  covers the parent's id, so a claim commits to its whole chain. An `Attest` carries the claims
+  of the whole chain it extends, oldest first; refine checks they link up, and accumulate only
+  has to find the parent, since each attestation is recorded only after its parent was. Reveals
+  and attests carry O(n) claims rather than O(n²) id lists.
+- **A subject is trusted only right after its own chain.** A bounty's attested blobs come first,
+  as one chain from its root, and a reveal's extra layers must continue that chain exactly. Lean
+  exports number names, levels and expressions on from earlier layers, so a layer verified after
+  one prefix can mean something else after another prefix with the same counts. Trusting it there
+  would be unsound.
+- **Reveals can extend the bounty's chain** with attested layers of their own, such as library
+  layers a proof uses that the bounty didn't name. Accumulate checks the extra layers' tip was
+  recorded.
+- **A check only trusts its own attestations.** A chain is one check with one set of params, and
+  a bounty may only cite chains by its own check. Without this, an attester
   could name as a parent a layer "verified" by a check that accepts anything, or by this check
   with lenient params (say, more axioms allowed), and the strict check would trust it. A bounty's
   maker picks the attestations it cites, params included. With
   it, a trusted blob always means "my own attest mode accepted this", so checks don't need to
   recognize other checkers (the last security note below no longer applies).
 - **The id covers the params too:** `blake2b256(encode("witness/attest", claim))`, where the
-  claim is `(check_hash, params_hash, subject, parents)`. Params can change what a check accepts.
+  claim is `(check_hash, params_hash, subject, parent)`. Params can change what a check accepts.
 - **Subjects are pinned first.** Refine has to look the subject up before accumulate ever sees the
   attestation, so a new `Pin` op (signed, `PIN_DEPOSIT`) holds a preimage for good. The check
   blob needs a pin too unless a bounty holds it.
 - **Pins and attestations are permanent,** with deposits that aren't refunded, so the preimages
   they hold are too. Children don't need to count references to their parents.
-- **Refine gets the claims.** It can't read state, so `Attest` carries the parents' full claims,
-  and a reveal carries the claims of the bounty's attested blobs. Refine runs the check on the
-  claimed subjects. Accumulate then makes sure the claims were recorded: for `Attest` by looking
-  up the parents' ids, for `Reveal` by matching the bounty's terms, whose attestations were
-  checked when it was created.
-- **In attest mode** the check gets the parents' subjects, trusted and in order, then the subject,
-  untrusted, last. The witness is empty. `witness_check::Input::subject()` returns the subject.
-- **Parents are listed in full.** An attestation names every layer it relies on, not only the
-  one below it, since the check needs all their data. Nothing enforces that a parent's own
-  parents are included. If they're missing, the check sees less data and most likely fails.
+- **Refine gets the claims.** It can't read state, so `Attest` carries its chain's claims, and a
+  reveal carries the claims of the bounty's chain and its own extra layers. Refine runs the check
+  on the claimed subjects. Accumulate then makes sure they were recorded: for `Attest` by finding
+  the parent, for `Reveal` by matching the bounty's terms (whose chain was checked when it was
+  created) and finding the extra layers' tip.
+- **In attest mode** the check gets the chain's subjects, trusted and oldest first, then the
+  subject, untrusted, last. The witness is empty. `witness_check::Input::subject()` returns the
+  subject.
 
 ### What one is
 
