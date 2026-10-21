@@ -106,9 +106,12 @@ fn deposit_needed(effects: &Effects) -> Balance {
 		.filter_map(|(key, value)| value.as_ref().map(|v| (key.len() + v.len()) as u64))
 		.map(|bytes| item(bytes + FOOTPRINT_STORAGE_OVERHEAD))
 		.sum();
-	let solicit =
-		effects.solicit.map_or(0, |(_, len)| item(len as u64 + FOOTPRINT_PREIMAGE_OVERHEAD));
-	writes + solicit
+	let solicits: Balance = effects
+		.solicit
+		.iter()
+		.map(|(_, len)| item(*len as u64 + FOOTPRINT_PREIMAGE_OVERHEAD))
+		.sum();
+	writes + solicits
 }
 
 /// Apply `effects` in full, or not at all.
@@ -119,11 +122,19 @@ fn apply(effects: Effects) -> Result<(), &'static str> {
 	if info.balance < info.threshold.saturating_add(deposit_needed(&effects)) {
 		return Err("service balance too low to store this");
 	}
-	if let Some((hash, len)) = effects.solicit {
+	let mut solicited = Vec::new();
+	for &(hash, len) in &effects.solicit {
 		match accumulate::solicit(&hash, len as usize) {
+			Ok(()) => solicited.push((hash, len)),
 			// Already requested, e.g. forgotten but not yet expunged and wanted again.
-			Ok(()) | Err(jam_pvm_common::ApiError::ActionInvalid) => {},
-			Err(_) => return Err("cannot solicit check blob"),
+			Err(jam_pvm_common::ApiError::ActionInvalid) => {},
+			Err(_) => {
+				// Nothing else has been written yet, so undoing these undoes the operation.
+				for (hash, len) in solicited {
+					let _ = accumulate::forget(&hash, len as usize);
+				}
+				return Err("cannot solicit preimage");
+			},
 		}
 	}
 	for (key, value) in &effects.writes {
@@ -136,10 +147,10 @@ fn apply(effects: Effects) -> Result<(), &'static str> {
 			},
 		}
 	}
-	if let Some((hash, len)) = effects.forget {
+	for (hash, len) in effects.forget {
 		// Losing track of a preimage only costs storage, so never fail the operation for it.
 		if accumulate::forget(&hash, len as usize).is_err() {
-			error!(target = "witness", "could not forget check blob");
+			error!(target = "witness", "could not forget preimage");
 		}
 	}
 	Ok(())

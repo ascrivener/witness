@@ -1,25 +1,55 @@
 use super::*;
 use alloc::{collections::BTreeMap, vec};
 use ed25519_dalek::{Signer, SigningKey};
-use witness_types::{BountyTerms, check_args, commitment};
+use witness_types::{BountyTerms, CHECK_INTERFACE_VERSION, CheckFailure, check_args, commitment};
 
 const SERVICE: u32 = 7;
 const CHECK: Hash = [0xc0; 32];
 const BLOB: &[u8] = b"check blob";
+/// Extra blobs the environment can look up.
+const EXTRA: [(Hash, &[u8]); 2] = [([0xe1; 32], b"one"), ([0xe2; 32], b"two")];
+const MISSING: Hash = [0xee; 32];
 
-/// The mock check accepts witness `b"x"` (any params).
+fn extra(i: usize) -> BlobRef {
+	BlobRef { hash: EXTRA[i].0, len: EXTRA[i].1.len() as u32 }
+}
+
+/// The mock check accepts witness `b"x"`, or a witness equal to its blobs' data concatenated.
 struct Env {
 	blob_available: bool,
 }
 
+/// Split `args` (see `check_args`) into the blobs' data and the witness.
+fn parse_args(args: &[u8]) -> (Vec<Vec<u8>>, Vec<u8>) {
+	let u32_at = |at: usize| u32::from_le_bytes(args[at..at + 4].try_into().unwrap()) as usize;
+	assert_eq!(args[..2], [CHECK_INTERFACE_VERSION, CheckMode::Reveal as u8]);
+	let mut at = 6;
+	let blobs = (0..u32_at(2))
+		.map(|_| {
+			assert_eq!(args[at], 0, "nothing is trusted yet");
+			let len = u32_at(at + 33);
+			at += 37 + len;
+			args[at - len..at].to_vec()
+		})
+		.collect();
+	(blobs, args[at + 4 + u32_at(at)..].to_vec())
+}
+
 impl RefineEnv for Env {
 	fn lookup(&self, hash: &Hash) -> Option<Vec<u8>> {
-		(self.blob_available && *hash == CHECK).then(|| BLOB.to_vec())
+		if *hash == CHECK {
+			return self.blob_available.then(|| BLOB.to_vec());
+		}
+		EXTRA.iter().find(|(h, _)| h == hash).map(|(_, data)| data.to_vec())
 	}
 	fn run_check(&self, blob: &[u8], args: &[u8], _gas: Gas) -> core::result::Result<(), Rejection> {
 		assert_eq!(blob, BLOB);
-		let witness = &args[4 + u32::from_le_bytes(args[..4].try_into().unwrap()) as usize..];
-		if witness == b"x" { Ok(()) } else { Err(Rejection::CheckFailed(witness_types::CheckFailure::False)) }
+		let (blobs, witness) = parse_args(args);
+		if witness == b"x" || (!blobs.is_empty() && witness == blobs.concat()) {
+			Ok(())
+		} else {
+			Err(Rejection::CheckFailed(CheckFailure::False))
+		}
 	}
 }
 
@@ -57,18 +87,14 @@ impl Chain {
 	fn submit(&mut self, op: Op) -> Result<()> {
 		let verified = refine(&ENV, SERVICE, op);
 		let fx = accumulate(self, verified, self.now)?;
-		if let Some((h, _)) = fx.solicit {
-			self.solicited.push(h);
-		}
+		self.solicited.extend(fx.solicit.iter().map(|(h, _)| *h));
 		for (k, v) in fx.writes {
 			match v {
 				Some(v) => self.storage.insert(k, v),
 				None => self.storage.remove(&k),
 			};
 		}
-		if let Some((h, _)) = fx.forget {
-			self.forgotten.push(h);
-		}
+		self.forgotten.extend(fx.forget.iter().map(|(h, _)| *h));
 		Ok(())
 	}
 
@@ -97,6 +123,7 @@ impl Chain {
 			check_hash: CHECK,
 			check_len: BLOB.len() as u32,
 			params: b"params".to_vec(),
+			blobs: vec![],
 			reward: 500,
 			check_gas: 1000,
 			expiry: self.now + 50,
@@ -137,6 +164,7 @@ impl Chain {
 			bounty_id: b,
 			check_hash: terms.check_hash,
 			params: terms.params,
+			blobs: terms.blobs,
 			check_gas: terms.check_gas,
 			hunter: id(hunter),
 			salt: [hunter; 32],
@@ -297,6 +325,7 @@ fn reveal_rules() {
 		bounty_id: 0,
 		check_hash: CHECK,
 		params: op_terms.params,
+		blobs: op_terms.blobs,
 		check_gas: op_terms.check_gas,
 		hunter: id(BOB),
 		salt: [BOB; 32],
@@ -315,6 +344,7 @@ fn check_unavailable_is_rejected_in_refine() {
 		bounty_id: 0,
 		check_hash: CHECK,
 		params: vec![],
+		blobs: vec![],
 		check_gas: 1,
 		hunter: id(BOB),
 		salt: [0; 32],
@@ -443,6 +473,120 @@ fn rejected_ops_write_nothing() {
 
 #[test]
 fn check_args_layout() {
-	let args = check_args(b"pp", b"xyz");
-	assert_eq!(args, [2, 0, 0, 0, b'p', b'p', b'x', b'y', b'z']);
+	let args = check_args(CheckMode::Reveal, &[], b"pp", b"xyz");
+	assert_eq!(args, [2, 0, 0, 0, 0, 0, 2, 0, 0, 0, b'p', b'p', b'x', b'y', b'z']);
+	let blob = CheckBlob { trusted: true, hash: [7; 32], data: b"ab" };
+	let args = check_args(CheckMode::Attest, &[blob], b"", b"x");
+	let mut expected = vec![2, 1, 1, 0, 0, 0, 1];
+	expected.extend([7; 32]);
+	expected.extend([2, 0, 0, 0, b'a', b'b', 0, 0, 0, 0, b'x']);
+	assert_eq!(args, expected);
+}
+
+/// Alice's bounty 1 uses both extra blobs, in order.
+fn with_blobs() -> Chain {
+	let mut c = setup();
+	let mut terms = c.terms();
+	terms.blobs = vec![extra(0), extra(1)];
+	terms.reward = 100;
+	c.create(terms).unwrap();
+	c
+}
+
+#[test]
+fn blobs_reach_the_check_in_order() {
+	let mut c = with_blobs();
+	c.commit(1, BOB, b"onetwo").unwrap();
+	c.commit(1, CAROL, b"twoone").unwrap();
+	c.advance(MIN_COMMIT_AGE);
+	assert_eq!(c.reveal(1, CAROL, b"twoone"), Err("rejected in refine"));
+	c.reveal(1, BOB, b"onetwo").unwrap();
+	c.advance(MIN_CLAIM_WINDOW);
+	c.finalize(1).unwrap();
+	assert_eq!(c.winner(1), id(BOB));
+}
+
+#[test]
+fn blobs_are_solicited_and_released_with_the_bounty() {
+	let mut c = with_blobs();
+	assert_eq!(c.solicited, vec![CHECK, EXTRA[0].0, EXTRA[1].0]);
+	// Bounty 2 shares blob 0 (twice) with bounty 1, and adds nothing new.
+	let mut terms = c.terms();
+	terms.blobs = vec![extra(0), extra(0)];
+	terms.reward = 100;
+	c.create(terms).unwrap();
+	assert_eq!(c.solicited.len(), 3, "shared blobs are solicited once");
+	let refs = |c: &Chain, h| c.get_typed::<u32>(&StorageKey::PreimageRefs(h));
+	assert_eq!(refs(&c, EXTRA[0].0), Some(3));
+	assert_eq!(refs(&c, CHECK), Some(3));
+
+	// Bounty 1 finishes: blob 1 is no longer used, blob 0 and the check still are.
+	c.commit(1, BOB, b"x").unwrap();
+	c.advance(MIN_COMMIT_AGE);
+	c.reveal(1, BOB, b"x").unwrap();
+	c.advance(MIN_CLAIM_WINDOW);
+	c.finalize(1).unwrap();
+	assert_eq!(c.forgotten, vec![EXTRA[1].0]);
+	assert_eq!(refs(&c, EXTRA[0].0), Some(2));
+
+	// Bounties 0 and 2 run out unclaimed; everything is released.
+	let expiry = c.bounty(2).terms.expiry;
+	c.advance(expiry + REVEAL_GRACE - c.now);
+	c.reclaim(0).unwrap();
+	c.reclaim(2).unwrap();
+	assert_eq!(c.forgotten, vec![EXTRA[1].0, CHECK, EXTRA[0].0]);
+	assert_eq!(refs(&c, EXTRA[0].0), None);
+	assert_eq!(refs(&c, CHECK), None);
+}
+
+#[test]
+fn reveal_must_name_the_bounty_blobs() {
+	let mut c = with_blobs();
+	c.commit(1, BOB, b"x").unwrap();
+	c.advance(MIN_COMMIT_AGE);
+	let terms = c.bounty(1).terms;
+	for blobs in [vec![], vec![extra(1), extra(0)], vec![extra(0)]] {
+		let op = Op::Reveal {
+			bounty_id: 1,
+			check_hash: CHECK,
+			params: terms.params.clone(),
+			blobs,
+			check_gas: terms.check_gas,
+			hunter: id(BOB),
+			salt: [BOB; 32],
+			witness: b"x".to_vec(),
+		};
+		assert_eq!(c.submit(op), Err("revealed against different terms"));
+	}
+	c.reveal(1, BOB, b"x").unwrap();
+}
+
+#[test]
+fn blob_limits() {
+	let reveal = |blobs| Op::Reveal {
+		bounty_id: 0,
+		check_hash: CHECK,
+		params: vec![],
+		blobs,
+		check_gas: 1,
+		hunter: id(BOB),
+		salt: [0; 32],
+		witness: b"x".to_vec(),
+	};
+	let missing = BlobRef { hash: MISSING, len: 1 };
+	assert_eq!(refine(&ENV, SERVICE, reveal(vec![extra(0), missing])), Verified::Rejected(Rejection::BlobUnavailable));
+	let too_many = vec![extra(0); MAX_BLOBS as usize + 1];
+	assert_eq!(refine(&ENV, SERVICE, reveal(too_many)), Verified::Rejected(Rejection::BlobsTooLarge));
+
+	let mut c = setup();
+	let mut terms = c.terms();
+	terms.blobs = vec![extra(0); MAX_BLOBS as usize + 1];
+	assert_eq!(c.create(terms), Err("blobs too large"));
+	let mut terms = c.terms();
+	terms.blobs = vec![BlobRef { hash: MISSING, len: MAX_BLOBS_LEN / 2 + 1 }; 2];
+	assert_eq!(c.create(terms), Err("blobs too large"));
+	let mut terms = c.terms();
+	terms.blobs = vec![BlobRef { hash: MISSING, len: MAX_BLOBS_LEN / 2 }; 2];
+	terms.reward = 100;
+	c.create(terms).unwrap();
 }

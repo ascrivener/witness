@@ -1,11 +1,17 @@
 //! Runs a bounty's check blob in an inner PVM, within the bounty's gas limit.
 
 use jam_pvm_common::{InvokeOutcome, imports, refine};
-use jam_types::{PageMode, PageOperation};
+use jam_types::{
+	PageMode, PageOperation,
+	gas_costs::{GROW_HEAP_BASE, GROW_HEAP_LINEAR},
+};
 use witness_types::{
 	CheckFailure, Gas, MAX_CHECK_PAGES, Rejection,
-	program::{Access, StandardProgram, initialize},
+	program::{Access, Heap, StandardProgram, initialize},
 };
+
+/// The one host call a check may make: grow its heap (as `jam-pvm-common`'s allocator does).
+const GROW_HEAP: u64 = 1;
 
 /// Run `blob` (a JAM program blob from `cargo jam-build`) on `args` (see
 /// `witness_types::check_args`) with at most `gas`.
@@ -39,16 +45,37 @@ pub fn run_check(blob: &[u8], args: &[u8], gas: Gas) -> Result<(), Rejection> {
 			}
 		}
 
-		let gas = i64::try_from(gas).map_err(|_| Rejection::CheckGasTooHigh)?;
-		let (outcome, _gas_left, regs) =
-			refine::invoke(vm, gas, layout.registers).map_err(|_| Rejection::BadCheckBlob)?;
-		let failure = match outcome {
-			InvokeOutcome::Halt if regs[7] == 1 => return Ok(()),
-			InvokeOutcome::Halt => CheckFailure::False,
-			InvokeOutcome::Panic => CheckFailure::Panic,
-			InvokeOutcome::OutOfGas => CheckFailure::OutOfGas,
-			InvokeOutcome::PageFault(_) => CheckFailure::PageFault,
-			InvokeOutcome::HostCallFault(_) => CheckFailure::HostCall,
+		let mut heap = Heap::new(&layout, MAX_CHECK_PAGES as u64);
+		let mut gas = i64::try_from(gas).map_err(|_| Rejection::CheckGasTooHigh)?;
+		let mut regs = layout.registers;
+		let failure = loop {
+			let (outcome, gas_left, new_regs) =
+				refine::invoke(vm, gas, regs).map_err(|_| Rejection::BadCheckBlob)?;
+			(gas, regs) = (gas_left, new_regs);
+			match outcome {
+				InvokeOutcome::Halt if regs[7] == 1 => return Ok(()),
+				InvokeOutcome::Halt => break CheckFailure::False,
+				InvokeOutcome::Panic => break CheckFailure::Panic,
+				InvokeOutcome::OutOfGas => break CheckFailure::OutOfGas,
+				InvokeOutcome::PageFault(_) => break CheckFailure::PageFault,
+				InvokeOutcome::HostCallFault(GROW_HEAP) => {
+					// Charge the check what `grow_heap` would cost a service, then resume it with
+					// the heap's new end in φ7 (unchanged if it asked for too much).
+					if let Some((first, count)) = heap.grow(regs[7]) {
+						let cost = GROW_HEAP_BASE + GROW_HEAP_LINEAR * count;
+						gas = gas.saturating_sub(cost as i64);
+						if gas < 0 {
+							break CheckFailure::OutOfGas;
+						}
+						if count > 0 {
+							refine::zero(vm, first, count, PageMode::ReadWrite)
+								.map_err(|_| Rejection::BadCheckBlob)?;
+						}
+					}
+					regs[7] = heap.end_page;
+				},
+				InvokeOutcome::HostCallFault(_) => break CheckFailure::HostCall,
+			}
 		};
 		Err(Rejection::CheckFailed(failure))
 	})();

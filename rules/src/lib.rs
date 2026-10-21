@@ -4,7 +4,7 @@
 //! - [`refine`] verifies an [`Op`]: signatures, limits, and the bounty's check via
 //!   [`RefineEnv::run_check`].
 //! - [`accumulate`] applies a [`Verified`] to a read-only [`State`] and returns the [`Effects`]:
-//!   storage writes plus at most one preimage solicit or forget. Nothing is written unless the
+//!   storage writes plus the preimages to solicit or forget. Nothing is written unless the
 //!   whole operation is valid, so the service can check it can afford the storage first and then
 //!   apply everything, rather than failing halfway through.
 
@@ -18,10 +18,11 @@ mod tests;
 use alloc::{collections::BTreeMap, vec::Vec};
 use codec::{Decode, Encode};
 use witness_types::{
-	Account, AccountId, Bounty, BountyId, BountyStatus, COMMIT_DEPOSIT, Claim, CommitRecord, Gas,
-	Hash, MAX_CHECK_GAS, MAX_CHECK_LEN, MAX_CLAIM_WINDOW, MAX_MINT, MAX_PARAMS_LEN,
-	MAX_WITNESS_LEN, MIN_CLAIM_WINDOW, MIN_COMMIT_AGE, Op, Points, REVEAL_GRACE, Rejection,
-	Signature, Slot, StorageKey, Verified, blake2b256,
+	Account, AccountId, BlobRef, Bounty, BountyId, BountyStatus, BountyTerms, COMMIT_DEPOSIT,
+	CheckBlob, CheckMode, Claim, CommitRecord, Gas, Hash, MAX_BLOBS, MAX_BLOBS_LEN, MAX_CHECK_GAS,
+	MAX_CHECK_LEN, MAX_CLAIM_WINDOW, MAX_MINT, MAX_PARAMS_LEN, MAX_WITNESS_LEN, MIN_CLAIM_WINDOW,
+	MIN_COMMIT_AGE, Op, Points, REVEAL_GRACE, Rejection, Signature, Slot, StorageKey, Verified,
+	blake2b256,
 };
 
 /// What refine needs from the host.
@@ -42,10 +43,10 @@ pub trait State {
 pub struct Effects {
 	/// Encoded [`StorageKey`] to new value, or `None` to remove.
 	pub writes: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
-	/// A preimage to solicit (hash, length) before applying the writes.
-	pub solicit: Option<(Hash, u32)>,
-	/// A preimage to forget (hash, length) after applying the writes.
-	pub forget: Option<(Hash, u32)>,
+	/// Preimages to solicit (hash, length) before applying the writes.
+	pub solicit: Vec<(Hash, u32)>,
+	/// Preimages to forget (hash, length) after applying the writes.
+	pub forget: Vec<(Hash, u32)>,
 }
 
 pub type Result<T> = core::result::Result<T, &'static str>;
@@ -74,7 +75,7 @@ pub fn refine(env: &impl RefineEnv, service_id: u32, op: Op) -> Verified {
 			}
 			Verified::Commit { bounty_id, committer, nonce, commitment }
 		},
-		Op::Reveal { bounty_id, check_hash, params, check_gas, hunter, salt, witness } => {
+		Op::Reveal { bounty_id, check_hash, params, blobs, check_gas, hunter, salt, witness } => {
 			if check_gas > MAX_CHECK_GAS {
 				return Verified::Rejected(Rejection::CheckGasTooHigh);
 			}
@@ -84,17 +85,39 @@ pub fn refine(env: &impl RefineEnv, service_id: u32, op: Op) -> Verified {
 			if params.len() > MAX_PARAMS_LEN as usize {
 				return Verified::Rejected(Rejection::ParamsTooLong);
 			}
-			let Some(blob) = env.lookup(&check_hash) else {
+			if blobs.len() > MAX_BLOBS as usize {
+				return Verified::Rejected(Rejection::BlobsTooLarge);
+			}
+			let Some(check) = env.lookup(&check_hash) else {
 				return Verified::Rejected(Rejection::CheckUnavailable);
 			};
-			let args = witness_types::check_args(&params, &witness);
-			if let Err(rejection) = env.run_check(&blob, &args, check_gas) {
+			let mut data = Vec::with_capacity(blobs.len());
+			let mut total = 0;
+			for blob in &blobs {
+				let Some(bytes) = env.lookup(&blob.hash) else {
+					return Verified::Rejected(Rejection::BlobUnavailable);
+				};
+				// Stop early: the blobs need not be the bounty's, and accumulate checks that later.
+				total += bytes.len();
+				if total > MAX_BLOBS_LEN as usize {
+					return Verified::Rejected(Rejection::BlobsTooLarge);
+				}
+				data.push(bytes);
+			}
+			let check_blobs: Vec<CheckBlob> = blobs
+				.iter()
+				.zip(&data)
+				.map(|(blob, data)| CheckBlob { trusted: false, hash: blob.hash, data })
+				.collect();
+			let args = witness_types::check_args(CheckMode::Reveal, &check_blobs, &params, &witness);
+			if let Err(rejection) = env.run_check(&check, &args, check_gas) {
 				return Verified::Rejected(rejection);
 			}
 			Verified::Reveal {
 				bounty_id,
 				check_hash,
 				params_hash: blake2b256(&params),
+				blobs_hash: blake2b256(&blobs.encode()),
 				check_gas,
 				commitment: witness_types::commitment(bounty_id, &witness, &hunter, &salt),
 				hunter,
@@ -163,17 +186,40 @@ impl<S: State> Tx<'_, S> {
 		self.get(&StorageKey::Bounty(id)).ok_or("no such bounty")
 	}
 
-	/// Record that one fewer unfinished bounty uses `bounty`'s check; forget it at zero.
-	fn release_check(&mut self, bounty: &Bounty) {
-		let key = StorageKey::CheckRefs(bounty.terms.check_hash);
+	/// Record a use of preimage `blob`, soliciting it if nothing used it yet.
+	fn acquire(&mut self, blob: BlobRef) {
+		let key = StorageKey::PreimageRefs(blob.hash);
+		let refs: u32 = self.get(&key).unwrap_or(0);
+		if refs == 0 {
+			self.fx.solicit.push((blob.hash, blob.len));
+		}
+		self.set(&key, &(refs + 1));
+	}
+
+	/// Drop a use of preimage `blob`, forgetting it once nothing uses it.
+	fn release(&mut self, blob: BlobRef) {
+		let key = StorageKey::PreimageRefs(blob.hash);
 		match self.get::<u32>(&key).unwrap_or(0) {
 			0 | 1 => {
 				self.remove(&key);
-				self.fx.forget = Some((bounty.terms.check_hash, bounty.terms.check_len));
+				self.fx.forget.push((blob.hash, blob.len));
 			},
 			n => self.set(&key, &(n - 1)),
 		}
 	}
+
+	/// Drop the uses of every preimage `bounty` needs, now that it is finished.
+	fn release_preimages(&mut self, bounty: &Bounty) {
+		for blob in preimages(&bounty.terms) {
+			self.release(blob);
+		}
+	}
+}
+
+/// The preimages a bounty's reveals need: its check blob, then its extra blobs.
+fn preimages(terms: &BountyTerms) -> impl Iterator<Item = BlobRef> + '_ {
+	let check = BlobRef { hash: terms.check_hash, len: terms.check_len };
+	core::iter::once(check).chain(terms.blobs.iter().copied())
 }
 
 /// Whether a reveal could still change `bounty`'s outcome at `now`.
@@ -203,6 +249,10 @@ pub fn accumulate(state: &impl State, verified: Verified, now: Slot) -> Result<E
 			{
 				return Err("check too large");
 			}
+			let blobs_len = terms.blobs.iter().map(|b| b.len as u64).sum::<u64>();
+			if terms.blobs.len() > MAX_BLOBS as usize || blobs_len > MAX_BLOBS_LEN as u64 {
+				return Err("blobs too large");
+			}
 			if !(MIN_CLAIM_WINDOW..=MAX_CLAIM_WINDOW).contains(&terms.claim_window) {
 				return Err("claim window out of range");
 			}
@@ -211,12 +261,9 @@ pub fn accumulate(state: &impl State, verified: Verified, now: Slot) -> Result<E
 			}
 			tx.charge(&maker, nonce, terms.reward)?;
 
-			let refs_key = StorageKey::CheckRefs(terms.check_hash);
-			let refs: u32 = tx.get(&refs_key).unwrap_or(0);
-			if refs == 0 {
-				tx.fx.solicit = Some((terms.check_hash, terms.check_len));
+			for blob in preimages(&terms) {
+				tx.acquire(blob);
 			}
-			tx.set(&refs_key, &(refs + 1));
 
 			let id: BountyId = tx.get(&StorageKey::NextBountyId).unwrap_or(0);
 			tx.set(&StorageKey::NextBountyId, &(id + 1));
@@ -239,6 +286,7 @@ pub fn accumulate(state: &impl State, verified: Verified, now: Slot) -> Result<E
 			bounty_id,
 			check_hash,
 			params_hash,
+			blobs_hash,
 			check_gas,
 			commitment,
 			hunter,
@@ -247,7 +295,8 @@ pub fn accumulate(state: &impl State, verified: Verified, now: Slot) -> Result<E
 			let mut bounty = tx.bounty(bounty_id)?;
 			if bounty.terms.check_hash != check_hash ||
 				bounty.terms.check_gas != check_gas ||
-				blake2b256(&bounty.terms.params) != params_hash
+				blake2b256(&bounty.terms.params) != params_hash ||
+				blake2b256(&bounty.terms.blobs.encode()) != blobs_hash
 			{
 				return Err("revealed against different terms");
 			}
@@ -290,7 +339,7 @@ pub fn accumulate(state: &impl State, verified: Verified, now: Slot) -> Result<E
 				return Err("claim window still open");
 			}
 			tx.credit(&leader.hunter, bounty.terms.reward);
-			tx.release_check(&bounty);
+			tx.release_preimages(&bounty);
 			bounty.status = BountyStatus::Claimed { winner: leader, slot: now };
 			tx.set(&StorageKey::Bounty(bounty_id), &bounty);
 		},
@@ -307,7 +356,7 @@ pub fn accumulate(state: &impl State, verified: Verified, now: Slot) -> Result<E
 			}
 			tx.charge(&maker, nonce, 0)?;
 			tx.credit(&maker, bounty.terms.reward);
-			tx.release_check(&bounty);
+			tx.release_preimages(&bounty);
 			bounty.status = BountyStatus::Reclaimed;
 			tx.set(&StorageKey::Bounty(bounty_id), &bounty);
 		},

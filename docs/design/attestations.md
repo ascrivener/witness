@@ -1,7 +1,6 @@
 # Design: attestations and multi-blob checks
 
-Status: phase 1 is partly implemented on the `multi-blob-checks` branch: extra blobs, check
-interface v2 and the check heap. Extrinsic witnesses and limits as parameters are not done yet.
+Status: phase 1 is partly implemented: extra blobs, check interface v2 and the check heap. Extrinsic witnesses and limits as parameters are not done yet.
 Phase 2 is a proposal.
 
 ## Summary

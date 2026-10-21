@@ -9,6 +9,13 @@ authors.workspace = true
 [dependencies]
 polkavm-derive.workspace = true
 
+[target.'cfg(target_env = "polkavm")'.dependencies]
+picoalloc = { version = "5.2.0", optional = true }
+
+[features]
+# A global allocator, so checks can use `alloc` (`Vec`, `BTreeMap`, ...).
+alloc = ["dep:picoalloc"]
+
 [dev-dependencies]
 witness-types = { workspace = true, features = ["std"] }
 

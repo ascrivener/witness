@@ -11,11 +11,11 @@ Prototype: rewards are points from a faucet (`Mint`), not tokens.
 | Op | Refine (in-core, stateless) | Accumulate (on-chain) |
 |---|---|---|
 | `Mint` | — | credit points (faucet, at most `MAX_MINT`) |
-| `CreateBounty` | verify the maker's Ed25519 signature | check nonce, balance and limits; debit the reward; solicit the check blob unless another bounty already uses it; store the bounty |
+| `CreateBounty` | verify the maker's Ed25519 signature | check nonce, balance and limits; debit the reward; solicit the check blob and the bounty's extra blobs, except those another bounty already uses; store the bounty |
 | `Commit` | verify the committer's signature | the bounty takes commitments; debit `COMMIT_DEPOSIT`; record the slot of `blake2b(bounty_id, x, hunter, salt)` |
-| `Reveal` | look up the check blob; run `check(params, x)` in an inner PVM with the bounty's `check_gas` | the terms match and the commitment is older than this slot and made before expiry. The first valid reveal opens the claim window, and later ones replace the leader if their commitment is earlier. Refund the deposit |
-| `Finalize` | — | once the claim window has closed, pay the leader and release the check blob |
-| `Reclaim` | verify the maker's signature | if no one revealed by `expiry + REVEAL_GRACE`, refund the maker and release the check blob |
+| `Reveal` | look up the check blob and the extra blobs; run the check on them, `params` and `x` in an inner PVM with the bounty's `check_gas` | the terms match and the commitment is older than this slot and made before expiry. The first valid reveal opens the claim window, and later ones replace the leader if their commitment is earlier. Refund the deposit |
+| `Finalize` | — | once the claim window has closed, pay the leader and release the bounty's blobs |
+| `Reclaim` | verify the maker's signature | if no one revealed by `expiry + REVEAL_GRACE`, refund the maker and release the bounty's blobs |
 | `Release` | — | delete a commitment (named by bounty and hash) that can no longer be revealed; its deposit stays forfeit |
 
 ### Front-running
@@ -37,8 +37,8 @@ the real one. Keyed by bounty, the copy sits apart where no reveal can ever matc
 Each commitment locks `COMMIT_DEPOSIT` points, and only a valid reveal gets them back.
 Accumulate checks the service can pay the storage deposit for an operation before writing
 anything. An operation it can't store is rejected whole, and the other work items in the same
-batch still go through. Check blobs are reference-counted and forgotten when no unfinished bounty
-uses them.
+batch still go through. Check blobs and extra blobs are reference-counted and forgotten when no
+unfinished bounty uses them.
 
 ### Checks
 
@@ -46,14 +46,27 @@ Check blobs are JAM program blobs, as `cargo jam-build` writes them for an autho
 conventional metadata, then a standard program (GP appendix A.7). Refine skips the metadata and
 builds the inner PVM's memory and registers exactly as `Y(p, args)` would
 ([service/src/check_vm.rs](service/src/check_vm.rs), [types/src/program.rs](types/src/program.rs)).
-The arguments are `E4(|params|) ++ params ++ x`, and `declare_check!` splits them back apart.
-Halting with 1 in `φ7` means true. Anything else (0, panic, page fault, out of gas, any host call)
-means false. `check_gas` is capped at `MAX_CHECK_GAS` and passed to `invoke` as the inner VM's
-limit.
+The arguments (interface version 2) are:
 
-Because the check gets the bounty's `params`, one check blob serves many bounties.
+```
+E1(2) ++ E1(mode) ++ E4(n) ++ [E1(trusted) ++ hash ++ E4(|data|) ++ data]^n ++ E4(|params|) ++ params ++ x
+```
+
+`mode` is 0 (reveal) and `trusted` is 0 for now; both are reserved for attestations. The `n` blobs
+are the bounty's extra blobs, in order, at most `MAX_BLOBS` of them and `MAX_BLOBS_LEN` bytes in
+all. `witness_check` parses the arguments back. Halting with 1 in `φ7` means true. Anything else
+(0, panic, page fault, out of gas, any host call but `grow_heap`) means false. `check_gas` is
+capped at `MAX_CHECK_GAS` and passed to `invoke` as the inner VM's limit.
+
+A check may call `grow_heap` (host call 1). Refine maps the pages it asks for, after the check's
+read-write data and short of its stack, charges the check the gas `grow_heap` costs a service, and
+resumes it. Everything the check uses, arguments included, must fit in `MAX_CHECK_PAGES` (16 MiB);
+past that the call returns the heap's current end and the allocation fails.
+
+Because the check gets the bounty's `params` and blobs, one check blob serves many bounties.
 `checks/blake2b-preimage` takes the target hash as its params, so any number of "find the
-preimage" bounties share one on-chain blob.
+preimage" bounties share one on-chain blob. `checks/dictionary` reads a dictionary blob and builds
+a set of its words on the heap, so bounties at different difficulties share both blobs.
 
 ## Layout
 
@@ -61,9 +74,11 @@ preimage" bounties share one on-chain blob.
 types/                     protocol types, constants, standard-program parser/initializer (no_std)
 rules/                     refine and accumulate rules, host-independent and unit-tested
 service/                   the JAM service: host-call glue around `rules` (jam-pvm-common 0.1.29)
-check/                     `declare_check!` for writing checks as `fn(params, x) -> bool`
+check/                     `declare_check!` and `declare_full_check!` for writing checks, and an allocator
 checks/factor/             sample: x is a nontrivial factor of N (params: N)
 checks/blake2b-preimage/   sample: x is a Blake2b-256 preimage of H (params: H)
+checks/dictionary/         sample: x is dictionary words hashing to D leading zero bits (blob: the
+                           dictionary; params: D)
 tools/witness-cli/         builds work-item payloads as hex, and reads state (`witness`)
 scripts/e2e.sh             end-to-end test on a local PolkaJam testnet
 ```
@@ -87,7 +102,7 @@ Unit tests cover the rules, the program layout and the checks:
 cargo test
 ```
 
-Build the service and both checks into `out/` (as `.jam` files):
+Build the service and the sample checks into `out/` (as `.jam` files):
 
 ```bash
 cargo jam-build --out-dir out
@@ -99,11 +114,12 @@ CI (`.github/workflows/ci.yml`) runs the unit tests and builds the blobs. The en
 needs a PolkaJam release, so run it locally. It starts its own testnet, deploys, and checks the
 chain state at each step. It has two modes:
 
-- **`--quick`** (about 3 minutes): one bounty, from create to a reveal. It exercises everything
-  that touches the node: deploy, refine and accumulate, the check-blob lookup and the inner PVM.
-  Run it before opening any PR that changes code.
-- **Full** (about 8 minutes, mostly waiting out claim windows): three bounties, adding the
-  front-run, finalize, reclaim, release and deposit checks. Run it when changing `service/`,
+- **`--quick`** (about 4 minutes): two bounties, from create to a reveal, one of them on a check
+  that reads a blob and grows its heap. It exercises everything that touches the node: deploy,
+  refine and accumulate, the preimage lookups, the inner PVM and its heap. Run it before opening
+  any PR that changes code.
+- **Full** (about 10 minutes, mostly waiting out claim windows): four bounties, adding the
+  front-run, finalize, reclaim, release, blob release and deposit checks. Run it when changing `service/`,
   `check_vm`, the build setup, or anything about timing (windows, expiry, grace), and before a
   release. The bounty logic itself is covered by the unit tests in `rules/`, so a rules-only
   change needs only those plus `--quick`.
@@ -111,6 +127,11 @@ chain state at each step. It has two modes:
 ```bash
 POLKAJAM_DIR=../polkajam-releases/polkajam-v0.1.29-macos-aarch64 scripts/e2e.sh --quick
 ```
+
+On Linux without IPv6 (some containers), the nodes need `--listen-ip 0.0.0.0 --external-ip
+127.0.0.1`, and if the PVM recompiler can't run there, `--pvm-backend interpreter`. The testnet
+doesn't pass node flags through, so put a wrapper script named `polkajam` that adds them next to
+copies of `polkajam-testnet` and `jamt`, and point `POLKAJAM_DIR` at that directory.
 
 ## Writing a check
 
@@ -122,9 +143,23 @@ witness_check::declare_check!(check);
 
 The crate depends on `witness-check` and `polkavm-derive`, and declares
 `[package.metadata.jam] type = "authorizer"` so `cargo jam-build` builds it with the single entry
-point a check needs. Checks get no host calls, so there is
-no allocator, logging or I/O. Constants and static tables are fine. The stack is 8 KiB unless
-the check raises it with `polkavm_derive::min_stack_size!`.
+point a check needs. A check declared this way ignores the bounty's blobs, and is false in any
+mode but reveal.
+
+A check that reads blobs takes the whole input instead:
+
+```rust
+fn check(input: &witness_check::Input) -> bool {
+    let Some(environment) = input.blob(0) else { return false };
+    /* ... input.mode, input.params, input.witness, environment.data ... */
+}
+witness_check::declare_full_check!(check);
+```
+
+It should return false for any mode it doesn't handle, and in future for trusted blobs it doesn't
+recognize. With `witness-check`'s `alloc` feature the check gets a global allocator, so `alloc`
+types (`Vec`, `BTreeMap`) work. Checks get no other host calls, so no logging or I/O. The stack is
+8 KiB unless the check raises it with `polkavm_derive::min_stack_size!`.
 
 ## Using it by hand
 
@@ -138,6 +173,11 @@ jamt provide $SVC out/blake2b-preimage-check.jam
 jamt item $SVC $($W mint --to bob --amount 100)
 jamt item $SVC $($W commit --service $SVC --bounty 0 --hunter bob --nonce 0 --salt 0x0b0b --witness-str "open sesame")
 jamt item $SVC $($W reveal --bounty 0 --check out/blake2b-preimage-check.jam --params-blake2b "open sesame" --check-gas 10000000 --hunter bob --salt 0x0b0b --witness-str "open sesame")
+# a bounty with extra blobs names them, in order, on create and on every reveal; provide each one
+printf 'open\nsesame\n' > words.txt
+jamt item $SVC $($W create --service $SVC --maker alice --nonce 1 --check out/dictionary-check.jam --params 0x00 --blobs words.txt --reward 100 --check-gas 10000000 --expiry $(( $(jamt inspect slot) + 100 )))
+jamt provide $SVC out/dictionary-check.jam
+jamt provide $SVC words.txt
 # after the claim window (30 slots by default)
 jamt item $SVC $($W finalize --bounty 0)
 ```
@@ -160,6 +200,8 @@ or did not apply it.
 - The latest Gray Paper (0.8.0 on `main`) replaces `machine(code, pc)` with `compile` (which can
   load a preimage by hash directly) followed by `machine(handle, pc)`. SDK 0.1.29 still exposes
   `machine(code, pc)`, so the service follows the SDK. Revisit when the SDK moves.
-- Checks can't allocate memory. Servicing `grow_heap` for the inner VM would allow it.
+- Witnesses come from the work-item payload, so they're limited to `MAX_WITNESS_LEN` (64 KiB).
+  Taking them from extrinsic data would raise that to the package's input limit.
+- The limits (`MAX_CHECK_LEN`, `MAX_CHECK_PAGES`, `MAX_CHECK_GAS`, `MAX_BLOBS_LEN`) are constants.
 - Closed bounties stay in storage as a record. Only their commitments and check blobs are cleaned
   up.

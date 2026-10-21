@@ -7,30 +7,32 @@ use codec::{Decode, Encode};
 use ed25519_dalek::{Signer, SigningKey};
 use std::{collections::HashMap, process::ExitCode};
 use witness_types::{
-	Account, AccountId, Bounty, BountyTerms, CommitRecord, Hash, MIN_CLAIM_WINDOW, Op, StorageKey,
-	Verified, blake2b256,
+	Account, AccountId, BlobRef, Bounty, BountyTerms, CommitRecord, Hash, MIN_CLAIM_WINDOW, Op,
+	StorageKey, Verified, blake2b256,
 };
 
 const USAGE: &str = "\
 usage: witness <command> [--flag value ...]
 
   account   --seed S
-  hash      --check FILE          the check hash a bounty on FILE uses
+  hash      --check FILE          the preimage hash of FILE, a check or a blob
   mint      --to S --amount N
-  create    --service ID --maker S --nonce N --check FILE PARAMS --reward N --check-gas G
-            --expiry SLOT [--claim-window SLOTS]
+  create    --service ID --maker S --nonce N --check FILE PARAMS [--blobs FILES] --reward N
+            --check-gas G --expiry SLOT [--claim-window SLOTS]
   commit    --service ID --bounty ID --hunter S [--committer S] --nonce N --salt HEX WITNESS
-  reveal    --bounty ID --check FILE PARAMS --check-gas G --hunter S --salt HEX WITNESS
+  reveal    --bounty ID --check FILE PARAMS [--blobs FILES] --check-gas G --hunter S --salt HEX
+            WITNESS
   finalize  --bounty ID
   reclaim   --service ID --bounty ID --maker S --nonce N
   release   --bounty ID --commitment HEX
-  key       (--account S | --bounty ID [--commitment HEX] | --check-refs HASH | --next)
+  key       (--account S | --bounty ID [--commitment HEX] | --refs HASH | --next)
             storage key, for `jamt inspect storage <service> <key>`
   decode    (--output HEX | --account HEX | --bounty HEX | --commitment HEX)
             decode a refine output or a stored value
 
 PARAMS:  --params HEX | --params-u128 N | --params-blake2b STRING (the hash of STRING)
 WITNESS: --witness HEX | --witness-u64 N | --witness-str STRING
+FILES:   comma-separated paths of the bounty's extra blobs, in order
 
 Seeds S are any string; hex may have a 0x prefix. A salt of other than 32 bytes is hashed to 32.
 The committer pays the commit deposit and signs; it defaults to the hunter.";
@@ -106,10 +108,20 @@ impl Flags {
 		Ok(<Hash>::try_from(&salt[..]).unwrap_or_else(|_| blake2b256(&salt)))
 	}
 	fn check(&self) -> Result<(Hash, u32), String> {
-		let path = self.str("check")?;
-		let blob = std::fs::read(path).map_err(|e| format!("cannot read {path}: {e}"))?;
-		Ok((blake2b256(&blob), blob.len() as u32))
+		let blob = file_ref(self.str("check")?)?;
+		Ok((blob.hash, blob.len))
 	}
+	fn blobs(&self) -> Result<Vec<BlobRef>, String> {
+		if !self.has("blobs") {
+			return Ok(vec![]);
+		}
+		self.str("blobs")?.split(',').map(file_ref).collect()
+	}
+}
+
+fn file_ref(path: &str) -> Result<BlobRef, String> {
+	let blob = std::fs::read(path).map_err(|e| format!("cannot read {path}: {e}"))?;
+	Ok(BlobRef { hash: blake2b256(&blob), len: blob.len() as u32 })
 }
 
 fn decode<T: Decode + std::fmt::Debug>(bytes: &[u8]) -> Result<String, String> {
@@ -146,8 +158,8 @@ fn run(command: &str, f: &Flags) -> Result<(), String> {
 				StorageKey::Commitment(f.num("bounty")?, f.hash("commitment")?)
 			} else if f.has("bounty") {
 				StorageKey::Bounty(f.num("bounty")?)
-			} else if f.has("check-refs") {
-				StorageKey::CheckRefs(f.hash("check-refs")?)
+			} else if f.has("refs") {
+				StorageKey::PreimageRefs(f.hash("refs")?)
 			} else {
 				StorageKey::NextBountyId
 			};
@@ -166,6 +178,7 @@ fn run(command: &str, f: &Flags) -> Result<(), String> {
 				check_hash,
 				check_len,
 				params: f.params()?,
+				blobs: f.blobs()?,
 				reward: f.num("reward")?,
 				check_gas: f.num("check-gas")?,
 				expiry: f.num("expiry")?,
@@ -198,6 +211,7 @@ fn run(command: &str, f: &Flags) -> Result<(), String> {
 			bounty_id: f.num("bounty")?,
 			check_hash: f.check()?.0,
 			params: f.params()?,
+			blobs: f.blobs()?,
 			check_gas: f.num("check-gas")?,
 			hunter: f.account("hunter")?,
 			salt: f.salt()?,
