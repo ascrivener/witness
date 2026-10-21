@@ -19,8 +19,9 @@ fn main() {
     }
 }
 
-fn read(path: &str) -> String {
-    std::fs::read_to_string(path).unwrap_or_else(|e| panic!("cannot read {path}: {e}"))
+/// Exports may be lean4export NDJSON or the binary format; the checker tells them apart.
+fn read(path: &str) -> Vec<u8> {
+    std::fs::read(path).unwrap_or_else(|e| panic!("cannot read {path}: {e}"))
 }
 
 fn check_all(path: &str) {
@@ -28,7 +29,7 @@ fn check_all(path: &str) {
     let axioms = ["propext", "Classical.choice", "Quot.sound", "Lean.trustCompiler"].map(String::from).to_vec();
     let t = Instant::now();
     let (file, skipped) =
-        nanoda_lib::util::Config::in_memory(axioms).parse_export(&export).expect("parse");
+        nanoda_lib::util::Config::in_memory(axioms).parse_export_bytes(&export).expect("parse");
     let parsed = t.elapsed();
     file.check_all_declars();
     println!(

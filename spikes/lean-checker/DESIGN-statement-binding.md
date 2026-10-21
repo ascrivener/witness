@@ -1,7 +1,7 @@
 # Design: binding a Lean proof to the bounty's statement
 
-Status: prototyped natively (see [Prototype results](#prototype-results)). Not yet on the PVM
-or in witness.
+Status: prototyped, natively and on the PVM (see [Prototype results](#prototype-results)). Not
+yet in witness.
 
 ## The problem
 
@@ -170,10 +170,26 @@ explicit errors.
 - **Parsing is now the biggest per-reveal cost, about 58%,** so the binary format is worth doing.
   So is a shared library layer that would move common lemmas out of the delta.
 
+### On the PVM, with the binary format
+
+Testnet with a refine limit of 10⁹ gas, on `gcd a b = gcd b a` in binary:
+
+| | Parse | Binding | Check env | Check delta | Total |
+|---|---|---|---|---|---|
+| Environment checked at reveal | 102 M | 5.6 M | 473 M | ~841 M | ~1.42×10⁹ (out of gas) |
+| **Environment pre-checked** | 102 M | 5.6 M | — | 841 M | **948 M (passes)** |
+
+Pre-checking the environment is what makes a medium proof fit, so it belongs in v1, not as a
+later optimization. For `2 + 2 = 4`, the solver's 94-byte delta checks in 1.6 M gas.
+
 ## Suggested order
 
 1. ~~Prototype the check and delta tool natively, with negative tests.~~ Done.
 2. ~~Measure E and P sizes for `gcd_comm`, with and without checking E.~~ Done, natively.
-3. A binary export format, since parsing dominates; then measure on the PVM.
+3. ~~A binary export format, then measure on the PVM.~~ Done: `gcd_comm` reveals in 948 M gas
+   with the environment pre-checked.
 4. Turn the parser assertions behind two of the rejections into explicit errors.
-5. The witness changes (extra preimages, heap, large witnesses), then pre-verification.
+5. The witness changes (extra preimages, heap, large witnesses) and pre-verification, which
+   medium proofs need in order to fit.
+6. A shared, pre-checked library layer, to shrink deltas, since delta checking is now 89% of a
+   reveal.

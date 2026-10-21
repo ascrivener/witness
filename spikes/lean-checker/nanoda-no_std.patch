@@ -1,6 +1,6 @@
 diff -ruN a/Cargo.toml b/Cargo.toml
---- a/Cargo.toml	2026-10-21 00:09:57
-+++ b/Cargo.toml	2026-10-21 00:09:57
+--- a/Cargo.toml	2026-10-21 00:30:55
++++ b/Cargo.toml	2026-10-21 00:30:55
 @@ -17,21 +17,13 @@
  opt-level=3
  overflow-checks=true
@@ -35,8 +35,8 @@ diff -ruN a/Cargo.toml b/Cargo.toml
 +serde = { version = "1.0.228", default-features = false, features = ["derive", "alloc"] }
 diff -ruN a/src/binding.rs b/src/binding.rs
 --- a/src/binding.rs	1970-01-01 00:00:00
-+++ b/src/binding.rs	2026-10-21 00:09:57
-@@ -0,0 +1,108 @@
++++ b/src/binding.rs	2026-10-21 00:30:55
+@@ -0,0 +1,109 @@
 +//! Binding a proof to a bounty's statement.
 +//!
 +//! The poster publishes a statement environment `env`: an export of a `Prop`-valued definition
@@ -72,7 +72,8 @@ diff -ruN a/src/binding.rs b/src/binding.rs
 +}
 +
 +/// Parse `env` followed by `delta`, permitting only [`PERMITTED_AXIOMS`].
-+pub fn parse<'p>(env: &str, delta: &str) -> Result<BoundExport<'p>, Box<dyn Error>> {
++/// Each may be lean4export NDJSON or the binary format.
++pub fn parse<'p>(env: &[u8], delta: &[u8]) -> Result<BoundExport<'p>, Box<dyn Error>> {
 +    let mut config = Config::in_memory(PERMITTED_AXIOMS.map(String::from).into());
 +    config.unpermitted_axiom_hard_error = true;
 +    let (file, _skipped, ends) = crate::parser::parse_export_parts(&[env, delta], config)?;
@@ -146,8 +147,8 @@ diff -ruN a/src/binding.rs b/src/binding.rs
 +    }
 +}
 diff -ruN a/src/debug_printer.rs b/src/debug_printer.rs
---- a/src/debug_printer.rs	2026-10-21 00:09:57
-+++ b/src/debug_printer.rs	2026-10-21 00:09:57
+--- a/src/debug_printer.rs	2026-10-21 00:30:55
++++ b/src/debug_printer.rs	2026-10-21 00:30:55
 @@ -1,3 +1,5 @@
 +#[allow(unused_imports)]
 +use crate::prelude::*;
@@ -315,8 +316,8 @@ diff -ruN a/src/debug_printer.rs b/src/debug_printer.rs
 +    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result { write!(f, "{:?}", self.elem_to_print) }
  }
 diff -ruN a/src/env.rs b/src/env.rs
---- a/src/env.rs	2026-10-21 00:09:57
-+++ b/src/env.rs	2026-10-21 00:09:57
+--- a/src/env.rs	2026-10-21 00:30:55
++++ b/src/env.rs	2026-10-21 00:30:55
 @@ -1,7 +1,9 @@
 +#[allow(unused_imports)]
 +use crate::prelude::*;
@@ -330,8 +331,8 @@ diff -ruN a/src/env.rs b/src/env.rs
  /// Reducibility hints accompany definitions; used to determine how
  /// to unfold expressions in order to most efficiently proceed.
 diff -ruN a/src/expr.rs b/src/expr.rs
---- a/src/expr.rs	2026-10-21 00:09:57
-+++ b/src/expr.rs	2026-10-21 00:09:57
+--- a/src/expr.rs	2026-10-21 00:30:55
++++ b/src/expr.rs	2026-10-21 00:30:55
 @@ -1,4 +1,6 @@
  //! Implementation of Lean expressions
 +#[allow(unused_imports)]
@@ -351,8 +352,8 @@ diff -ruN a/src/expr.rs b/src/expr.rs
  
  /// The style of this binder (in Lean's vernacular, the brackets used to write it).
 diff -ruN a/src/inductive.rs b/src/inductive.rs
---- a/src/inductive.rs	2026-10-21 00:09:57
-+++ b/src/inductive.rs	2026-10-21 00:09:57
+--- a/src/inductive.rs	2026-10-21 00:30:55
++++ b/src/inductive.rs	2026-10-21 00:30:55
 @@ -1,8 +1,10 @@
 +#[allow(unused_imports)]
 +use crate::prelude::*;
@@ -456,8 +457,8 @@ diff -ruN a/src/inductive.rs b/src/inductive.rs
                      self.assert_def_eq(old.info.ty, new.info.ty);
                  }
 diff -ruN a/src/level.rs b/src/level.rs
---- a/src/level.rs	2026-10-21 00:09:57
-+++ b/src/level.rs	2026-10-21 00:09:57
+--- a/src/level.rs	2026-10-21 00:30:55
++++ b/src/level.rs	2026-10-21 00:30:55
 @@ -1,4 +1,6 @@
  //! Implementation of the `Level` type representing universes
 +#[allow(unused_imports)]
@@ -486,8 +487,8 @@ diff -ruN a/src/level.rs b/src/level.rs
  
      /// Return `uparam [ks |-> vs]`
 diff -ruN a/src/lib.rs b/src/lib.rs
---- a/src/lib.rs	2026-10-21 00:09:57
-+++ b/src/lib.rs	2026-10-21 00:09:57
+--- a/src/lib.rs	2026-10-21 00:30:55
++++ b/src/lib.rs	2026-10-21 00:30:55
 @@ -2,9 +2,17 @@
  //! ```ignore
  //! Doc comment example
@@ -507,8 +508,8 @@ diff -ruN a/src/lib.rs b/src/lib.rs
  pub mod env;
  pub mod expr;
 diff -ruN a/src/name.rs b/src/name.rs
---- a/src/name.rs	2026-10-21 00:09:57
-+++ b/src/name.rs	2026-10-21 00:09:57
+--- a/src/name.rs	2026-10-21 00:30:55
++++ b/src/name.rs	2026-10-21 00:30:55
 @@ -1,4 +1,6 @@
  //! Implementaiton of the `Name` type (hierarchical names)
 +#[allow(unused_imports)]
@@ -528,8 +529,8 @@ diff -ruN a/src/name.rs b/src/name.rs
  
  impl<'a> Name<'a> {
 diff -ruN a/src/parser.rs b/src/parser.rs
---- a/src/parser.rs	2026-10-21 00:09:57
-+++ b/src/parser.rs	2026-10-21 00:09:57
+--- a/src/parser.rs	2026-10-21 00:30:55
++++ b/src/parser.rs	2026-10-21 00:30:55
 @@ -1,3 +1,5 @@
 +#[allow(unused_imports)]
 +use crate::prelude::*;
@@ -610,7 +611,7 @@ diff -ruN a/src/parser.rs b/src/parser.rs
          }
      }
  }
-@@ -381,22 +366,27 @@
+@@ -381,22 +366,33 @@
      },
  }
  
@@ -623,25 +624,31 @@ diff -ruN a/src/parser.rs b/src/parser.rs
  ) -> Result<(crate::util::ExportFile<'p>, Vec<String>), Box<dyn Error>> {
 -    let mut parser = Parser::new(buf_reader, config);
 -    let mut line_buffer = String::new();
-+    parse_export_parts(&[export], config).map(|(file, skipped, _)| (file, skipped))
++    parse_export_parts(&[export.as_bytes()], config).map(|(file, skipped, _)| (file, skipped))
 +}
  
 -    loop {
 -        let amt = parser.buf_reader.read_line(&mut line_buffer)?;
 -        if amt == 0 {
 -            break
-+/// Parse several strings as consecutive parts of one export (each continuing the previous one's
-+/// indices). Also returns, for each part, how many declarations had been read by its end.
++/// Parse several byte strings as consecutive parts of one export (each continuing the previous
++/// one's indices). Each part is either lean4export NDJSON or the binary format (see
++/// `binary_format.md`), told apart by the binary format's magic. Also returns, for each part, how
++/// many declarations had been read by its end.
 +pub(crate) fn parse_export_parts<'p>(
-+    parts: &[&str],
++    parts: &[&[u8]],
 +    config: Config,
 +) -> Result<(crate::util::ExportFile<'p>, Vec<String>, Vec<usize>), Box<dyn Error>> {
 +    let mut parser = Parser::new(config);
 +    let mut part_ends = Vec::with_capacity(parts.len());
 +    for part in parts {
-+        for line in part.lines() {
-+            parser.go1(line)?;
-+            parser.line_num += 1;
++        if let Some(body) = part.strip_prefix(BINARY_MAGIC) {
++            parser.go_binary(body)?;
++        } else {
++            for line in core::str::from_utf8(part)?.lines() {
++                parser.go1(line)?;
++                parser.line_num += 1;
++            }
          }
 -        parser.go1(line_buffer.as_str())?;
 -        parser.line_num += 1;
@@ -650,7 +657,7 @@ diff -ruN a/src/parser.rs b/src/parser.rs
      }
      
      // If the execution config has `unknown_pp_declar_hard_error: true`, and a `pp_declars` 
-@@ -449,13 +439,12 @@
+@@ -449,13 +445,12 @@
          mutual_block_sizes: parser.mutual_block_sizes,
          ind_name_to_recursor_names,
      };
@@ -667,7 +674,41 @@ diff -ruN a/src/parser.rs b/src/parser.rs
              line_num: 0usize,
              dag: LeanDag::new(&config),
              declars: new_fx_index_map(),
-@@ -555,7 +544,7 @@
+@@ -545,8 +540,32 @@
+     }
+ 
+     fn go1(&mut self, line: &str) -> Result<(), Box<dyn Error>> {
+-        use ExportJsonVal::*;
+         let ExportJsonObject {val, i: assigned_idx} = serde_json::from_str::<ExportJsonObject>(line)?;
++        self.apply(val, assigned_idx, line)
++    }
++
++    /// Read a binary-format part (after its magic). Indices are implicit: each name, level or
++    /// expression gets the next free index of its kind, and a duplicate is still rejected.
++    fn go_binary(&mut self, bytes: &[u8]) -> Result<(), Box<dyn Error>> {
++        let mut r = BinReader { bytes, pos: 0 };
++        while r.pos < r.bytes.len() {
++            let (val, kind) = r.item()?;
++            let idx = |n: usize| u32::try_from(n).map_err(|_| "too many items");
++            let backref = match kind {
++                ItemKind::Name => Some(BackRef::In(idx(self.dag.names.len())?)),
++                ItemKind::Level => Some(BackRef::Il(idx(self.dag.levels.len())?)),
++                ItemKind::Expr => Some(BackRef::Ie(idx(self.dag.exprs.len())?)),
++                ItemKind::Other => None,
++            };
++            self.apply(val, backref, "<binary item>")?;
++            self.line_num += 1;
++        }
++        Ok(())
++    }
++
++    /// Add one decoded export item. `line` is only used in error messages.
++    fn apply(&mut self, val: ExportJsonVal<'_>, assigned_idx: Option<BackRef>, line: &str) -> Result<(), Box<dyn Error>> {
++        use ExportJsonVal::*;
+         match val {
+             Metadata(json_val) => {
+                 let _ = check_semver(&json_val)?;
+@@ -555,7 +574,7 @@
                  let pfx = self.get_name_ptr(pre);
                  let sfx = StringPtr::from(
                      DagMarker::ExportFile, 
@@ -676,7 +717,7 @@ diff -ruN a/src/parser.rs b/src/parser.rs
                  );
  
                  let insert_result = {
-@@ -893,7 +882,7 @@
+@@ -893,7 +912,7 @@
  /// This splits the digit string by 10^(BASE_DIGITS * 2^j) and combines with big multiplications
  /// (Karatsuba/Toom-3), so cost is that of multiplication times a log factor. Same value as `from_str`.
  pub(crate) fn parse_decimal_fast(s: &str) -> Result<BigUint, String> {
@@ -685,7 +726,7 @@ diff -ruN a/src/parser.rs b/src/parser.rs
      const BASE_DIGITS: usize = 2048;
      if s.is_empty() || !s.bytes().all(|b| b.is_ascii_digit()) {
          return Err("expected a non-empty string of ASCII digits".to_string());
-@@ -929,7 +918,7 @@
+@@ -929,7 +948,7 @@
  #[cfg(test)]
  mod parse_decimal_fast_tests {
      use super::*;
@@ -694,9 +735,191 @@ diff -ruN a/src/parser.rs b/src/parser.rs
      #[test]
      fn matches_from_str() {
          let mut x: u64 = 88172645463325252;
+@@ -1018,5 +1037,181 @@
+         for v in ok {
+             assert!(check_semver(&mk_meta(v)).is_ok())
+         }
++    }
++}
++
++/// Starts a binary-format export part.
++pub(crate) const BINARY_MAGIC: &[u8] = b"LEANBIN\x01";
++
++enum ItemKind { Name, Level, Expr, Other }
++
++/// Reads the binary format described in `binary_format.md`.
++struct BinReader<'a> {
++    bytes: &'a [u8],
++    pos: usize,
++}
++
++impl<'a> BinReader<'a> {
++    fn byte(&mut self) -> Result<u8, Box<dyn Error>> {
++        let b = *self.bytes.get(self.pos).ok_or("binary export ends early")?;
++        self.pos += 1;
++        Ok(b)
++    }
++
++    /// Unsigned LEB128.
++    fn uvar(&mut self) -> Result<u64, Box<dyn Error>> {
++        let mut value = 0u64;
++        for shift in (0..64).step_by(7) {
++            let b = self.byte()?;
++            value |= u64::from(b & 0x7f) << shift;
++            if b & 0x80 == 0 {
++                return Ok(value);
++            }
++        }
++        Err("varint too long".into())
++    }
++
++    fn u32(&mut self) -> Result<u32, Box<dyn Error>> { Ok(u32::try_from(self.uvar()?)?) }
++    fn u16(&mut self) -> Result<u16, Box<dyn Error>> { Ok(u16::try_from(self.uvar()?)?) }
++
++    fn boolean(&mut self) -> Result<bool, Box<dyn Error>> {
++        match self.byte()? {
++            0 => Ok(false),
++            1 => Ok(true),
++            _ => Err("bad boolean".into()),
++        }
++    }
++
++    fn slice(&mut self) -> Result<&'a [u8], Box<dyn Error>> {
++        let len = usize::try_from(self.uvar()?)?;
++        let end = self.pos.checked_add(len).filter(|&e| e <= self.bytes.len()).ok_or("binary export ends early")?;
++        let s = &self.bytes[self.pos..end];
++        self.pos = end;
++        Ok(s)
++    }
++
++    fn string(&mut self) -> Result<Cow<'a, str>, Box<dyn Error>> {
++        Ok(Cow::Borrowed(core::str::from_utf8(self.slice()?)?))
++    }
++
++    fn u32s(&mut self) -> Result<Vec<u32>, Box<dyn Error>> {
++        let n = self.uvar()?;
++        (0..n).map(|_| self.u32()).collect()
++    }
++
++    fn list<T>(&mut self, mut f: impl FnMut(&mut Self) -> Result<T, Box<dyn Error>>) -> Result<Vec<T>, Box<dyn Error>> {
++        let n = self.uvar()?;
++        (0..n).map(|_| f(self)).collect()
++    }
++
++    fn binder(&mut self) -> Result<BinderStyle, Box<dyn Error>> {
++        Ok(match self.byte()? {
++            0 => BinderStyle::Default,
++            1 => BinderStyle::Implicit,
++            2 => BinderStyle::StrictImplicit,
++            3 => BinderStyle::InstanceImplicit,
++            _ => return Err("bad binder info".into()),
++        })
++    }
++
++    fn item(&mut self) -> Result<(ExportJsonVal<'a>, ItemKind), Box<dyn Error>> {
++        use ExportJsonVal::*;
++        use ItemKind::*;
++        let tag = self.byte()?;
++        Ok(match tag {
++            0 => (Metadata(FileMeta {
++                exporter: ExporterMeta { name: self.string()?, version: self.string()? },
++                lean: LeanMeta { githash: self.string()?, version: self.string()? },
++                format: FormatMeta { version: self.string()? },
++            }), Other),
++            1 => (NameStr { pre: self.u32()?, str: self.string()? }, Name),
++            2 => (NameNum { pre: self.u32()?, i: self.u32()? }, Name),
++            3 => (LevelSucc(self.u32()?), Level),
++            4 => (LevelMax([self.u32()?, self.u32()?]), Level),
++            5 => (LevelIMax([self.u32()?, self.u32()?]), Level),
++            6 => (LevelParam(self.u32()?), Level),
++            7 => (NatLit(BigUint::from_bytes_le(self.slice()?)), Expr),
++            8 => (StrLit(self.string()?), Expr),
++            9 => (ExprLet { name: self.u32()?, ty: self.u32()?, value: self.u32()?, body: self.u32()?, nondep: self.boolean()? }, Expr),
++            10 => (ExprConst { name: self.u32()?, levels: self.u32s()? }, Expr),
++            11 => (ExprApp { fun: self.u32()?, arg: self.u32()? }, Expr),
++            12 => (ExprPi { binder_name: self.u32()?, binder_type: self.u32()?, body: self.u32()?, binder_info: self.binder()? }, Expr),
++            13 => (ExprLambda { binder_name: self.u32()?, binder_type: self.u32()?, body: self.u32()?, binder_info: self.binder()? }, Expr),
++            14 => (ExprProj { type_name: self.u32()?, idx: usize::try_from(self.uvar()?)?, structure: self.u32()? }, Expr),
++            15 => (ExprSort(self.u32()?), Expr),
++            16 => (ExprBVar(self.u16()?), Expr),
++            17 => (Axiom { name: self.u32()?, uparams: self.u32s()?, ty: self.u32()?, is_unsafe: self.boolean()? }, Other),
++            18 => (Thm { name: self.u32()?, uparams: self.u32s()?, ty: self.u32()?, value: self.u32()? }, Other),
++            19 => (Defn {
++                name: self.u32()?,
++                uparams: self.u32s()?,
++                ty: self.u32()?,
++                value: self.u32()?,
++                hint: match self.byte()? {
++                    0 => ReducibilityHint::Opaque,
++                    1 => ReducibilityHint::Abbrev,
++                    2 => ReducibilityHint::Regular(self.u16()?),
++                    _ => return Err("bad reducibility hint".into()),
++                },
++                safety: match self.byte()? {
++                    0 => DefinitionSafety::Safe,
++                    1 => DefinitionSafety::Unsafe,
++                    2 => DefinitionSafety::Partial,
++                    _ => return Err("bad definition safety".into()),
++                },
++            }, Other),
++            20 => (Opaque { name: self.u32()?, uparams: self.u32s()?, ty: self.u32()?, value: self.u32()?, is_unsafe: self.boolean()? }, Other),
++            21 => (Quot {
++                name: self.u32()?,
++                uparams: self.u32s()?,
++                ty: self.u32()?,
++                kind: match self.byte()? {
++                    0 => QuotKind::Ty,
++                    1 => QuotKind::Ctor,
++                    2 => QuotKind::Lift,
++                    3 => QuotKind::Ind,
++                    _ => return Err("bad quot kind".into()),
++                },
++            }, Other),
++            22 => (Inductive {
++                ind_vals: self.list(|r| Ok(IndInfo {
++                    name: r.u32()?,
++                    uparams: r.u32s()?,
++                    ty: r.u32()?,
++                    all: r.u32s()?,
++                    ctors: r.u32s()?,
++                    is_rec: r.boolean()?,
++                    is_reflexive: r.boolean()?,
++                    num_indices: r.u16()?,
++                    num_nested: r.u16()?,
++                    num_params: r.u16()?,
++                    is_unsafe: r.boolean()?,
++                }))?,
++                ctor_vals: self.list(|r| Ok(Constructor {
++                    name: r.u32()?,
++                    uparams: r.u32s()?,
++                    ty: r.u32()?,
++                    is_unsafe: r.boolean()?,
++                    cidx: r.u16()?,
++                    num_params: r.u16()?,
++                    num_fields: r.u16()?,
++                    induct: r.u32()?,
++                }))?,
++                rec_vals: self.list(|r| Ok(Recursor {
++                    name: r.u32()?,
++                    uparams: r.u32s()?,
++                    ty: r.u32()?,
++                    is_unsafe: r.boolean()?,
++                    num_params: r.u16()?,
++                    num_indices: r.u16()?,
++                    num_motives: r.u16()?,
++                    num_minors: r.u16()?,
++                    rules: r.list(|r| Ok(RecursorRule { ctor: r.u32()?, nfields: r.u16()?, rhs: r.u32()? }))?,
++                    all: r.u32s()?,
++                    k: r.boolean()?,
++                }))?,
++            }, Other),
++            _ => return Err(format!("unknown binary item tag {tag}").into()),
++        })
+     }
+ }
 diff -ruN a/src/pretty_printer.rs b/src/pretty_printer.rs
---- a/src/pretty_printer.rs	2026-10-21 00:09:57
-+++ b/src/pretty_printer.rs	2026-10-21 00:09:57
+--- a/src/pretty_printer.rs	2026-10-21 00:30:55
++++ b/src/pretty_printer.rs	2026-10-21 00:30:55
 @@ -1,3 +1,5 @@
 +#[allow(unused_imports)]
 +use crate::prelude::*;
@@ -783,8 +1006,8 @@ diff -ruN a/src/pretty_printer.rs b/src/pretty_printer.rs
              }
          }
 diff -ruN a/src/quot.rs b/src/quot.rs
---- a/src/quot.rs	2026-10-21 00:09:57
-+++ b/src/quot.rs	2026-10-21 00:09:57
+--- a/src/quot.rs	2026-10-21 00:30:55
++++ b/src/quot.rs	2026-10-21 00:30:55
 @@ -1,4 +1,6 @@
  //! Construction of quotient types
 +#[allow(unused_imports)]
@@ -793,8 +1016,8 @@ diff -ruN a/src/quot.rs b/src/quot.rs
  use crate::env::{ConstructorData, Declar, DeclarInfo, InductiveData, EnvLimit};
  use crate::expr::{BinderStyle, BinderStyle::*};
 diff -ruN a/src/tc.rs b/src/tc.rs
---- a/src/tc.rs	2026-10-21 00:09:57
-+++ b/src/tc.rs	2026-10-21 00:09:57
+--- a/src/tc.rs	2026-10-21 00:30:55
++++ b/src/tc.rs	2026-10-21 00:30:55
 @@ -1,3 +1,5 @@
 +#[allow(unused_imports)]
 +use crate::prelude::*;
@@ -858,8 +1081,8 @@ diff -ruN a/src/tc.rs b/src/tc.rs
  }
  
 diff -ruN a/src/tests.rs b/src/tests.rs
---- a/src/tests.rs	2026-10-21 00:09:57
-+++ b/src/tests.rs	2026-10-21 00:09:57
+--- a/src/tests.rs	2026-10-21 00:30:55
++++ b/src/tests.rs	2026-10-21 00:30:55
 @@ -1,3 +1,5 @@
 +#[allow(unused_imports)]
 +use crate::prelude::*;
@@ -867,8 +1090,8 @@ diff -ruN a/src/tests.rs b/src/tests.rs
  mod level;
  mod natlit;
 diff -ruN a/src/union_find.rs b/src/union_find.rs
---- a/src/union_find.rs	2026-10-21 00:09:57
-+++ b/src/union_find.rs	2026-10-21 00:09:57
+--- a/src/union_find.rs	2026-10-21 00:30:55
++++ b/src/union_find.rs	2026-10-21 00:30:55
 @@ -1,6 +1,8 @@
  //! A union find data structure for caching definitional equalities
 +#[allow(unused_imports)]
@@ -880,8 +1103,8 @@ diff -ruN a/src/union_find.rs b/src/union_find.rs
  #[derive(Debug)]
  pub(crate) struct UnionFind<A>
 diff -ruN a/src/unique_hasher.rs b/src/unique_hasher.rs
---- a/src/unique_hasher.rs	2026-10-21 00:09:57
-+++ b/src/unique_hasher.rs	2026-10-21 00:09:57
+--- a/src/unique_hasher.rs	2026-10-21 00:30:55
++++ b/src/unique_hasher.rs	2026-10-21 00:30:55
 @@ -1,4 +1,6 @@
  //! Hasher for unique values
 +#[allow(unused_imports)]
@@ -890,8 +1113,8 @@ diff -ruN a/src/unique_hasher.rs b/src/unique_hasher.rs
  
  pub struct UniqueHasher {
 diff -ruN a/src/util.rs b/src/util.rs
---- a/src/util.rs	2026-10-21 00:09:57
-+++ b/src/util.rs	2026-10-21 00:09:57
+--- a/src/util.rs	2026-10-21 00:30:55
++++ b/src/util.rs	2026-10-21 00:30:55
 @@ -1,3 +1,5 @@
 +#[allow(unused_imports)]
 +use crate::prelude::*;
@@ -964,7 +1187,7 @@ diff -ruN a/src/util.rs b/src/util.rs
  
      #[serde(default)]
      pub pp_to_stdout: bool,
-@@ -942,76 +939,39 @@
+@@ -942,76 +939,44 @@
      pub unsafe_permit_all_axioms: bool,
  }
  
@@ -1063,6 +1286,11 @@ diff -ruN a/src/util.rs b/src/util.rs
 +    /// that were in the export but not permitted.
 +    pub fn parse_export<'a>(self, export: &str) -> Result<(ExportFile<'a>, Vec<String>), Box<dyn Error>> {
 +        crate::parser::parse_export_str(export, self)
++    }
++
++    /// Parse an export that is either lean4export NDJSON or the binary format.
++    pub fn parse_export_bytes<'a>(self, export: &[u8]) -> Result<(ExportFile<'a>, Vec<String>), Box<dyn Error>> {
++        crate::parser::parse_export_parts(&[export], self).map(|(file, skipped, _)| (file, skipped))
      }
  }
  

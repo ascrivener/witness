@@ -21,14 +21,16 @@ delta() { python3 ../../delta/lean_delta.py "env-$1.ndjson" "full-$2.ndjson" > "
 delta GoalTwo goal_two; delta GoalAddComm goal_add_comm; delta GoalGcd goal_gcd; delta GoalF goal_f
 delta GoalTwo goal_wrong; delta GoalTwo goal_def; delta GoalGcd goal_axiom; delta GoalGcd goal_sorry
 delta GoalF redefine
+for f in env-*.ndjson delta-*.ndjson; do python3 ../../delta/lean_bin.py "$f" > "${f%.ndjson}.bin"; done
 
 failures=0
-case_() { # EXPECTED LABEL ENV DELTA STATEMENT THEOREM
+case_() { # EXPECTED LABEL ENV DELTA STATEMENT THEOREM; uses $EXT (ndjson or bin)
 	local expected=$1 label=$2; shift 2
-	local out; out=$(../../$B bind "env-$1.ndjson" "delta-$2.ndjson" "$3" "$4" || true)
-	printf '%-8s %-30s %s\n' "$([[ $out == $expected* ]] && echo ok || echo FAIL)" "$label" "${out:0:150}"
+	local out; out=$(../../$B bind "env-$1.$EXT" "delta-$2.$EXT" "$3" "$4" || true)
+	printf '%-8s %-6s %-30s %s\n' "$([[ $out == $expected* ]] && echo ok || echo FAIL)" "$EXT" "$label" "${out:0:140}"
 	[[ $out == $expected* ]] || failures=$((failures + 1))
 }
+for EXT in ndjson bin; do
 case_ ACCEPTED "2 + 2 = 4" GoalTwo goal_two GoalTwo goal_two
 case_ ACCEPTED "a + b = b + a" GoalAddComm goal_add_comm GoalAddComm goal_add_comm
 case_ ACCEPTED "gcd a b = gcd b a" GoalGcd goal_gcd GoalGcd goal_gcd
@@ -41,5 +43,6 @@ case_ REJECTED "redefines myF" GoalF redefine GoalF goal_f
 case_ REJECTED "theorem missing" GoalTwo goal_two GoalTwo nonexistent
 case_ REJECTED "statement not a Prop" GoalF goal_f myF goal_f
 case_ REJECTED "delta for another bounty" GoalAddComm goal_two GoalAddComm goal_two
+done
 echo
 [ $failures -eq 0 ] && echo "all binding cases behave as expected" || { echo "$failures case(s) failed"; exit 1; }

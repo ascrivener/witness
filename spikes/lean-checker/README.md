@@ -26,6 +26,9 @@ v4.36.0-rc1, lean4export at `main`, nanoda_lib `9d6964f`.
     the gas each phase used.
   - A bad proof panics, so refine fails.
 - **`proofs/`**: a Lean project with the sample theorems, including `Bad.lean`, which uses `sorry`.
+- **Binary export format** (added later): [`binary_format.md`](binary_format.md), the
+  `delta/lean_bin.py` converter, and a decoder in the patched parser. The format is detected
+  automatically.
 - **Statement binding** (added later; see [the design](DESIGN-statement-binding.md)):
   - `nanoda/src/binding.rs` in the patch: the check.
   - `delta/lean_delta.py`: the solver's delta tool.
@@ -64,6 +67,26 @@ checking). Peak memory is at most 7 MB.
   16 MB stack for deep proofs. The standard program format stores the stack size in 3 bytes, so
   the maximum is just under 16 MB.
 
+### Update: binary format and binding on the PVM (2026-10-21)
+
+The [binary export format](binary_format.md) is about 11% of the JSON size. Measured on the same
+v0.1.29 testnet (refine limit 10⁹ gas):
+
+| `gcd a b = gcd b a`, bound (env 466 KB + delta 655 KB of JSON) | Parse | Binding | Check env | Check delta | Total |
+|---|---|---|---|---|---|
+| JSON | 773 M | — | — | — | out of gas after parsing |
+| Binary (52 KB + 74 KB) | 102 M | — | 473 M | needed > 425 M | out of gas |
+| **Binary, environment pre-checked** | **102 M** | **5.6 M** | — | **841 M** | **948 M: passes** |
+
+- **Parsing is 7.6× cheaper** in binary. For the small `2 + 2 = 4` environment, it's 4.0 M gas
+  instead of 25.3 M.
+- **With the environment pre-checked, a medium proof fits** in one refine: `gcd_comm` reveals
+  for 948 M gas. The one-off environment check (about 473 M) also fits on its own.
+- **Checking the delta now dominates,** at 89% of a reveal. The delta is 247 declarations, mostly
+  library lemmas the proof uses. Shrinking it means a shared, pre-checked library layer, not
+  faster parsing.
+- The service blob with the decoder and binding is 629 KB.
+
 ## What it means for witness
 
 1. **Feasible today for small proofs.** Self-contained theorems over core `Nat` and `List` check
@@ -99,10 +122,12 @@ checking). Peak memory is at most 7 MB.
 
 1. ~~Design statement binding (6).~~ Designed, and prototyped natively: see
    [the design](DESIGN-statement-binding.md).
-2. Cut parsing cost with a binary export format (2), then measure `gcd_comm` again. Binding
-   showed parsing is the biggest per-reveal cost.
-3. In witness: heap support, environment blobs and large witnesses (7).
-4. Measure on a testnet with full-spec parameters, if `polkajam-testnet` can run one.
+2. ~~Cut parsing cost with a binary export format (2), then measure `gcd_comm` again.~~ Done:
+   7.6× cheaper parsing, and `gcd_comm` reveals in 948 M gas with the environment pre-checked.
+3. A shared, pre-checked library layer, to move common lemmas out of solver deltas. Delta
+   checking is now 89% of a reveal.
+4. In witness: heap support, environment blobs and large witnesses (7), then pre-verification.
+5. Measure on a testnet with full-spec parameters, if `polkajam-testnet` can run one.
 
 ## Reproducing
 
