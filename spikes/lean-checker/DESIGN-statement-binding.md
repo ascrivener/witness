@@ -1,6 +1,7 @@
 # Design: binding a Lean proof to the bounty's statement
 
-Status: proposal, from the [checker spike](README.md). Not implemented.
+Status: prototyped natively (see [Prototype results](#prototype-results)). Not yet on the PVM
+or in witness.
 
 ## The problem
 
@@ -125,10 +126,54 @@ remaining cost.
 - **Building the delta.** The renumbering tool must produce exactly what the checker expects.
   A mismatch fails the check, which costs the solver gas but never pays wrongly.
 
+## Prototype results
+
+Native prototype, 2026-10-21:
+- **The check:** `nanoda/src/binding.rs` in the patched port.
+- **The delta tool:** `delta/lean_delta.py`, a Python prototype.
+- **Statements and solutions:** `proofs/Proofs/Statements.lean` (the poster's) and
+  `Solutions.lean` / `Redefine.lean` (the solver's).
+- **Tests:** `test-binding.sh` runs every case.
+
+| Case | Expected | Result |
+|---|---|---|
+| `2 + 2 = 4` | accept | accepted: env 36 KB, **delta 831 B** (2 declarations) |
+| `a + b = b + a` | accept | accepted: env 32 KB, delta 30 KB |
+| `gcd a b = gcd b a` | accept | accepted: env 466 KB, delta 655 KB |
+| statement over the poster's own `myF` | accept | accepted |
+| proves `True` instead | reject | "theorem goal_wrong does not have type GoalTwo" |
+| the proof is a `def` | reject | "goal_def is not a theorem" |
+| an extra axiom | reject | "unpermitted axiom extra_axiom" |
+| `sorry` | reject | "unpermitted axiom sorryAx" |
+| redefines `myF` | reject | duplicate-declaration assertion |
+| theorem missing | reject | "theorem nonexistent is not in the submission" |
+| statement isn't a `Prop` | reject | "statement myF is not a Prop" |
+| delta built for another bounty | reject | back-reference mismatch |
+
+The last two rejection messages come from parser assertions. They're correct, but should become
+explicit errors.
+
+### Cost for `gcd a b = gcd b a` (native, median of 5)
+
+| Approach | Parse | Check env | Check delta | Total |
+|---|---|---|---|---|
+| Full export, no binding | 6.8 ms | 16.3 ms combined | | 23 ms |
+| Env + delta | 7.0 ms | 6.1 ms | 10.6 ms | 24 ms |
+| Env + delta, env pre-checked | 7.0 ms | — | 10.6 ms | **18 ms** |
+
+- **Binding costs nothing measurable.**
+- **Pre-checking the environment saves about 25%** per reveal here. That's less than hoped,
+  because the delta is still large: the proof brings in library lemmas the statement doesn't use.
+- **Rough PVM estimate,** using the spike's ratios (about 115 M gas per native ms of parsing, 55 M
+  per ms of checking): about 1.7×10⁹ gas, or 1.4×10⁹ with the environment pre-checked. That's over
+  the testnet's 10⁹, under the full spec's 5×10⁹.
+- **Parsing is now the biggest per-reveal cost, about 58%,** so the binary format is worth doing.
+  So is a shared library layer that would move common lemmas out of the delta.
+
 ## Suggested order
 
-1. Prototype the check (steps 1–6) and the delta tool natively, against the spike's proofs. Add
-   negative tests: a wrong theorem, a redefined vocabulary, an extra axiom, a name collision.
-2. Measure E and P sizes and gas for `gcd_comm`, with and without checking E at reveal time.
-3. Then decide whether the binary format is still needed, and how urgently.
-4. The witness changes (extra preimages, heap, large witnesses), then pre-verification.
+1. ~~Prototype the check and delta tool natively, with negative tests.~~ Done.
+2. ~~Measure E and P sizes for `gcd_comm`, with and without checking E.~~ Done, natively.
+3. A binary export format, since parsing dominates; then measure on the PVM.
+4. Turn the parser assertions behind two of the rejections into explicit errors.
+5. The witness changes (extra preimages, heap, large witnesses), then pre-verification.

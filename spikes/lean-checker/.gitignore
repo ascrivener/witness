@@ -3,3 +3,4 @@ target/
 out/
 proofs/.lake/
 proofs/*.ndjson
+proofs/exports/

@@ -26,6 +26,10 @@ v4.36.0-rc1, lean4export at `main`, nanoda_lib `9d6964f`.
     the gas each phase used.
   - A bad proof panics, so refine fails.
 - **`proofs/`**: a Lean project with the sample theorems, including `Bad.lean`, which uses `sorry`.
+- **Statement binding** (added later; see [the design](DESIGN-statement-binding.md)):
+  - `nanoda/src/binding.rs` in the patch: the check.
+  - `delta/lean_delta.py`: the solver's delta tool.
+  - `test-binding.sh`: 4 honest proofs accepted, 8 attacks rejected.
 
 ## Results
 
@@ -93,8 +97,10 @@ checking). Peak memory is at most 7 MB.
 
 ## Suggested next steps
 
-1. Design statement binding (6). Without it, a Lean bounty isn't safe.
-2. Cut parsing cost with a binary export format (2), then measure `gcd_comm` again.
+1. ~~Design statement binding (6).~~ Designed, and prototyped natively: see
+   [the design](DESIGN-statement-binding.md).
+2. Cut parsing cost with a binary export format (2), then measure `gcd_comm` again. Binding
+   showed parsing is the biggest per-reveal cost.
 3. In witness: heap support, environment blobs and large witnesses (7).
 4. Measure on a testnet with full-spec parameters, if `polkajam-testnet` can run one.
 
