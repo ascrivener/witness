@@ -424,12 +424,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "polkavm"
+version = "0.37.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c40ac953a7396523af50f8f3523ac58d683f59a74a252a71690f778b494f824a"
+dependencies = [
+ "libc",
+ "log",
+ "picosimd",
+ "polkavm-assembler",
+ "polkavm-common",
+ "polkavm-linux-raw",
+]
+
+[[package]]
+name = "polkavm-assembler"
+version = "0.37.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6264b876711c7c921a87df3ffb2c152d91686050940253d30083782ab68f06f7"
+dependencies = [
+ "log",
+]
+
+[[package]]
 name = "polkavm-common"
 version = "0.37.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b44940b0d82ff491647139e045e026b98666be87770f72d48d6463fb65b866fd"
 dependencies = [
+ "log",
  "picosimd",
+ "polkavm-assembler",
 ]
 
 [[package]]
@@ -462,6 +487,12 @@ dependencies = [
  "polkavm-derive-impl",
  "syn 2.0.119",
 ]
+
+[[package]]
+name = "polkavm-linux-raw"
+version = "0.37.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bb9c5f2225abfe56ebf8e6681ebfef57d5dcb228c03da32d96a1fd50ed9bad24"
 
 [[package]]
 name = "proc-macro-crate"
@@ -733,6 +764,16 @@ dependencies = [
  "jam-pvm-common",
  "jam-types",
  "polkavm-derive",
+ "witness-rules",
+ "witness-types",
+]
+
+[[package]]
+name = "witness-sim"
+version = "0.1.0"
+dependencies = [
+ "jam-codec",
+ "polkavm",
  "witness-rules",
  "witness-types",
 ]

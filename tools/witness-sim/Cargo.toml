@@ -1,0 +1,13 @@
+[package]
+name = "witness-sim"
+description = "Runs witness ops natively, as a stand-in for a JAM testnet: the rules, preimages and storage in memory, and checks in PolkaVM"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+witness-types = { workspace = true, features = ["std"] }
+witness-rules.workspace = true
+codec = { workspace = true, features = ["std"] }
+polkavm = "0.37.0"

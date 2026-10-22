@@ -133,6 +133,7 @@ checks/dictionary/         sample: x is dictionary words hashing to D leading ze
                            dictionary; params: D)
 checks/sorted-words/       sample that attests: as dictionary, over attested sorted word volumes
 tools/witness-cli/         builds work-item payloads as hex, and reads state (`witness`)
+tools/witness-sim/         runs ops natively in place of a testnet, checks in PolkaVM
 tools/full-gas-spec/       raises a PolkaJam dev chain spec's refine limit to the full spec's
 scripts/e2e.sh             end-to-end test on a local PolkaJam testnet
 ```
@@ -163,6 +164,17 @@ cargo jam-build --out-dir out
 ```
 
 `witness hash --check out/factor-check.jam` prints the check hash a bounty on that blob uses.
+
+The end-to-end script runs in seconds against `tools/witness-sim`, which takes the `jamt`
+commands the script uses and runs each op through the service's rules natively, with preimages
+and storage in memory and checks in PolkaVM. It charges checks the gas PolkaJam v0.1.29 does
+(PolkaVM's full cost model with L2 cache hits matched it exactly on the sample checks), but not
+refine or accumulate themselves, and a slot passes with every op, so the testnet stays the judge
+of what fits and of the node's behavior. Use it while iterating:
+
+```bash
+WITNESS_SIM=1 scripts/e2e.sh          # the full run, in about 7 seconds
+```
 
 CI (`.github/workflows/ci.yml`) runs the unit tests and builds the blobs. The end-to-end script
 needs a PolkaJam release, so run it locally. It starts its own testnet, deploys, and checks the
