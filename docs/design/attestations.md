@@ -3,7 +3,8 @@
 Status: phase 1 is partly implemented: extra blobs, check interface v2 and the check heap.
 Extrinsic witnesses and limits as parameters are not done yet. Phase 2 is implemented: chains of
 attestations, bounties citing them, and reveals extending them. See "As built" below for where it
-differs from this proposal.
+differs from this proposal. The chains have since given way to a DAG over subject lists, see
+[attestation-dag.md](attestation-dag.md).
 
 ## Summary
 
