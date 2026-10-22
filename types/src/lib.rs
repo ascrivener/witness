@@ -15,18 +15,18 @@
 //! - A valid reveal refunds its commitment's deposit; unrevealed commitments forfeit theirs, which
 //!   is what makes spamming commitments cost something.
 //!
-//! Attestations let checks reuse verification across refines:
-//! - `Pin` holds a preimage for good, so refine can look it up.
-//! - `Attest` runs a check in attest mode on a pinned subject blob, trusting the subjects of the
-//!   attestation chain it extends. If the check returns true, accumulate records an
-//!   [`Attestation`]: "check C, with these params, verified this blob following that chain".
-//! - A bounty can cite a chain of attestations as its first blobs, and a reveal can extend it.
-//!   The check receives the chain's subjects marked trusted, and can skip re-verifying them.
-//! - A subject is only trusted where it was verified: right after the chain it was attested on.
-//!   Formats like Lean exports number their items on from the layers before, so a layer checked
-//!   after one prefix can mean something else after another.
-//! - A check only ever trusts its own attestations: a chain is one check with one set of params,
-//!   and a bounty may only cite chains by its own check.
+//! Attestations let checks reuse verification across refines (see docs/design/attestation-dag.md):
+//! - `Pin` holds preimages for good, so refine can look them up.
+//! - `Attest` runs a check in attest mode on a list of subjects (a preimage listing them),
+//!   trusting subjects of earlier attestations it cites. If the check returns true, accumulate
+//!   records an [`Attestation`]: "check C, with these params, verified every subject in this list,
+//!   given those parents' subjects". Any subject in the list can then be trusted on its own.
+//! - Bounties cite attested subjects, and reveals can cite more. The check receives them marked
+//!   trusted, and can skip re-verifying them.
+//! - Attestations form a DAG. Trust needs no context: an attestation is only recorded once its
+//!   parents were, so a cited attestation rests, by induction, on subjects that were all checked.
+//! - A check only ever trusts its own attestations: everything an op cites is by the same check
+//!   with the same attest params, and a bounty may only cite its own check's attestations.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
@@ -57,15 +57,15 @@ pub const MAX_CHECK_GAS: Gas = 4_500_000_000;
 pub const MAX_CHECK_LEN: u32 = 1 << 20;
 /// Largest check parameters a bounty may carry.
 pub const MAX_PARAMS_LEN: u32 = 4096;
-/// Most blobs a check may be given: a bounty's blobs plus a reveal's extra attested layers, or
-/// an attested subject and its chain.
-pub const MAX_BLOBS: u32 = 128;
-/// Largest total length of a bounty's extra blobs. They are copied into the check's memory, so
-/// this must leave room within [`MAX_CHECK_PAGES`] for the check's own code, data, stack and heap.
-pub const MAX_BLOBS_LEN: u32 = 4 << 20;
-/// Most memory pages a check may use (64 MiB), counting its arguments and any heap it grows.
+/// Most blobs a check may be given: trusted subjects, plain blobs and subjects to attest. A check
+/// over a big library may draw on hundreds or thousands of attested items.
+pub const MAX_BLOBS: u32 = 4096;
+/// Largest total length of the blobs a check is given. They are copied into the check's memory,
+/// so this must leave room within [`MAX_CHECK_PAGES`] for its own code, data, stack and heap.
+pub const MAX_BLOBS_LEN: u32 = 16 << 20;
+/// Most memory pages a check may use (128 MiB), counting its arguments and any heap it grows.
 /// Real verifiers, such as proof checkers, want deep stacks and allocate heavily.
-pub const MAX_CHECK_PAGES: u32 = 16384;
+pub const MAX_CHECK_PAGES: u32 = 32768;
 /// Largest witness accepted in a Reveal payload.
 pub const MAX_WITNESS_LEN: u32 = 1 << 16;
 /// A commitment must be on chain before its reveal, so a reveal can only use a commitment from an
@@ -107,49 +107,66 @@ pub struct Preimage {
 pub enum BlobRef {
 	/// A plain preimage: the check must verify whatever it relies on in it.
 	Blob(Preimage),
-	/// The subject of an attestation by the bounty's own check, passed to it as trusted. A
-	/// bounty's attested blobs come first and form one chain from its root, in order.
-	Attested(AttestationId),
+	/// Entry `entry` of the subject list of an attestation by the bounty's own check, passed to
+	/// it as trusted.
+	Attested { attestation: AttestationId, entry: u32 },
+}
+
+/// A subject list: the preimages an attestation covers, encoded as a `Vec<Preimage>` and stored
+/// as a preimage itself.
+pub type SubjectList = Vec<Preimage>;
+
+/// Longest encoding of a [`SubjectList`]: [`MAX_BLOBS`] entries and their length prefix.
+pub const MAX_SUBJECT_LIST_LEN: usize = 4 + 36 * MAX_BLOBS as usize;
+
+/// Decode a subject list, which must be exactly one [`SubjectList`] of at most [`MAX_BLOBS`]
+/// entries.
+pub fn decode_subject_list(data: &[u8]) -> Option<SubjectList> {
+	if data.len() > MAX_SUBJECT_LIST_LEN {
+		return None;
+	}
+	let list = codec::DecodeAll::decode_all(&mut &data[..]).ok()?;
+	let list: SubjectList = list;
+	(list.len() <= MAX_BLOBS as usize).then_some(list)
 }
 
 /// What an attestation says: check `check_hash`, run in attest mode with params hashing to
-/// `params_hash`, returned true for `subject`, given the subjects of `parent`'s chain (trusted,
-/// oldest first) before it.
+/// `params_hash`, returned true for every subject in the list `subjects`, given trusted subjects
+/// of the attestations whose ids `parents_root` commits to.
 #[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
 pub struct AttestationClaim {
 	pub check_hash: Hash,
 	pub params_hash: Hash,
-	pub subject: Preimage,
-	/// The attestation this one follows, by the same check with the same params; `None` for the
-	/// root of a chain. Its id covers its own parent, so this commits to the whole chain.
-	pub parent: Option<AttestationId>,
+	/// A preimage holding the [`SubjectList`].
+	pub subjects: Preimage,
+	/// See [`parents_root`]. Committing to the parents through a root keeps a claim four hashes
+	/// long however many parents it has, since ops carry claims.
+	pub parents_root: Hash,
 }
 
 impl AttestationClaim {
-	/// The attestation's id. It covers the check, the params, the subject and the parent (so the
-	/// whole chain before it), so the same blob verified by another check version or after other
-	/// layers is another attestation.
+	/// The attestation's id. It covers the check, the params, the subjects and the parents, so
+	/// the same subjects verified by another check version, or on other foundations, are another
+	/// attestation.
 	pub fn id(&self) -> AttestationId {
 		blake2b256(&(b"witness/attest", self).encode())
 	}
 }
 
-/// Whether `chain` is a chain of attestations following `parent` (oldest first): each claim's
-/// parent is the one before it, and all are by `check_hash` with `params_hash`.
-pub fn is_chain(
-	chain: &[AttestationClaim],
-	parent: Option<AttestationId>,
-	check_hash: &Hash,
-	params_hash: &Hash,
-) -> bool {
-	let mut expected = parent;
-	chain.iter().all(|claim| {
-		let follows = claim.parent == expected &&
-			claim.check_hash == *check_hash &&
-			claim.params_hash == *params_hash;
-		expected = Some(claim.id());
-		follows
-	})
+/// The root of a set of parent attestations: Blake2b-256 of their ids, sorted and deduplicated.
+pub fn parents_root(parents: &[AttestationId]) -> Hash {
+	let mut ids = parents.to_vec();
+	ids.sort();
+	ids.dedup();
+	blake2b256(&(b"witness/parents", ids).encode())
+}
+
+/// A trusted subject, as an op cites it: entry `entry` of the subject list of the op's claim
+/// number `claim`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
+pub struct TrustedRef {
+	pub claim: u16,
+	pub entry: u32,
 }
 
 /// A recorded attestation. Kept for good.
@@ -161,24 +178,6 @@ pub struct Attestation {
 	pub attester: AccountId,
 }
 
-/// A blob as a reveal names it. Refine can't read state, so for an attested blob the hunter
-/// supplies the claim; its id must match the bounty's.
-#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
-pub enum RevealBlob {
-	Blob(Preimage),
-	Attested(AttestationClaim),
-}
-
-impl RevealBlob {
-	/// How the bounty's terms name this blob.
-	pub fn blob_ref(&self) -> BlobRef {
-		match self {
-			RevealBlob::Blob(p) => BlobRef::Blob(*p),
-			RevealBlob::Attested(claim) => BlobRef::Attested(claim.id()),
-		}
-	}
-}
-
 /// What a maker puts up, and what a hunter must reproduce exactly when revealing.
 #[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
 pub struct BountyTerms {
@@ -187,9 +186,9 @@ pub struct BountyTerms {
 	pub check_len: u32,
 	/// Passed to the check alongside the witness, so one check blob can serve many bounties.
 	pub params: Vec<u8>,
-	/// Blobs refine passes to the check, in order, such as a statement environment or a library.
-	/// Plain blobs are solicited and released along with the check blob; attested ones are
-	/// already held for good.
+	/// Blobs refine passes to the check, such as a statement environment or a library: attested
+	/// subjects (trusted) and plain blobs. Plain blobs are solicited and released along with the
+	/// check blob; attested ones are held for good.
 	pub blobs: Vec<BlobRef>,
 	pub reward: Points,
 	pub check_gas: Gas,
@@ -219,11 +218,13 @@ pub enum Op {
 		/// and accumulate checks them.
 		check_hash: Hash,
 		params: Vec<u8>,
-		blobs: Vec<RevealBlob>,
-		/// Attested layers this reveal adds after the bounty's attested chain, continuing it,
-		/// such as library layers the proof uses. Passed to the check as trusted, after the
-		/// bounty's attested blobs and before its plain ones.
-		extra: Vec<AttestationClaim>,
+		blobs: Vec<BlobRef>,
+		/// The attestations `trusted` cites, each once.
+		claims: Vec<AttestationClaim>,
+		/// Every subject passed to the check as trusted: those of the bounty's blobs, and any
+		/// more the reveal relies on (such as library a proof uses that the bounty didn't name).
+		/// They come first, in this order, then the bounty's plain blobs.
+		trusted: Vec<TrustedRef>,
 		check_gas: Gas,
 		hunter: AccountId,
 		salt: Hash,
@@ -235,19 +236,25 @@ pub enum Op {
 	/// Delete a commitment that can no longer be revealed. Anyone may send it; the deposit is
 	/// already forfeit.
 	Release { bounty_id: BountyId, commitment: Hash },
-	/// Hold `blob` as a preimage for good, paying [`PIN_DEPOSIT`], so attestations can use it.
-	Pin { owner: AccountId, nonce: u64, blob: Preimage, signature: Signature },
-	/// Attest that check `check_hash` accepts `subject` after the chain `ancestors` (oldest
-	/// first, empty for a new root), paying [`ATTEST_DEPOSIT`]. The check and every subject must
-	/// already be held, by a pin or a bounty. Refine can't read state, so the attester supplies
-	/// the chain's claims; accumulate checks its tip was recorded.
+	/// Hold `blobs` as preimages for good, paying [`PIN_DEPOSIT`] for each, so attestations can
+	/// use them: typically a subject list and its subjects.
+	Pin { owner: AccountId, nonce: u64, blobs: Vec<Preimage>, signature: Signature },
+	/// Attest that check `check_hash` accepts every subject in the list `subjects`, trusting the
+	/// subjects `trusted` cites, paying [`ATTEST_DEPOSIT`]. The check, the list and every subject
+	/// must already be held, by pins or bounties. Refine can't read state, so the attester
+	/// supplies the claims cited; accumulate checks they were recorded.
 	Attest {
 		attester: AccountId,
 		nonce: u64,
 		check_hash: Hash,
 		params: Vec<u8>,
-		subject: Preimage,
-		ancestors: Vec<AttestationClaim>,
+		subjects: Preimage,
+		/// The parent attestations, each once.
+		claims: Vec<AttestationClaim>,
+		trusted: Vec<TrustedRef>,
+		/// The attester's evidence, passed to the check (a batch's proofs, say). Not part of the
+		/// claim: the attestation is about the subjects, however they were shown.
+		witness: Vec<u8>,
 		check_gas: Gas,
 		signature: Signature,
 	},
@@ -280,9 +287,11 @@ pub enum Rejection {
 	BlobsTooLarge,
 	/// An attestation by a check other than the one being run, or with other params.
 	ForeignAttestation,
-	/// Attested blobs that aren't one chain from its root, or extra layers that don't continue
-	/// the bounty's chain.
-	BrokenChain,
+	/// A trusted reference to a claim or entry that doesn't exist, a claim cited twice or that no
+	/// reference uses, or a reveal that doesn't trust its bounty's attested subjects.
+	BadTrustedRef,
+	/// A subject list that doesn't decode, or lists more than [`MAX_BLOBS`] subjects.
+	BadSubjectList,
 	/// The check blob is not a valid standard program, or needs more memory than allowed.
 	BadCheckBlob,
 	CheckFailed(CheckFailure),
@@ -302,8 +311,8 @@ pub enum Verified {
 		params_hash: Hash,
 		/// Blake2b-256 of the encoded blob references.
 		blobs_hash: Hash,
-		/// The last of the reveal's extra layers, which accumulate must find recorded.
-		extra_tip: Option<AttestationId>,
+		/// The attestations the reveal relied on, which accumulate must find recorded.
+		attestations: Vec<AttestationId>,
 		check_gas: Gas,
 		commitment: Hash,
 		hunter: AccountId,
@@ -312,9 +321,10 @@ pub enum Verified {
 	Finalize { bounty_id: BountyId },
 	Reclaim { bounty_id: BountyId, maker: AccountId, nonce: u64 },
 	Release { bounty_id: BountyId, commitment: Hash },
-	Pin { owner: AccountId, nonce: u64, blob: Preimage },
-	/// The check returned true in attest mode; accumulate records `claim` if its parent was.
-	Attest { attester: AccountId, nonce: u64, claim: AttestationClaim },
+	Pin { owner: AccountId, nonce: u64, blobs: Vec<Preimage> },
+	/// The check returned true in attest mode; accumulate records `claim` if `parents` (whose
+	/// root the claim covers) were.
+	Attest { attester: AccountId, nonce: u64, claim: AttestationClaim, parents: Vec<AttestationId> },
 	Rejected(Rejection),
 }
 
@@ -401,9 +411,9 @@ pub fn commit_message(
 	(b"witness/commit", service_id, bounty_id, committer, nonce, commitment).encode()
 }
 
-/// The message an owner signs to pin `blob` on service `service_id`.
-pub fn pin_message(service_id: u32, owner: &AccountId, nonce: u64, blob: &Preimage) -> Vec<u8> {
-	(b"witness/pin", service_id, owner, nonce, blob).encode()
+/// The message an owner signs to pin `blobs` on service `service_id`.
+pub fn pin_message(service_id: u32, owner: &AccountId, nonce: u64, blobs: &[Preimage]) -> Vec<u8> {
+	(b"witness/pin", service_id, owner, nonce, blobs).encode()
 }
 
 /// The message an attester signs to attest the claim with id `id` on service `service_id`.
@@ -425,14 +435,16 @@ pub const CHECK_INTERFACE_VERSION: u8 = 2;
 pub enum CheckMode {
 	/// Does the witness solve the bounty?
 	Reveal = 0,
-	/// Does the subject, the last blob, verify given the others? The witness is empty.
+	/// Do the subjects, the untrusted blobs after the trusted ones, all verify given the trusted
+	/// ones? The witness is the attester's evidence.
 	Attest = 1,
 }
 
 /// A blob as a check receives it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CheckBlob<'a> {
-	/// The blob is the subject of an attestation by this same check, so the check may rely on it.
+	/// The blob is a subject of an attestation by this same check, with the same attest params,
+	/// so the check may rely on it.
 	pub trusted: bool,
 	pub hash: Hash,
 	pub data: &'a [u8],

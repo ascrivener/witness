@@ -1,6 +1,6 @@
 # Design: attestations as a DAG, over sets of subjects
 
-Status: proposal. Replaces the linear chains of witness#7.
+Status: implemented. Replaces the linear chains of witness#7.
 
 ## Why
 

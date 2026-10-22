@@ -19,23 +19,25 @@
 //! witness_check::declare_full_check!(check);
 //! ```
 //!
-//! A full check can also attest: in [`Mode::Attest`] it verifies a subject blob once, and the
-//! service records that it did. Bounties on the same check can then cite the attestation, and
-//! the check receives the subject marked trusted, so it can skip re-verifying it:
+//! A full check can also attest: in [`Mode::Attest`] it verifies a list of subject blobs once,
+//! and the service records that it did. Later attestations, bounties and reveals on the same
+//! check can then cite any of those subjects, and the check receives them marked trusted, so it
+//! can skip re-verifying them:
 //!
 //! ```ignore
 //! fn check(input: &witness_check::Input) -> bool {
 //!     match input.mode {
-//!         // Parents are trusted; verify the subject on top of them.
-//!         Mode::Attest => input.subject().is_some_and(|s| layer_is_valid(&input, s)),
+//!         // Trusted blobs come first; verify every subject given them, with the witness as
+//!         // evidence.
+//!         Mode::Attest => input.subjects().all(|s| item_is_valid(&input, s)),
 //!         // Verify only what isn't trusted, then the witness against it all.
-//!         Mode::Reveal => input.blobs().all(|b| b.trusted || layer_is_valid(&input, b)) && solves(&input),
+//!         Mode::Reveal => input.blobs().all(|b| b.trusted || item_is_valid(&input, b)) && solves(&input),
 //!     }
 //! }
 //! ```
 //!
-//! A trusted blob was attested by this same check (the service makes sure of it), so the check
-//! can rely on whatever its own attest mode verified.
+//! A trusted blob was attested by this same check with the same attest params (the service makes
+//! sure of it), so the check can rely on whatever its own attest mode verified.
 //!
 //! The check runs in an inner PVM with no host calls but one: with this crate's `alloc` feature
 //! it gets a global allocator, and the service grows its heap on request. No logging, no I/O.
@@ -60,16 +62,18 @@ pub const INTERFACE_VERSION: u8 = 2;
 pub enum Mode {
 	/// Does the witness solve the bounty?
 	Reveal,
-	/// Does the subject, the last blob, verify given the others (the subjects of its parent
-	/// attestations, all trusted)? The witness is empty. Returning true records an attestation.
+	/// Do the subjects, every untrusted blob, verify given the trusted ones (subjects of earlier
+	/// attestations)? The witness is the attester's evidence. Returning true records an
+	/// attestation of all the subjects.
 	Attest,
 }
 
-/// One of the blobs the bounty names, in the order it names them.
+/// One of the blobs the check is given: trusted subjects first, in the order the op cites them,
+/// then the bounty's plain blobs (when revealing) or the subjects to attest (when attesting).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Blob<'a> {
-	/// The blob is the subject of an attestation by this same check, so the check may rely on
-	/// whatever it verified in attest mode.
+	/// The blob is a subject of an attestation by this same check, with the same attest params,
+	/// so the check may rely on whatever it verified in attest mode.
 	pub trusted: bool,
 	pub hash: &'a [u8; 32],
 	pub data: &'a [u8],
@@ -128,22 +132,26 @@ impl<'a> Input<'a> {
 		Some(Input { mode, params, witness: args, blob_count: blob_count as u32, blob_bytes })
 	}
 
-	/// The bounty's blobs, in order.
+	/// All the blobs, in order.
 	pub fn blobs(&self) -> Blobs<'a> {
 		Blobs { left: self.blob_count, bytes: self.blob_bytes }
 	}
 
-	/// The bounty's `i`th blob.
+	/// The `i`th blob.
 	pub fn blob(&self, i: usize) -> Option<Blob<'a>> {
 		self.blobs().nth(i)
 	}
 
-	/// In attest mode, the blob being attested: the last one. `None` in reveal mode.
-	pub fn subject(&self) -> Option<Blob<'a>> {
-		match self.mode {
-			Mode::Attest => self.blobs().last(),
-			Mode::Reveal => None,
-		}
+	/// The trusted blobs, which come first.
+	pub fn trusted(&self) -> impl Iterator<Item = Blob<'a>> + 'a {
+		self.blobs().take_while(|b| b.trusted)
+	}
+
+	/// In attest mode, the blobs being attested: the untrusted ones, after the trusted. None in
+	/// reveal mode.
+	pub fn subjects(&self) -> impl Iterator<Item = Blob<'a>> + 'a {
+		let attesting = self.mode == Mode::Attest;
+		self.blobs().skip_while(|b| b.trusted).filter(move |_| attesting)
 	}
 }
 
@@ -255,12 +263,22 @@ mod tests {
 		let args = check_args(CheckMode::Attest, &[], b"", b"");
 		let input = Input::parse(&args).unwrap();
 		assert_eq!((input.mode, input.params, input.witness, input.blobs().len()), (Mode::Attest, &b""[..], &b""[..], 0));
-		assert_eq!(input.subject(), None);
+		assert_eq!(input.subjects().count(), 0);
 
-		let args = check_args(CheckMode::Attest, &blobs, b"", b"");
-		assert_eq!(Input::parse(&args).unwrap().subject(), Some(Blob { trusted: true, hash: &[2; 32], data: b"" }));
+		let blobs = [
+			CheckBlob { trusted: true, hash: [1; 32], data: b"parent" },
+			CheckBlob { trusted: false, hash: [2; 32], data: b"a" },
+			CheckBlob { trusted: false, hash: [3; 32], data: b"b" },
+		];
+		let args = check_args(CheckMode::Attest, &blobs, b"", b"evidence");
+		let input = Input::parse(&args).unwrap();
+		assert_eq!(input.witness, b"evidence");
+		assert_eq!(input.subjects().map(|b| b.data).collect::<Vec<_>>(), [b"a", b"b"]);
+		assert_eq!(input.trusted().map(|b| b.data).collect::<Vec<_>>(), [b"parent"]);
 		let args = check_args(CheckMode::Reveal, &blobs, b"", b"");
-		assert_eq!(Input::parse(&args).unwrap().subject(), None, "no subject when revealing");
+		let input = Input::parse(&args).unwrap();
+		assert_eq!(input.subjects().count(), 0, "no subjects when revealing");
+		assert_eq!(input.trusted().count(), 1);
 	}
 
 	#[test]

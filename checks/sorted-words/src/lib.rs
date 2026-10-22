@@ -3,9 +3,9 @@
 //! A volume is a blob of 16-byte records, each a word of `a`-`z` padded with spaces, in strictly
 //! increasing order.
 //!
-//! - **Attest mode:** the subject is a valid volume, and its first word comes after every word in
-//!   its parents. Params must be empty. A chain of attested volumes is one sorted word list,
-//!   built in layers.
+//! - **Attest mode:** the subjects are valid volumes, each one's first word after every word in
+//!   the trusted volumes and in the subjects before it. Params must be empty. So attested volumes
+//!   extend a sorted word list, a batch at a time.
 //! - **Reveal mode:** params are the number of leading zero bits wanted, as one byte. The witness
 //!   is words separated by single spaces, each in one of the bounty's volumes, and its Blake2b-256
 //!   hash has that many leading zero bits.
@@ -66,13 +66,23 @@ fn leading_zero_bits(hash: &[u8]) -> u32 {
 	zero_bytes as u32 * 8 + rest
 }
 
-fn attest(input: &Input, subject: Blob) -> bool {
-	let after_parents = input.blobs().filter(|b| b.trusted).all(|parent| {
-		let last = &parent.data[parent.data.len() - RECORD..];
-		last < &subject.data[..RECORD]
+/// The last word of a valid volume.
+fn last<'a>(volume: &Blob<'a>) -> &'a [u8] {
+	&volume.data[volume.data.len() - RECORD..]
+}
+
+fn attest(input: &Input) -> bool {
+	// The trusted volumes were attested, so they are valid; any order among them is fine.
+	let mut greatest = input.trusted().map(|b| last(&b)).max();
+	let mut any = false;
+	let in_order = input.subjects().all(|subject| {
+		any = true;
+		let ok = valid_volume(subject.data) && greatest.is_none_or(|g| g < &subject.data[..RECORD]);
+		greatest = ok.then(|| last(&subject));
+		ok
 	});
-	// Every blob but the subject is a parent, which the service always marks trusted.
-	input.params.is_empty() && !subject.trusted && valid_volume(subject.data) && after_parents
+	// Attest mode gets only trusted blobs and subjects, so every blob is one or the other.
+	input.params.is_empty() && any && in_order
 }
 
 fn reveal(input: &Input) -> bool {
@@ -90,10 +100,9 @@ fn reveal(input: &Input) -> bool {
 }
 
 fn check(input: &Input) -> bool {
-	match (input.mode, input.subject()) {
-		(Mode::Attest, Some(subject)) => attest(input, subject),
-		(Mode::Attest, None) => false,
-		(Mode::Reveal, _) => reveal(input),
+	match input.mode {
+		Mode::Attest => attest(input),
+		Mode::Reveal => reveal(input),
 	}
 }
 
@@ -128,6 +137,14 @@ mod tests {
 		assert!(!run(CheckMode::Attest, &[(false, b"")], b"", b""), "empty");
 		assert!(!run(CheckMode::Attest, &[(false, &v1)], b"\x00", b""), "params must be empty");
 		assert!(!run(CheckMode::Attest, &[], b"", b""), "no subject");
+		assert!(!run(CheckMode::Attest, &[(true, &v1)], b"", b""), "only trusted ones");
+		// A batch: each after the trusted volumes and the ones before it.
+		let v3 = volume(&["mango", "peach"]);
+		assert!(run(CheckMode::Attest, &[(false, &v1), (false, &v2), (false, &v3)], b"", b""));
+		assert!(run(CheckMode::Attest, &[(true, &v2), (true, &v1), (false, &v3)], b"", b""), "trusted in any order");
+		assert!(!run(CheckMode::Attest, &[(false, &v2), (false, &v1)], b"", b""), "batch out of order");
+		assert!(!run(CheckMode::Attest, &[(true, &v3), (false, &v1), (false, &v2)], b"", b""), "not after a trusted one");
+		assert!(!run(CheckMode::Attest, &[(false, &v1), (false, b"x")], b"", b""), "one bad volume");
 	}
 
 	#[test]

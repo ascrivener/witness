@@ -11,54 +11,55 @@ Prototype: rewards are points from a faucet (`Mint`), not tokens.
 | Op | Refine (in-core, stateless) | Accumulate (on-chain) |
 |---|---|---|
 | `Mint` | — | credit points (faucet, at most `MAX_MINT`) |
-| `CreateBounty` | verify the maker's Ed25519 signature | check nonce, balance and limits, and that cited attestations exist and are by the bounty's check; debit the reward; solicit the check blob and the bounty's plain blobs, except those already held; store the bounty |
+| `CreateBounty` | verify the maker's Ed25519 signature | check nonce, balance and limits, and that cited attestations exist, are by the bounty's check with one set of params, and have the cited entries; debit the reward; solicit the check blob and the bounty's plain blobs, except those already held; store the bounty |
 | `Commit` | verify the committer's signature | the bounty takes commitments; debit `COMMIT_DEPOSIT`; record the slot of `blake2b(bounty_id, x, hunter, salt)` |
-| `Reveal` | look up the check blob, the extra blobs and any extra attested layers the reveal adds; run the check on them (attested ones marked trusted), `params` and `x` in an inner PVM with the bounty's `check_gas` | the terms match and the commitment is older than this slot and made before expiry. The first valid reveal opens the claim window, and later ones replace the leader if their commitment is earlier. Refund the deposit |
+| `Reveal` | resolve the trusted subjects the reveal cites (the bounty's, and any more it adds) through their attestations' subject lists, and look them up with the check blob and the plain blobs; run the check on them (attested ones marked trusted), `params` and `x` in an inner PVM with the bounty's `check_gas` | the terms match, the cited attestations were recorded, and the commitment is older than this slot and made before expiry. The first valid reveal opens the claim window, and later ones replace the leader if their commitment is earlier. Refund the deposit |
 | `Finalize` | — | once the claim window has closed, pay the leader and release the bounty's blobs |
 | `Reclaim` | verify the maker's signature | if no one revealed by `expiry + REVEAL_GRACE`, refund the maker and release the bounty's blobs |
 | `Release` | — | delete a commitment (named by bounty and hash) that can no longer be revealed; its deposit stays forfeit |
-| `Pin` | verify the owner's signature | debit `PIN_DEPOSIT`; hold the preimage for good (solicit it unless already held) |
-| `Attest` | verify the attester's signature and the chain it extends; look up the check, the chain's subjects and the subject; run the check in attest mode | the chain's tip was attested and this wasn't yet; debit `ATTEST_DEPOSIT`; hold the subject for good; record the attestation |
+| `Pin` | verify the owner's signature | debit `PIN_DEPOSIT` per preimage; hold them for good (solicit each unless already held) |
+| `Attest` | verify the attester's signature; resolve the trusted subjects it cites; look up the check, them, the subject list and its subjects; run the check in attest mode with the attester's witness | the parents were recorded and this wasn't yet; debit `ATTEST_DEPOSIT`; hold the subject list and its subjects for good; record the attestation |
 
 ### Attestations
 
-An attestation records that a check, run once in attest mode with some params, accepted a subject
-blob right after a chain of earlier attestations: "check C verified B, following chain P". Each
-attestation names one parent (none for a root), and its id hashes the check, the params hash, the
-subject and the parent's id, so it commits to the whole chain. Later work can then rely on B
+An attestation records that a check, run once in attest mode with some params, accepted every
+subject in a list, given trusted subjects of earlier attestations: "check C verified B₁…Bₙ, given
+subjects of P₁…Pₖ". The list is a *subject list*, a preimage of `(hash, len)` entries. The
+attestation's id hashes the check, the params hash, the subject list and `parents_root`, the hash
+of its parents' ids (sorted and deduplicated). Later work can then rely on any one of B₁…Bₙ
 without verifying it again:
 
-- **Chains build layer by layer.** The check receives the chain's subjects, trusted and oldest
-  first, and verifies only the new layer. A large library can be attested this way, each layer in
-  one refine.
-- **Bounties cite chains.** A bounty's first blobs can be `Attested(id)`, one chain from its
-  root, in order; plain blobs may follow. Its check receives the attested subjects marked
-  trusted, and can skip whatever its attest mode verified. For a Lean checker that means
-  type-checking the statement environment once, instead of on every reveal.
-- **Reveals can extend the chain.** A reveal may add attested layers continuing the bounty's
-  chain, such as library layers its proof uses that the bounty didn't name. They're passed as
-  trusted after the bounty's chain and before its plain blobs.
+- **Attestations form a DAG.** An attestation can trust subjects of any number of earlier ones,
+  and they of others. A library is attested in batches, each batch trusting the subjects it
+  uses, and independent batches in parallel.
+- **Bounties cite subjects.** A bounty's blobs can be `Attested { attestation, entry }`, entry
+  `entry` of an attestation's subject list, mixed with plain blobs. Its check receives the
+  attested subjects marked trusted, and can skip whatever its attest mode verified. For a Lean
+  checker that means type-checking the statement's environment once, instead of on every reveal.
+- **Reveals can trust more.** A reveal must trust its bounty's attested subjects, and may add
+  others its witness uses that the bounty didn't name (library a proof relies on, say).
 
-A subject is trusted only where it was verified: right after its own chain. Formats like Lean
-exports number their items on from the layers before, so a layer checked after one prefix can
-mean something else after another. That's why a bounty cites whole chains from their root, and
-extra layers must continue the bounty's chain exactly.
+Trust needs no context: an attestation is only recorded once its parents were, so by induction a
+recorded attestation rests on subjects that were all checked. A check over a positional format,
+where an item only means something after a given prefix, can still enforce that itself: it sees
+each blob's hash, so an item can name the hash of the one it follows.
 
-A check only ever trusts its own attestations. A chain is one check with one set of params, and a
-bounty may only cite chains by its own check. So a trusted blob always means "my own attest mode
-accepted this", and an attester can't slip in a layer verified by a lenient check, or by this
-check with lenient params. A bounty's maker chooses which chain it cites, and so which params it
-was made with.
+A check only ever trusts its own attestations. Every attestation an op cites is by the check being
+run, all with one set of params (for `Attest`, its own params), and a bounty may only cite its own
+check's attestations. So a trusted blob always means "my own attest mode accepted this", and an
+attester can't slip in a subject verified by a lenient check, or by this check with lenient params.
 
-Refine can't read state, so `Attest` and `Reveal` carry the claims of the chains they rely on
-(check, params hash, subject, parent), and refine checks they link up. Accumulate makes sure they
-were really recorded: for `Attest` by finding the parent, for `Reveal` by matching the bounty's
-terms (whose chain was checked when it was created) and finding the extra layers' tip. An
-attestation is only recorded after its parent, so finding a chain's tip means all of it was.
+Ops cite attestations compactly. Refine can't read state, so `Attest` and `Reveal` carry the
+claims they rely on (check, params hash, subject list, parents root), each once, and refer to
+trusted subjects as `TrustedRef { claim, entry }`. Refine looks up each claim's subject list, then
+the entries. Accumulate makes sure the claims were really recorded, by id.
 
-The subject must be on chain before refine can look it up, so it's pinned first (`Pin`), and
-the check blob too unless a bounty already holds it. Pins and attestations are permanent for now,
-and so are the preimages they hold.
+Subjects and subject lists must be on chain before refine can look them up, so they're pinned
+first (`Pin`, many at a time), and the check blob too unless a bounty already holds it. The
+attester's witness is the evidence (a batch's proofs, say) and is not part of the claim. Pins and
+attestations are permanent for now, and so are the preimages they hold. See
+[docs/design/attestation-dag.md](docs/design/attestation-dag.md).
+
 ### Front-running
 
 Revealing `x` publishes it, and guarantors see it first. Anyone who copies `x` can only commit
@@ -93,24 +94,23 @@ The arguments (interface version 2) are:
 E1(2) ++ E1(mode) ++ E4(n) ++ [E1(trusted) ++ hash ++ E4(|data|) ++ data]^n ++ E4(|params|) ++ params ++ x
 ```
 
-`mode` is 0 to reveal and 1 to attest. When revealing, the `n` blobs are the bounty's attested
-chain, then the reveal's extra layers, both trusted, then the bounty's plain blobs. When
-attesting, they are the chain's subjects, trusted and oldest first, then the subject, untrusted,
-and `x` is empty. At most `MAX_BLOBS` blobs and
+`mode` is 0 to reveal and 1 to attest. The `n` blobs are the trusted subjects, in the order the
+op cites them, then, when revealing, the bounty's plain blobs, or, when attesting, the subjects to
+attest, untrusted, with the attester's witness as `x`. At most `MAX_BLOBS` blobs and
 `MAX_BLOBS_LEN` bytes in all. `witness_check` parses the arguments back. Halting with 1 in `φ7` means true. Anything else
 (0, panic, page fault, out of gas, any host call but `grow_heap`) means false. `check_gas` is
 capped at `MAX_CHECK_GAS` and passed to `invoke` as the inner VM's limit.
 
 A check may call `grow_heap` (host call 1). Refine maps the pages it asks for, after the check's
 read-write data and short of its stack, charges the check the gas `grow_heap` costs a service, and
-resumes it. Everything the check uses, arguments included, must fit in `MAX_CHECK_PAGES` (64 MiB);
+resumes it. Everything the check uses, arguments included, must fit in `MAX_CHECK_PAGES` (128 MiB);
 past that the call returns the heap's current end and the allocation fails.
 
 Because the check gets the bounty's `params` and blobs, one check blob serves many bounties.
 `checks/blake2b-preimage` takes the target hash as its params, so any number of "find the
 preimage" bounties share one on-chain blob. `checks/dictionary` reads a dictionary blob and builds
 a set of its words on the heap, so bounties at different difficulties share both blobs.
-`checks/sorted-words` attests word volumes (sorted, after their parents' words) once, then
+`checks/sorted-words` attests batches of word volumes (sorted, after the words it trusts) once, then
 binary-searches trusted volumes on each reveal instead of checking them in full.
 
 ## Layout
@@ -200,7 +200,7 @@ polkajam --chain dev:40000 dump-spec dev.json
 ## Checks built on witness
 
 - **Lean 4 proofs:** [witness-lean](https://github.com/ascrivener/witness-lean) checks Lean proofs
-  with an independent kernel, attesting library layers once (Mathlib's, say) and binding a
+  with an independent kernel, attesting library once (Mathlib's, say) and binding a
   solver's proof to the bounty's statement. It has proved "there are infinitely many primes" on
   a local testnet, from Mathlib, in 66 attested layers.
 
@@ -228,7 +228,7 @@ witness_check::declare_full_check!(check);
 ```
 
 It should return false for any mode it doesn't handle. A check that supports attest mode
-verifies `input.subject()` (the last blob) given the others, which are trusted. In reveal mode it
+verifies `input.subjects()` (the untrusted blobs) given `input.trusted()`. In reveal mode it
 can rely on trusted blobs, which its own attest mode accepted, and must verify untrusted ones. With `witness-check`'s `alloc` feature the check gets a global allocator, so `alloc`
 types (`Vec`, `BTreeMap`) work. Checks get no other host calls, so no logging or I/O. The stack is
 8 KiB unless the check raises it with `polkavm_derive::min_stack_size!`.
@@ -250,15 +250,17 @@ printf 'open\nsesame\n' > words.txt
 jamt item $SVC $($W create --service $SVC --maker alice --nonce 1 --check out/dictionary-check.jam --params 0x00 --blobs words.txt --reward 100 --check-gas 10000000 --expiry $(( $(jamt inspect slot) + 100 )))
 jamt provide $SVC out/dictionary-check.jam
 jamt provide $SVC words.txt
-# attest a blob (pinned and provided first, as is the check), then cite the claim in a bounty
+# attest a list of blobs (pinned and provided first, with the list and the check), then cite
+# its entries in a bounty
 printf '%-16s' apple banana cherry > volume1.bin
+printf '%-16s' grape lemon > volume2.bin
+$W list --subjects volume1.bin,volume2.bin --out batch.list
 jamt item $SVC $($W mint --to pat --amount 100)
-jamt item $SVC $($W pin --service $SVC --owner pat --nonce 0 --blob out/sorted-words-check.jam)
-jamt item $SVC $($W pin --service $SVC --owner pat --nonce 1 --blob volume1.bin)
-jamt provide $SVC out/sorted-words-check.jam; jamt provide $SVC volume1.bin
-jamt item $SVC $($W attest --service $SVC --attester pat --nonce 2 --check out/sorted-words-check.jam --subject volume1.bin --check-gas 10000000 --claim-out volume1.claim)
-# a next layer names the chain it follows: --chain volume1.claim (then volume1.claim,volume2.claim, ...)
-jamt item $SVC $($W create --service $SVC --maker alice --nonce 2 --check out/sorted-words-check.jam --params 0x00 --blobs claim:volume1.claim --reward 100 --check-gas 10000000 --expiry $(( $(jamt inspect slot) + 100 )))
+jamt item $SVC $($W pin --service $SVC --owner pat --nonce 0 --blobs out/sorted-words-check.jam,volume1.bin,volume2.bin,batch.list)
+for f in out/sorted-words-check.jam volume1.bin volume2.bin batch.list; do jamt provide $SVC $f; done
+jamt item $SVC $($W attest --service $SVC --attester pat --nonce 1 --check out/sorted-words-check.jam --subjects batch.list --check-gas 10000000 --claim-out batch.claim)
+# a later attestation trusts subjects of earlier ones: --trust batch.claim:1 (entry 1, volume 2)
+jamt item $SVC $($W create --service $SVC --maker alice --nonce 2 --check out/sorted-words-check.jam --params 0x00 --blobs batch.claim:0,batch.claim:1 --reward 100 --check-gas 10000000 --expiry $(( $(jamt inspect slot) + 100 )))
 # after the claim window (30 slots by default)
 jamt item $SVC $($W finalize --bounty 0)
 ```

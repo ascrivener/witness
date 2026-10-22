@@ -1,7 +1,7 @@
 use super::*;
 use alloc::{collections::BTreeMap, vec};
 use ed25519_dalek::{Signer, SigningKey};
-use witness_types::{BountyTerms, CHECK_INTERFACE_VERSION, CheckFailure, check_args, commitment};
+use witness_types::{BountyTerms, CHECK_INTERFACE_VERSION, CheckFailure, check_args, commitment, parents_root};
 
 const SERVICE: u32 = 7;
 const CHECK: Hash = [0xc0; 32];
@@ -32,10 +32,12 @@ fn plain(i: usize) -> BlobRef {
 /// The mock check:
 /// - in reveal mode, accepts witness `b"x"`; a witness equal to its blobs' data concatenated;
 ///   or witness `b"trusted"` if it was given blobs and all of them are trusted;
-/// - in attest mode, accepts a subject (the last blob, untrusted) starting with `b"good"`, if
-///   every other blob is trusted.
+/// - in attest mode, accepts subjects (the untrusted blobs, after every trusted one) that all
+///   start with `b"good"`, unless the witness is `b"no"`.
 struct Env {
 	blob_available: bool,
+	/// Subject lists, by hash.
+	lists: BTreeMap<Hash, Vec<u8>>,
 }
 
 /// Split `args` (see `check_args`) into the mode, the blobs (trusted, data) and the witness.
@@ -59,6 +61,9 @@ impl RefineEnv for Env {
 		if *hash == CHECK || *hash == OTHER_CHECK {
 			return self.blob_available.then(|| BLOB.to_vec());
 		}
+		if let Some(list) = self.lists.get(hash) {
+			return Some(list.clone());
+		}
 		EXTRA.iter().find(|(h, _)| h == hash).map(|(_, data)| data.to_vec())
 	}
 	fn run_check(&self, blob: &[u8], args: &[u8], _gas: Gas) -> core::result::Result<(), Rejection> {
@@ -66,9 +71,11 @@ impl RefineEnv for Env {
 		let (mode, blobs, witness) = parse_args(args);
 		let data: Vec<u8> = blobs.iter().flat_map(|(_, d)| d.clone()).collect();
 		let accept = if mode == CheckMode::Attest as u8 {
-			assert!(witness.is_empty());
-			let (subject, parents) = blobs.split_last().unwrap();
-			!subject.0 && parents.iter().all(|(t, _)| *t) && subject.1.starts_with(b"good")
+			let trusted = blobs.iter().take_while(|(t, _)| *t).count();
+			let subjects = &blobs[trusted..];
+			witness != b"no" &&
+				!subjects.is_empty() &&
+				subjects.iter().all(|(t, d)| !t && d.starts_with(b"good"))
 		} else {
 			witness == b"x" ||
 				(!blobs.is_empty() && witness == data) ||
@@ -78,10 +85,17 @@ impl RefineEnv for Env {
 	}
 }
 
-const ENV: Env = Env { blob_available: true };
+const ENV: Env = Env { blob_available: true, lists: BTreeMap::new() };
+
+impl Default for Env {
+	fn default() -> Self {
+		ENV
+	}
+}
 
 #[derive(Default)]
 struct Chain {
+	env: Env,
 	storage: BTreeMap<Vec<u8>, Vec<u8>>,
 	solicited: Vec<Hash>,
 	forgotten: Vec<Hash>,
@@ -93,6 +107,9 @@ struct Chain {
 impl State for Chain {
 	fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
 		self.storage.get(key).cloned()
+	}
+	fn lookup(&self, hash: &Hash) -> Option<Vec<u8>> {
+		self.env.lookup(hash)
 	}
 }
 
@@ -112,7 +129,7 @@ const MALLORY: u8 = 4;
 impl Chain {
 	/// Refine and accumulate `op` at the current slot.
 	fn submit(&mut self, op: Op) -> Result<()> {
-		let verified = refine(&ENV, SERVICE, op);
+		let verified = self.refine(op);
 		let fx = accumulate(self, verified, self.now)?;
 		self.solicited.extend(fx.solicit.iter().map(|(h, _)| *h));
 		for (k, v) in fx.writes {
@@ -123,6 +140,11 @@ impl Chain {
 		}
 		self.forgotten.extend(fx.forget.iter().map(|(h, _)| *h));
 		Ok(())
+	}
+
+	/// Refine `op`, with the subject lists made so far available.
+	fn refine(&self, op: Op) -> Verified {
+		refine(&self.env, SERVICE, op)
 	}
 
 	fn advance(&mut self, slots: Slot) {
@@ -185,34 +207,34 @@ impl Chain {
 		self.commit_for(b, hunter, hunter, w)
 	}
 
-	/// `blobs` as a reveal names them, with the claims of attested ones.
-	fn reveal_blobs(&self, blobs: &[BlobRef]) -> Vec<RevealBlob> {
-		blobs
-			.iter()
-			.map(|b| match b {
-				BlobRef::Blob(p) => RevealBlob::Blob(*p),
-				BlobRef::Attested(id) => RevealBlob::Attested(self.claims[id].clone()),
-			})
-			.collect()
-	}
-
 	fn reveal(&mut self, b: BountyId, hunter: u8, w: &[u8]) -> Result<()> {
-		self.reveal_with(b, hunter, w, vec![])
+		self.reveal_with(b, hunter, w, &[])
 	}
 
-	/// Reveal, adding the attested layers `extra` after the bounty's chain.
-	fn reveal_with(&mut self, b: BountyId, hunter: u8, w: &[u8], extra: Vec<AttestationClaim>) -> Result<()> {
-		self.submit(self.reveal_op(b, hunter, w, extra))
+	/// Reveal, trusting the bounty's attested subjects and then `more`.
+	fn reveal_with(&mut self, b: BountyId, hunter: u8, w: &[u8], more: &[(AttestationClaim, u32)]) -> Result<()> {
+		self.submit(self.reveal_op(b, hunter, w, more))
 	}
 
-	fn reveal_op(&self, b: BountyId, hunter: u8, w: &[u8], extra: Vec<AttestationClaim>) -> Op {
+	fn reveal_op(&self, b: BountyId, hunter: u8, w: &[u8], more: &[(AttestationClaim, u32)]) -> Op {
 		let terms = self.bounty(b).terms;
+		let mut subjects: Vec<(AttestationClaim, u32)> = terms
+			.blobs
+			.iter()
+			.filter_map(|blob| match blob {
+				BlobRef::Attested { attestation, entry } => Some((self.claims[attestation].clone(), *entry)),
+				BlobRef::Blob(_) => None,
+			})
+			.collect();
+		subjects.extend_from_slice(more);
+		let (claims, trusted) = cite(&subjects);
 		Op::Reveal {
 			bounty_id: b,
 			check_hash: terms.check_hash,
 			params: terms.params,
-			blobs: self.reveal_blobs(&terms.blobs),
-			extra,
+			blobs: terms.blobs,
+			claims,
+			trusted,
 			check_gas: terms.check_gas,
 			hunter: id(hunter),
 			salt: [hunter; 32],
@@ -220,38 +242,42 @@ impl Chain {
 		}
 	}
 
-	fn pin(&mut self, owner: u8, blob: Preimage) -> Result<()> {
+	fn pin(&mut self, owner: u8, blobs: &[Preimage]) -> Result<()> {
 		let nonce = self.account(owner).nonce;
-		let msg = witness_types::pin_message(SERVICE, &id(owner), nonce, &blob);
+		let msg = witness_types::pin_message(SERVICE, &id(owner), nonce, blobs);
 		let signature = key(owner).sign(&msg).to_bytes();
-		self.submit(Op::Pin { owner: id(owner), nonce, blob, signature })
+		self.submit(Op::Pin { owner: id(owner), nonce, blobs: blobs.to_vec(), signature })
 	}
 
-	/// The op for `attester` to attest `subject` with `check` and params `b"layer"` after the
-	/// chain `ancestors`, and its claim.
+	/// Make a subject list of `subjects` available, and return it.
+	fn list(&mut self, subjects: &[Preimage]) -> Preimage {
+		self.raw_list(subjects.to_vec().encode())
+	}
+
+	/// Make `data` available as a subject list, whatever it holds.
+	fn raw_list(&mut self, data: Vec<u8>) -> Preimage {
+		let list = Preimage { hash: blake2b256(&data), len: data.len() as u32 };
+		self.env.lists.insert(list.hash, data);
+		list
+	}
+
+	/// The op for `attester` to attest the subject list `subjects` with `check` and `params`,
+	/// trusting `trusted` (claims and entries), and its claim.
 	fn attest_op(
 		&self,
 		attester: u8,
 		check: Hash,
-		subject: Preimage,
-		ancestors: &[AttestationClaim],
-	) -> (Op, AttestationClaim) {
-		self.attest_op_with_params(attester, check, b"layer", subject, ancestors)
-	}
-
-	fn attest_op_with_params(
-		&self,
-		attester: u8,
-		check: Hash,
 		params: &[u8],
-		subject: Preimage,
-		ancestors: &[AttestationClaim],
+		subjects: Preimage,
+		trusted: &[(AttestationClaim, u32)],
 	) -> (Op, AttestationClaim) {
+		let (claims, trusted) = cite(trusted);
+		let parents: Vec<AttestationId> = claims.iter().map(AttestationClaim::id).collect();
 		let claim = AttestationClaim {
 			check_hash: check,
 			params_hash: blake2b256(params),
-			subject,
-			parent: ancestors.last().map(AttestationClaim::id),
+			subjects,
+			parents_root: parents_root(&parents),
 		};
 		let nonce = self.account(attester).nonce;
 		let msg = witness_types::attest_message(SERVICE, &id(attester), nonce, &claim.id());
@@ -260,35 +286,34 @@ impl Chain {
 			nonce,
 			check_hash: check,
 			params: params.to_vec(),
-			subject,
-			ancestors: ancestors.to_vec(),
+			subjects,
+			claims,
+			trusted,
+			witness: b"proof".to_vec(),
 			check_gas: 1000,
 			signature: key(attester).sign(&msg).to_bytes(),
 		};
 		(op, claim)
 	}
 
-	/// `attester` attests `subject` with `check` after `ancestors`; returns the claim it made.
-	fn attest_with(
-		&mut self,
-		attester: u8,
-		check: Hash,
-		subject: Preimage,
-		ancestors: &[AttestationClaim],
-	) -> Result<AttestationClaim> {
-		let (op, claim) = self.attest_op(attester, check, subject, ancestors);
+	/// Submit `op`, recording `claim` if it is accepted.
+	fn submit_attest(&mut self, (op, claim): (Op, AttestationClaim)) -> Result<AttestationClaim> {
 		self.submit(op)?;
 		self.claims.insert(claim.id(), claim.clone());
 		Ok(claim)
 	}
 
-	/// What refine makes of `subject` attested by Carol with the bounty check after `ancestors`.
-	fn refine_attest(&self, subject: Preimage, ancestors: &[AttestationClaim]) -> Verified {
-		refine(&ENV, SERVICE, self.attest_op(CAROL, CHECK, subject, ancestors).0)
+	/// Carol attests a list of the extra blobs `subjects` with the bounty check and params
+	/// `b"batch"`, trusting `trusted`; returns the claim.
+	fn attest(&mut self, subjects: &[usize], trusted: &[(AttestationClaim, u32)]) -> Result<AttestationClaim> {
+		let list = self.list(&subjects.iter().map(|&i| extra(i)).collect::<Vec<_>>());
+		self.submit_attest(self.attest_op(CAROL, CHECK, b"batch", list, trusted))
 	}
 
-	fn attest(&mut self, subject: Preimage, ancestors: &[AttestationClaim]) -> Result<AttestationClaim> {
-		self.attest_with(CAROL, CHECK, subject, ancestors)
+	/// What refine makes of Carol attesting `subjects` with the bounty check, trusting `trusted`.
+	fn refine_attest(&mut self, subjects: &[usize], trusted: &[(AttestationClaim, u32)]) -> Verified {
+		let list = self.list(&subjects.iter().map(|&i| extra(i)).collect::<Vec<_>>());
+		self.refine(self.attest_op(CAROL, CHECK, b"batch", list, trusted).0)
 	}
 
 	fn refs(&self, h: Hash) -> Option<u32> {
@@ -312,6 +337,22 @@ impl Chain {
 			s => panic!("not claimed: {s:?}"),
 		}
 	}
+}
+
+/// The claims and references for trusting entries of `subjects`'s claims, each claim once.
+fn cite(subjects: &[(AttestationClaim, u32)]) -> (Vec<AttestationClaim>, Vec<TrustedRef>) {
+	let mut claims: Vec<AttestationClaim> = Vec::new();
+	let trusted = subjects
+		.iter()
+		.map(|(claim, entry)| {
+			let i = claims.iter().position(|c| c == claim).unwrap_or_else(|| {
+				claims.push(claim.clone());
+				claims.len() - 1
+			});
+			TrustedRef { claim: i as u16, entry: *entry }
+		})
+		.collect();
+	(claims, trusted)
 }
 
 /// Alice has a bounty 0 open; Bob, Carol and Mallory have points for deposits.
@@ -449,7 +490,8 @@ fn reveal_rules() {
 		check_hash: CHECK,
 		params: op_terms.params,
 		blobs: vec![],
-		extra: vec![],
+		claims: vec![],
+		trusted: vec![],
 		check_gas: op_terms.check_gas,
 		hunter: id(BOB),
 		salt: [BOB; 32],
@@ -469,13 +511,14 @@ fn check_unavailable_is_rejected_in_refine() {
 		check_hash: CHECK,
 		params: vec![],
 		blobs: vec![],
-		extra: vec![],
+		claims: vec![],
+		trusted: vec![],
 		check_gas: 1,
 		hunter: id(BOB),
 		salt: [0; 32],
 		witness: b"x".to_vec(),
 	};
-	let env = Env { blob_available: false };
+	let env = Env { blob_available: false, ..ENV };
 	assert_eq!(refine(&env, SERVICE, op), Verified::Rejected(Rejection::CheckUnavailable));
 }
 
@@ -670,14 +713,15 @@ fn reveal_must_name_the_bounty_blobs() {
 	c.commit(1, BOB, b"x").unwrap();
 	c.advance(MIN_COMMIT_AGE);
 	let terms = c.bounty(1).terms;
-	let b = |i| RevealBlob::Blob(extra(i));
+	let b = |i| BlobRef::Blob(extra(i));
 	for blobs in [vec![], vec![b(1), b(0)], vec![b(0)]] {
 		let op = Op::Reveal {
 			bounty_id: 1,
 			check_hash: CHECK,
 			params: terms.params.clone(),
 			blobs,
-			extra: vec![],
+			claims: vec![],
+		trusted: vec![],
 			check_gas: terms.check_gas,
 			hunter: id(BOB),
 			salt: [BOB; 32],
@@ -695,14 +739,15 @@ fn blob_limits() {
 		check_hash: CHECK,
 		params: vec![],
 		blobs,
-		extra: vec![],
+		claims: vec![],
+		trusted: vec![],
 		check_gas: 1,
 		hunter: id(BOB),
 		salt: [0; 32],
 		witness: b"x".to_vec(),
 	};
-	let missing = RevealBlob::Blob(Preimage { hash: MISSING, len: 1 });
-	let one = RevealBlob::Blob(extra(0));
+	let missing = BlobRef::Blob(Preimage { hash: MISSING, len: 1 });
+	let one = BlobRef::Blob(extra(0));
 	assert_eq!(refine(&ENV, SERVICE, reveal(vec![one.clone(), missing])), Verified::Rejected(Rejection::BlobUnavailable));
 	let too_many = vec![one; MAX_BLOBS as usize + 1];
 	assert_eq!(refine(&ENV, SERVICE, reveal(too_many)), Verified::Rejected(Rejection::BlobsTooLarge));
@@ -721,13 +766,13 @@ fn blob_limits() {
 }
 
 #[test]
-fn pins_hold_a_preimage_for_good() {
+fn pins_hold_preimages_for_good() {
 	let mut c = setup();
-	c.pin(CAROL, extra(GOOD1)).unwrap();
-	assert_eq!(c.solicited, vec![CHECK, EXTRA[GOOD1].0]);
-	assert_eq!(c.account(CAROL), Account { balance: 100 - PIN_DEPOSIT, nonce: 1 });
+	c.pin(CAROL, &[extra(GOOD1), extra(GOOD2)]).unwrap();
+	assert_eq!(c.solicited, vec![CHECK, EXTRA[GOOD1].0, EXTRA[GOOD2].0]);
+	assert_eq!(c.account(CAROL), Account { balance: 100 - 2 * PIN_DEPOSIT, nonce: 1 }, "a deposit each");
 	// Pinning the check too keeps it once bounty 0 is over.
-	c.pin(CAROL, Preimage { hash: CHECK, len: BLOB.len() as u32 }).unwrap();
+	c.pin(CAROL, &[Preimage { hash: CHECK, len: BLOB.len() as u32 }]).unwrap();
 	assert_eq!(c.refs(CHECK), Some(2));
 	let expiry = c.bounty(0).terms.expiry;
 	c.advance(expiry + REVEAL_GRACE - c.now);
@@ -736,85 +781,165 @@ fn pins_hold_a_preimage_for_good() {
 	assert!(c.forgotten.is_empty());
 
 	let too_big = Preimage { hash: MISSING, len: MAX_BLOBS_LEN + 1 };
-	assert_eq!(c.pin(CAROL, too_big), Err("blob too large"));
-	let forged = Op::Pin { owner: id(CAROL), nonce: 2, blob: extra(0), signature: key(MALLORY).sign(b"x").to_bytes() };
-	assert_eq!(refine(&ENV, SERVICE, forged), Verified::Rejected(Rejection::BadSignature));
+	assert_eq!(c.pin(CAROL, &[extra(0), too_big]), Err("blob too large"));
+	assert_eq!(c.pin(CAROL, &vec![extra(0); MAX_BLOBS as usize + 2]), Err("too many blobs"));
+	assert_eq!(c.pin(CAROL, &vec![extra(0); 8]), Err("insufficient points"));
+	assert_eq!(c.account(CAROL), Account { balance: 100 - 3 * PIN_DEPOSIT, nonce: 2 });
+	let forged =
+		Op::Pin { owner: id(CAROL), nonce: 2, blobs: vec![extra(0)], signature: key(MALLORY).sign(b"x").to_bytes() };
+	assert_eq!(c.refine(forged), Verified::Rejected(Rejection::BadSignature));
 }
 
 #[test]
-fn attesting_a_layer() {
+fn attesting_a_batch() {
 	let mut c = setup();
-	let claim = c.attest(extra(GOOD1), &[]).unwrap();
+	let claim = c.attest(&[GOOD1, GOOD2], &[]).unwrap();
+	assert_eq!(claim.parents_root, parents_root(&[]));
 	let recorded: Attestation = c.get_typed(&StorageKey::Attestation(claim.id())).unwrap();
 	assert_eq!(recorded, Attestation { claim: claim.clone(), slot: c.now, attester: id(CAROL) });
 	assert_eq!(c.account(CAROL), Account { balance: 100 - ATTEST_DEPOSIT, nonce: 1 });
-	assert_eq!(c.refs(EXTRA[GOOD1].0), Some(1), "the subject is held for good");
+	// The list and every subject in it are held for good.
+	assert_eq!(c.refs(claim.subjects.hash), Some(1));
+	assert_eq!(c.refs(EXTRA[GOOD1].0), Some(1));
+	assert_eq!(c.refs(EXTRA[GOOD2].0), Some(1));
 
-	assert_eq!(c.attest(extra(GOOD1), &[]), Err("already attested"));
+	assert_eq!(c.attest(&[GOOD1, GOOD2], &[]), Err("already attested"));
 	assert_eq!(c.account(CAROL).balance, 100 - ATTEST_DEPOSIT, "nothing charged twice");
-	let rejected = |f| Verified::Rejected(Rejection::CheckFailed(f));
-	assert_eq!(c.refine_attest(extra(BAD), &[]), rejected(CheckFailure::False), "the check says no");
-	let missing = Preimage { hash: MISSING, len: 1 };
-	assert_eq!(c.refine_attest(missing, &[]), Verified::Rejected(Rejection::BlobUnavailable));
-	// The signature covers the claim, so it can't be replayed for another subject.
-	let (Op::Attest { signature, .. }, _) = c.attest_op(CAROL, CHECK, extra(GOOD2), &[]) else { unreachable!() };
-	let (Op::Attest { attester, nonce, check_hash, params, subject, ancestors, check_gas, .. }, _) =
-		c.attest_op(CAROL, CHECK, extra(GOOD1), &[])
-	else {
-		unreachable!()
-	};
-	let replayed = Op::Attest { attester, nonce, check_hash, params, subject, ancestors, check_gas, signature };
-	assert_eq!(refine(&ENV, SERVICE, replayed), Verified::Rejected(Rejection::BadSignature));
+	let rejected = |r| Verified::Rejected(r);
+	let check_says_no = rejected(Rejection::CheckFailed(CheckFailure::False));
+	assert_eq!(c.refine_attest(&[GOOD1, BAD], &[]), check_says_no, "one bad subject spoils the batch");
+	assert_eq!(c.refine_attest(&[], &[]), check_says_no, "the mock wants subjects");
+	let missing_subject = c.list(&[extra(GOOD1), Preimage { hash: MISSING, len: 1 }]);
+	let op = c.attest_op(CAROL, CHECK, b"batch", missing_subject, &[]).0;
+	assert_eq!(c.refine(op), rejected(Rejection::BlobUnavailable));
+	let op = c.attest_op(CAROL, CHECK, b"batch", Preimage { hash: MISSING, len: 1 }, &[]).0;
+	assert_eq!(c.refine(op), rejected(Rejection::BlobUnavailable), "no such list");
+	for data in [vec![1, 2, 3], (vec![extra(GOOD1)], 0u8).encode(), vec![extra(GOOD1); MAX_BLOBS as usize + 1].encode()] {
+		let list = c.raw_list(data);
+		let op = c.attest_op(CAROL, CHECK, b"batch", list, &[]).0;
+		assert_eq!(c.refine(op), rejected(Rejection::BadSubjectList));
+	}
+
+	// The witness reaches the check.
+	let list = c.list(&[extra(GOOD1)]);
+	let (mut op, _) = c.attest_op(CAROL, CHECK, b"batch", list, &[]);
+	let Op::Attest { witness, .. } = &mut op else { unreachable!() };
+	*witness = b"no".to_vec();
+	assert_eq!(c.refine(op.clone()), check_says_no);
+	// It isn't part of the claim, so changing it leaves the signature valid.
+	let Op::Attest { witness, .. } = &mut op else { unreachable!() };
+	*witness = b"other proof".to_vec();
+	c.submit(op).unwrap();
+
+	// The signature covers the claim, so it can't be replayed for other subjects.
+	let other = c.list(&[extra(GOOD2)]);
+	let (Op::Attest { signature, .. }, _) = c.attest_op(CAROL, CHECK, b"batch", other, &[]) else { unreachable!() };
+	let mut op = c.attest_op(CAROL, CHECK, b"batch", claim.subjects, &[]).0;
+	let Op::Attest { signature: s, .. } = &mut op else { unreachable!() };
+	*s = signature;
+	assert_eq!(c.refine(op), rejected(Rejection::BadSignature));
 }
 
 #[test]
-fn attesting_on_a_chain() {
+fn attestations_form_a_dag() {
 	let mut c = setup();
-	let layer1 = c.attest(extra(GOOD1), &[]).unwrap();
-	let layer2 = c.attest(extra(GOOD2), &[layer1.clone()]).unwrap();
-	assert_eq!(layer2.parent, Some(layer1.id()));
-	assert_ne!(layer2.id(), c.attest(extra(GOOD2), &[]).unwrap().id(), "other foundations, other id");
-	// A third layer names the whole chain, oldest first.
-	let layer3 = c.attest(extra(GOOD1), &[layer1.clone(), layer2.clone()]).unwrap();
-	assert_eq!(layer3.parent, Some(layer2.id()));
+	let a = c.attest(&[GOOD1, GOOD2], &[]).unwrap();
+	let b = c.attest(&[GOOD2], &[]).unwrap();
+	// Trusting subjects of both: the check gets them trusted, before the subjects to attest.
+	let d = c.attest(&[GOOD1], &[(a.clone(), 1), (b.clone(), 0), (a.clone(), 0)]).unwrap();
+	assert_eq!(d.parents_root, parents_root(&[b.id(), a.id()]), "parents are a set");
+	assert_ne!(d.id(), c.attest(&[GOOD1], &[(a.clone(), 0)]).unwrap().id(), "other parents, other id");
+	// Any depth: d's subject is trusted on its own, with no context.
+	c.attest(&[GOOD2], &[(d.clone(), 0)]).unwrap();
 
-	// The chain must run from its root, each claim following the one before.
-	let broken = Verified::Rejected(Rejection::BrokenChain);
-	assert_eq!(c.refine_attest(extra(GOOD1), &[layer2.clone()]), broken, "doesn't start at a root");
-	assert_eq!(c.refine_attest(extra(GOOD1), &[layer2.clone(), layer1.clone()]), broken, "out of order");
-	assert_eq!(c.refine_attest(extra(GOOD1), &[layer1.clone(), layer3.clone()]), broken, "a layer skipped");
-
-	// A parent nobody attested: refine runs the check on the claimed subject, and accumulate
+	// A parent nobody attested: refine runs the check on its claimed subjects, and accumulate
 	// finds no such record.
-	let made_up = AttestationClaim { check_hash: CHECK, params_hash: blake2b256(b"layer"), subject: extra(BAD), parent: None };
-	assert_eq!(c.attest(extra(GOOD2), &[made_up]), Err("no such parent attestation"));
+	let unattested = c.list(&[extra(BAD)]);
+	let made_up = AttestationClaim {
+		check_hash: CHECK,
+		params_hash: blake2b256(b"batch"),
+		subjects: unattested,
+		parents_root: parents_root(&[]),
+	};
+	assert_eq!(c.attest(&[GOOD2, GOOD1], &[(made_up, 0)]), Err("no such parent attestation"));
+
 	// A parent by another check is refused outright, recorded or not.
-	let foreign = c.attest_with(CAROL, OTHER_CHECK, extra(GOOD1), &[]).unwrap();
-	assert_eq!(c.refine_attest(extra(GOOD2), &[foreign]), Verified::Rejected(Rejection::ForeignAttestation));
-	// So is a parent attested with other params, which might have been more lenient.
-	let (op, lenient) = c.attest_op_with_params(CAROL, CHECK, b"lenient", extra(GOOD1), &[]);
-	c.submit(op).unwrap();
-	assert_eq!(c.refine_attest(extra(GOOD2), &[lenient]), Verified::Rejected(Rejection::ForeignAttestation));
-	let too_many = vec![layer1; MAX_BLOBS as usize];
-	assert_eq!(c.refine_attest(extra(GOOD2), &too_many), Verified::Rejected(Rejection::BlobsTooLarge));
+	let list = c.list(&[extra(GOOD1)]);
+	let foreign = c.submit_attest(c.attest_op(CAROL, OTHER_CHECK, b"batch", list, &[])).unwrap();
+	let foreign_attestation = Verified::Rejected(Rejection::ForeignAttestation);
+	assert_eq!(c.refine_attest(&[GOOD2], &[(foreign, 0)]), foreign_attestation);
+	// So is one attested with other params, which might have been more lenient.
+	let lenient = c.submit_attest(c.attest_op(CAROL, CHECK, b"lenient", list, &[])).unwrap();
+	assert_eq!(c.refine_attest(&[GOOD2], &[(lenient, 0)]), foreign_attestation);
 }
 
-/// Bounty 1 cites a two-layer chain attested by its check; bounty 2 another check's attestation.
-fn with_attested_blobs() -> (Chain, AttestationClaim, AttestationClaim) {
+#[test]
+fn trusted_refs_must_be_exact() {
 	let mut c = setup();
-	let layer1 = c.attest(extra(GOOD1), &[]).unwrap();
-	let layer2 = c.attest(extra(GOOD2), &[layer1.clone()]).unwrap();
+	let a = c.attest(&[GOOD1, GOOD2], &[]).unwrap();
+	let b = c.attest(&[GOOD2], &[]).unwrap();
+	let list = c.list(&[extra(GOOD1)]);
+	let bad_ref = Verified::Rejected(Rejection::BadTrustedRef);
+	let with = |c: &Chain, claims: Vec<AttestationClaim>, trusted: Vec<TrustedRef>| {
+		let (mut op, _) = c.attest_op(CAROL, CHECK, b"batch", list, &[]);
+		let Op::Attest { claims: cs, trusted: ts, .. } = &mut op else { unreachable!() };
+		(*cs, *ts) = (claims, trusted);
+		// Signing over whatever parents the claims make.
+		let parents: Vec<AttestationId> = cs.iter().map(AttestationClaim::id).collect();
+		let claim = AttestationClaim {
+			check_hash: CHECK,
+			params_hash: blake2b256(b"batch"),
+			subjects: list,
+			parents_root: parents_root(&parents),
+		};
+		let msg = witness_types::attest_message(SERVICE, &id(CAROL), c.account(CAROL).nonce, &claim.id());
+		let Op::Attest { signature, .. } = &mut op else { unreachable!() };
+		*signature = key(CAROL).sign(&msg).to_bytes();
+		c.refine(op)
+	};
+	let r = |claim, entry| TrustedRef { claim, entry };
+	assert!(matches!(with(&c, vec![a.clone()], vec![r(0, 1)]), Verified::Attest { .. }));
+	assert_eq!(with(&c, vec![a.clone()], vec![r(1, 0)]), bad_ref, "no such claim");
+	assert_eq!(with(&c, vec![a.clone()], vec![r(0, 2)]), bad_ref, "no such entry");
+	assert_eq!(with(&c, vec![a.clone(), b.clone()], vec![r(0, 0)]), bad_ref, "a claim unused");
+	assert_eq!(with(&c, vec![a.clone(), a.clone()], vec![r(0, 0), r(1, 0)]), bad_ref, "a claim twice");
+	let too_many = vec![r(0, 0); MAX_BLOBS as usize];
+	assert_eq!(with(&c, vec![a], too_many), Verified::Rejected(Rejection::BlobsTooLarge));
+}
+
+#[test]
+fn attested_subjects_outlive_the_bounties_that_held_them() {
+	let mut c = with_blobs();
+	let a = c.attest(&[0], &[]);
+	assert_eq!(a, Err("rejected in refine"), "the mock only attests good subjects");
 	let mut terms = c.terms();
-	terms.blobs = vec![BlobRef::Attested(layer1.id()), BlobRef::Attested(layer2.id())];
+	terms.blobs = vec![plain(GOOD1)];
+	terms.reward = 100;
+	c.create(terms).unwrap(); // bounty 2
+	c.attest(&[GOOD1], &[]).unwrap();
+	assert_eq!(c.refs(EXTRA[GOOD1].0), Some(2));
+	let expiry = c.bounty(2).terms.expiry;
+	c.advance(expiry + REVEAL_GRACE - c.now);
+	c.reclaim(2).unwrap();
+	assert_eq!(c.refs(EXTRA[GOOD1].0), Some(1));
+	assert!(!c.forgotten.contains(&EXTRA[GOOD1].0));
+}
+
+/// Bounty 1 cites both subjects of a batch attested by its check.
+fn with_attested_blobs() -> (Chain, AttestationClaim) {
+	let mut c = setup();
+	let batch = c.attest(&[GOOD1, GOOD2], &[]).unwrap();
+	let mut terms = c.terms();
+	let attested = |entry| BlobRef::Attested { attestation: batch.id(), entry };
+	terms.blobs = vec![attested(0), attested(1)];
 	terms.reward = 100;
 	c.create(terms).unwrap();
-	(c, layer1, layer2)
+	(c, batch)
 }
 
 #[test]
-fn bounties_cite_attested_blobs_as_trusted() {
-	let (mut c, layer1, _) = with_attested_blobs();
-	assert_eq!(c.solicited, vec![CHECK, EXTRA[GOOD1].0, EXTRA[GOOD2].0]);
+fn bounties_cite_attested_subjects_as_trusted() {
+	let (mut c, batch) = with_attested_blobs();
 	assert_eq!(c.refs(EXTRA[GOOD1].0), Some(1), "a citing bounty adds no hold");
 	c.commit(1, BOB, b"trusted").unwrap();
 	c.advance(MIN_COMMIT_AGE);
@@ -826,102 +951,99 @@ fn bounties_cite_attested_blobs_as_trusted() {
 
 	// A bounty can mix plain and attested blobs; a plain one is never trusted.
 	let mut terms = c.terms();
-	terms.blobs = vec![BlobRef::Attested(layer1.id()), plain(0)];
+	terms.blobs = vec![plain(0), BlobRef::Attested { attestation: batch.id(), entry: 1 }];
 	terms.reward = 100;
 	c.create(terms).unwrap(); // bounty 2
 	c.commit(2, BOB, b"trusted").unwrap();
+	c.commit(2, CAROL, b"good twoone").unwrap();
 	c.advance(MIN_COMMIT_AGE);
 	assert_eq!(c.reveal(2, BOB, b"trusted"), Err("rejected in refine"));
+	// The check gets the trusted subjects first, then the plain blobs.
+	c.reveal(2, CAROL, b"good twoone").unwrap();
 }
 
 #[test]
 fn bounties_cite_only_their_own_check_attestations() {
-	let (mut c, layer1, _) = with_attested_blobs();
-	let mut terms = c.terms();
-	terms.blobs = vec![BlobRef::Attested([9; 32])];
-	assert_eq!(c.create(terms), Err("no such attestation"));
-	let foreign = c.attest_with(CAROL, OTHER_CHECK, extra(GOOD1), &[]).unwrap();
-	let mut terms = c.terms();
-	terms.blobs = vec![BlobRef::Attested(foreign.id())];
-	assert_eq!(c.create(terms), Err("attested by another check"));
-
-	// At reveal, a claim by another check is refused in refine, and so is an attested blob after
-	// a plain one. A shorter chain is a chain, but not the bounty's.
-	c.commit(1, BOB, b"trusted").unwrap();
-	c.advance(MIN_COMMIT_AGE);
-	let reveal = |blobs| Op::Reveal {
-		bounty_id: 1,
-		check_hash: CHECK,
-		params: b"params".to_vec(),
-		blobs,
-		extra: vec![],
-		check_gas: 1000,
-		hunter: id(BOB),
-		salt: [BOB; 32],
-		witness: b"x".to_vec(),
-	};
-	let BlobRef::Attested(layer2_id) = c.bounty(1).terms.blobs[1] else { unreachable!() };
-	let layer2 = c.claims[&layer2_id].clone();
-	let foreign_blob = RevealBlob::Attested(foreign);
-	assert_eq!(refine(&ENV, SERVICE, reveal(vec![foreign_blob])), Verified::Rejected(Rejection::ForeignAttestation));
-	let as_plain = vec![RevealBlob::Blob(layer1.subject), RevealBlob::Attested(layer2)];
-	assert_eq!(refine(&ENV, SERVICE, reveal(as_plain)), Verified::Rejected(Rejection::BrokenChain));
-	let shorter = vec![RevealBlob::Attested(layer1)];
-	assert_eq!(c.submit(reveal(shorter)), Err("revealed against different terms"));
-}
-
-#[test]
-fn bounties_cite_one_chain_from_its_root() {
-	let (mut c, layer1, layer2) = with_attested_blobs();
+	let (mut c, batch) = with_attested_blobs();
 	let cite = |c: &mut Chain, blobs| {
 		let mut terms = c.terms();
 		terms.blobs = blobs;
 		terms.reward = 10;
 		c.create(terms)
 	};
-	let a = |claim: &AttestationClaim| BlobRef::Attested(claim.id());
-	// Layer 2 was verified right after layer 1, so it's only trusted there.
-	let not_chain = Err("attested blobs are not one chain");
-	assert_eq!(cite(&mut c, vec![a(&layer2)]), not_chain, "without its chain");
-	assert_eq!(cite(&mut c, vec![a(&layer2), a(&layer1)]), not_chain, "out of order");
-	assert_eq!(cite(&mut c, vec![plain(0), a(&layer1)]), not_chain, "after a plain blob");
-	// Another root's chain can't be spliced in either.
-	let other_root = c.attest(extra(GOOD2), &[]).unwrap();
-	assert_eq!(cite(&mut c, vec![a(&other_root), a(&layer2)]), not_chain);
-	assert_eq!(cite(&mut c, vec![a(&layer1), a(&layer2), plain(0)]), Ok(()));
-	assert_eq!(cite(&mut c, vec![a(&layer1)]), Ok(()), "a chain can stop early");
+	let a = |claim: &AttestationClaim, entry| BlobRef::Attested { attestation: claim.id(), entry };
+	assert_eq!(cite(&mut c, vec![BlobRef::Attested { attestation: [9; 32], entry: 0 }]), Err("no such attestation"));
+	assert_eq!(cite(&mut c, vec![a(&batch, 2)]), Err("no such subject"));
+	let list = c.list(&[extra(GOOD1)]);
+	let foreign = c.submit_attest(c.attest_op(CAROL, OTHER_CHECK, b"batch", list, &[])).unwrap();
+	assert_eq!(cite(&mut c, vec![a(&foreign, 0)]), Err("attested by another check"));
+	let lenient = c.submit_attest(c.attest_op(CAROL, CHECK, b"lenient", list, &[])).unwrap();
+	assert_eq!(cite(&mut c, vec![a(&batch, 0), a(&lenient, 0)]), Err("attested with other params"));
+	assert_eq!(cite(&mut c, vec![a(&lenient, 0)]), Ok(()), "any params, if only one set");
+	// Subjects can be cited in any order, and any of them alone.
+	assert_eq!(cite(&mut c, vec![a(&batch, 1), plain(0), a(&batch, 0)]), Ok(()));
+	assert_eq!(cite(&mut c, vec![a(&batch, 1)]), Ok(()));
+
+	// At reveal, a claim by another check is refused in refine.
+	c.commit(1, BOB, b"trusted").unwrap();
+	c.advance(MIN_COMMIT_AGE);
+	let op = c.reveal_op(1, BOB, b"trusted", &[(foreign, 0)]);
+	assert_eq!(c.refine(op), Verified::Rejected(Rejection::ForeignAttestation));
+	let op = c.reveal_op(1, BOB, b"trusted", &[(lenient, 0)]);
+	assert_eq!(c.refine(op), Verified::Rejected(Rejection::ForeignAttestation));
 }
 
 #[test]
-fn reveals_extend_the_bounty_chain() {
+fn reveals_must_trust_the_bounty_subjects() {
+	let (mut c, _) = with_attested_blobs();
+	c.commit(1, BOB, b"x").unwrap();
+	c.advance(MIN_COMMIT_AGE);
+	let mut op = c.reveal_op(1, BOB, b"x", &[]);
+	let Op::Reveal { trusted, .. } = &mut op else { unreachable!() };
+	trusted.pop();
+	assert_eq!(c.refine(op.clone()), Verified::Rejected(Rejection::BadTrustedRef), "one left out");
+	let Op::Reveal { trusted, .. } = &mut op else { unreachable!() };
+	trusted.push(TrustedRef { claim: 0, entry: 0 });
+	assert_eq!(c.refine(op), Verified::Rejected(Rejection::BadTrustedRef), "the wrong one instead");
+	// Order is the hunter's choice.
+	let mut op = c.reveal_op(1, BOB, b"x", &[]);
+	let Op::Reveal { trusted, .. } = &mut op else { unreachable!() };
+	trusted.reverse();
+	c.submit(op).unwrap();
+}
+
+#[test]
+fn reveals_can_trust_more_subjects() {
 	let mut c = setup();
-	let layer1 = c.attest(extra(GOOD1), &[]).unwrap();
-	let layer2 = c.attest(extra(GOOD2), &[layer1.clone()]).unwrap();
+	let statement = c.attest(&[GOOD1], &[]).unwrap();
+	let library = c.attest(&[GOOD2], &[(statement.clone(), 0)]).unwrap();
 	let mut terms = c.terms();
-	terms.blobs = vec![BlobRef::Attested(layer1.id()), plain(0)];
+	terms.blobs = vec![BlobRef::Attested { attestation: statement.id(), entry: 0 }, plain(0)];
 	terms.reward = 100;
 	c.create(terms).unwrap(); // bounty 1
 	c.commit(1, BOB, b"trusted").unwrap();
 	c.commit(1, CAROL, b"good onegood twoone").unwrap();
 	c.advance(MIN_COMMIT_AGE);
 
-	let refined = |c: &Chain, extra| refine(&ENV, SERVICE, c.reveal_op(1, CAROL, b"good onegood twoone", extra));
-	// Extra layers must continue the bounty's chain, by its check and params.
-	let other_root = c.attest(extra(GOOD2), &[]).unwrap();
-	assert_eq!(refined(&c, vec![other_root]), Verified::Rejected(Rejection::BrokenChain));
-	let (_, lenient) = c.attest_op_with_params(CAROL, CHECK, b"lenient", extra(GOOD2), &[layer1.clone()]);
-	assert_eq!(refined(&c, vec![lenient]), Verified::Rejected(Rejection::ForeignAttestation));
-	let (_, unrecorded) = c.attest_op(CAROL, CHECK, extra(GOOD1), &[layer1.clone(), layer2.clone()]);
-	// That one's data passes the check, so accumulate is what refuses it.
-	let witness = b"good onegood twogood oneone";
-	assert_eq!(c.reveal_with(1, CAROL, witness, vec![layer2.clone(), unrecorded]), Err("no such attestation"));
-
-	// The check gets the chain, then the extra layers, both trusted, then the plain blob. So
-	// Carol's witness (all the data in that order) passes, and so would Bob's, if the plain
-	// blob were trusted, which it isn't.
-	assert_eq!(c.reveal_with(1, BOB, b"trusted", vec![layer2.clone()]), Err("rejected in refine"));
-	c.reveal_with(1, CAROL, b"good onegood twoone", vec![layer2]).unwrap();
+	// The bounty's subjects, then the reveal's own, both trusted, then the plain blob. So
+	// Carol's witness (all the data in that order) passes, and so would Bob's, if the plain blob
+	// were trusted, which it isn't.
+	assert_eq!(c.reveal_with(1, BOB, b"trusted", &[(library.clone(), 0)]), Err("rejected in refine"));
+	// A claim that passes the check but was never recorded is refused in accumulate.
+	let list = c.list(&[extra(GOOD2)]);
+	let (_, unrecorded) = c.attest_op(CAROL, CHECK, b"batch", list, &[(library.clone(), 0)]);
+	let witness = b"good onegood twoone";
+	assert_eq!(c.reveal_with(1, CAROL, witness, &[(unrecorded, 0)]), Err("no such attestation"));
+	c.reveal_with(1, CAROL, witness, &[(library, 0)]).unwrap();
 	c.advance(MIN_CLAIM_WINDOW);
 	c.finalize(1).unwrap();
 	assert_eq!(c.winner(1), id(CAROL));
+}
+
+#[test]
+fn parents_root_is_of_a_set() {
+	let (x, y) = ([1; 32], [2; 32]);
+	assert_eq!(parents_root(&[x, y]), parents_root(&[y, x, y]));
+	assert_ne!(parents_root(&[x]), parents_root(&[x, y]));
+	assert_ne!(parents_root(&[]), parents_root(&[x]));
 }

@@ -8,8 +8,9 @@
 #
 # --quick (about 6 minutes, a third of it starting the testnet) then mints, creates two bounties,
 # provides their check blobs and the dictionary blob, commits, and reveals a wrong and a right
-# witness on each. Then it attests two word volumes, one on the other, refuses a bad one, and
-# reveals on a bounty that cites the two. That covers everything that touches the node: deploy,
+# witness on each. Then it attests a batch of two word volumes and a third on one of them,
+# refuses a bad one, and reveals on a bounty that cites two of them, trusting the third as well.
+# That covers everything that touches the node: deploy,
 # refine and accumulate, pins and preimage lookups, the inner PVM in both modes and growing its
 # heap. It skips the claim windows.
 #
@@ -41,11 +42,14 @@ DICT=$TMP/dictionary.txt
 printf 'open\nsesame\nsome\nwords\n' >"$DICT"
 SENTENCE="open sesame some words"
 # Word volumes for the sorted-words check: 16-byte records, padded with spaces.
-VOL1=$TMP/volume1.bin VOL2=$TMP/volume2.bin BADVOL=$TMP/bad-volume.bin
+VOL1=$TMP/volume1.bin VOL2=$TMP/volume2.bin VOL3=$TMP/volume3.bin BADVOL=$TMP/bad-volume.bin
 printf '%-16s' apple banana cherry >"$VOL1"
 printf '%-16s' grape lemon mango >"$VOL2"
+printf '%-16s' peach plum >"$VOL3"
 printf '%-16s' zebra yak >"$BADVOL" # not sorted
-CLAIM1=$TMP/volume1.claim CLAIM2=$TMP/volume2.claim BADCLAIM=$TMP/bad-volume.claim
+# Subject lists: volumes 1 and 2 are attested as one batch, then volume 3, then the bad one.
+LIST_A=$TMP/batch-a.list LIST_B=$TMP/batch-b.list BADLIST=$TMP/bad.list
+CLAIM_A=$TMP/batch-a.claim CLAIM_B=$TMP/batch-b.claim BADCLAIM=$TMP/bad.claim
 
 N=9903520302753827148829556741 # (2^61 - 1) * 4294967291
 FACTOR=4294967291
@@ -131,47 +135,48 @@ create_dictionary_bounty() {
 	"$JAMT" provide "$SVC" "$DICT" >/dev/null
 }
 
-# Pat pins the sorted-words check and the volumes, attests volume 1 and then volume 2 on it, and
-# fails to attest the unsorted volume. Then bounty $1 (Alice, nonce $2) cites the two
-# attestations, and hunter $3 (nonce $4) reveals a wrong and a right witness.
+# Pat pins the sorted-words check, the volumes and subject lists in one go. Pat attests volumes 1
+# and 2 as a batch, then volume 3 trusting volume 2, and fails to attest the unsorted volume.
+# Then bounty $1 (Alice, nonce $2) cites volumes 1 and 3, and hunter $3 (nonce $4) reveals a
+# wrong witness and a right one that also trusts volume 2.
 attestations() {
 	local bounty=$1 alice_nonce=$2 hunter=$3 hunter_nonce=$4
 	step "attesting word volumes"
-	item "$($W mint --to pat --amount 100)"
-	expect "pat has 100" 'balance: 100, nonce: 0' account --account pat
-	local nonce=0
-	for f in $WORDS_CHECK "$VOL1" "$VOL2" "$BADVOL"; do
-		item "$($W pin --service "$SVC" --owner pat --nonce $nonce --blob "$f")"
-		nonce=$((nonce + 1))
-	done
-	expect "pat paid for four pins" 'balance: 60, nonce: 4' account --account pat
-	for f in $WORDS_CHECK "$VOL1" "$VOL2" "$BADVOL"; do "$JAMT" provide "$SVC" "$f" >/dev/null; done
+	$W list --subjects "$VOL1,$VOL2" --out "$LIST_A" >/dev/null
+	$W list --subjects "$VOL3" --out "$LIST_B" >/dev/null
+	$W list --subjects "$BADVOL" --out "$BADLIST" >/dev/null
+	local files=($WORDS_CHECK "$VOL1" "$VOL2" "$VOL3" "$BADVOL" "$LIST_A" "$LIST_B" "$BADLIST")
+	item "$($W mint --to pat --amount 200)"
+	expect "pat has 200" 'balance: 200, nonce: 0' account --account pat
+	item "$($W pin --service "$SVC" --owner pat --nonce 0 --blobs "$(IFS=,; echo "${files[*]}")")"
+	expect "pat paid for eight pins" 'balance: 120, nonce: 1' account --account pat
+	for f in "${files[@]}"; do "$JAMT" provide "$SVC" "$f" >/dev/null; done
 	wait_slot $(( $(slot) + 2 ))
-	item "$($W attest --service "$SVC" --attester pat --nonce 4 --check $WORDS_CHECK --subject "$VOL1" \
-		--check-gas $GAS --claim-out "$CLAIM1" 2>/dev/null)"
-	expect "volume 1 attested" 'Attestation \{ claim' attestation --attestation "$CLAIM1"
-	item "$($W attest --service "$SVC" --attester pat --nonce 5 --check $WORDS_CHECK --subject "$VOL2" \
-		--chain "$CLAIM1" --check-gas $GAS --claim-out "$CLAIM2" 2>/dev/null)"
-	expect "volume 2 attested on volume 1" 'Attestation \{ claim' attestation --attestation "$CLAIM2"
-	item "$($W attest --service "$SVC" --attester pat --nonce 6 --check $WORDS_CHECK --subject "$BADVOL" \
-		--chain "$CLAIM1,$CLAIM2" --check-gas $GAS --claim-out "$BADCLAIM" 2>/dev/null)"
+	item "$($W attest --service "$SVC" --attester pat --nonce 1 --check $WORDS_CHECK --subjects "$LIST_A" \
+		--check-gas $GAS --claim-out "$CLAIM_A" 2>/dev/null)"
+	expect "volumes 1 and 2 attested" 'Attestation \{ claim' attestation --attestation "$CLAIM_A"
+	item "$($W attest --service "$SVC" --attester pat --nonce 2 --check $WORDS_CHECK --subjects "$LIST_B" \
+		--trust "$CLAIM_A:1" --check-gas $GAS --claim-out "$CLAIM_B" 2>/dev/null)"
+	expect "volume 3 attested after volume 2" 'Attestation \{ claim' attestation --attestation "$CLAIM_B"
+	item "$($W attest --service "$SVC" --attester pat --nonce 3 --check $WORDS_CHECK --subjects "$BADLIST" \
+		--trust "$CLAIM_A:1" --check-gas $GAS --claim-out "$BADCLAIM" 2>/dev/null)"
 	expect_still "unsorted volume not attested" '^none$' attestation --attestation "$BADCLAIM"
-	expect "pat paid for two attestations" 'balance: 40, nonce: 6' account --account pat
+	expect "pat paid for two attestations" 'balance: 100, nonce: 3' account --account pat
 
-	step "a bounty citing the attestations"
-	local blobs="claim:$CLAIM1,claim:$CLAIM2"
+	step "a bounty citing attested volumes"
+	local blobs="$CLAIM_A:0,$CLAIM_B:0"
 	item "$($W create --service "$SVC" --maker alice --nonce "$alice_nonce" --check $WORDS_CHECK --params 0x00 \
 		--blobs "$blobs" --reward 100 --check-gas $GAS --expiry $(( $(slot) + 100 )))"
 	expect "bounty $bounty open" 'status: Open' bounty --bounty "$bounty"
 	item "$($W commit --service "$SVC" --bounty "$bounty" --hunter "$hunter" --nonce "$hunter_nonce" --salt 0x77 \
-		--witness-str "cherry lemon" 2>/dev/null)"
+		--witness-str "cherry lemon plum" 2>/dev/null)"
 	expect "$hunter committed to bounty $bounty" "nonce: $((hunter_nonce + 1))" account --account "$hunter"
 	wait_slot $(( $(slot) + 4 )) # MIN_COMMIT_AGE
 	item "$($W reveal --bounty "$bounty" --check $WORDS_CHECK --params 0x00 --blobs "$blobs" --check-gas $GAS \
-		--hunter "$hunter" --salt 0x77 --witness-str "cherry kiwi")"
-	expect_still "word in no volume changed nothing" 'status: Open' bounty --bounty "$bounty"
-	item "$($W reveal --bounty "$bounty" --check $WORDS_CHECK --params 0x00 --blobs "$blobs" --check-gas $GAS \
-		--hunter "$hunter" --salt 0x77 --witness-str "cherry lemon")"
+		--hunter "$hunter" --salt 0x77 --witness-str "cherry lemon plum")"
+	expect_still "a word in a volume not given changed nothing" 'status: Open' bounty --bounty "$bounty"
+	item "$($W reveal --bounty "$bounty" --check $WORDS_CHECK --params 0x00 --blobs "$blobs" --trust "$CLAIM_A:1" \
+		--check-gas $GAS --hunter "$hunter" --salt 0x77 --witness-str "cherry lemon plum")"
 	expect "$hunter's reveal on attested volumes opens the window" 'Revealing' bounty --bounty "$bounty"
 }
 

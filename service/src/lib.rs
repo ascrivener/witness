@@ -43,6 +43,9 @@ impl witness_rules::State for Host {
 	fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
 		accumulate::get_storage(key)
 	}
+	fn lookup(&self, hash: &Hash) -> Option<Vec<u8>> {
+		accumulate::lookup(hash)
+	}
 }
 
 impl jam_pvm_common::Service for Service {

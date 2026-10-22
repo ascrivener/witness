@@ -22,8 +22,8 @@ use witness_types::{
 	Bounty, BountyId, BountyStatus, BountyTerms, COMMIT_DEPOSIT, CheckBlob, CheckMode, Claim,
 	CommitRecord, Gas, Hash, MAX_BLOBS, MAX_BLOBS_LEN, MAX_CHECK_GAS, MAX_CHECK_LEN,
 	MAX_CLAIM_WINDOW, MAX_MINT, MAX_PARAMS_LEN, MAX_WITNESS_LEN, MIN_CLAIM_WINDOW, MIN_COMMIT_AGE,
-	Op, PIN_DEPOSIT, Points, Preimage, REVEAL_GRACE, RevealBlob, Rejection, Signature, Slot,
-	StorageKey, Verified, blake2b256,
+	Op, PIN_DEPOSIT, Points, Preimage, REVEAL_GRACE, Rejection, Signature, Slot, StorageKey,
+	SubjectList, TrustedRef, Verified, blake2b256,
 };
 
 /// What refine needs from the host.
@@ -34,9 +34,11 @@ pub trait RefineEnv {
 	fn run_check(&self, blob: &[u8], args: &[u8], gas: Gas) -> core::result::Result<(), Rejection>;
 }
 
-/// Read access to the service's storage.
+/// Read access to the service's storage and preimages.
 pub trait State {
 	fn get(&self, key: &[u8]) -> Option<Vec<u8>>;
+	/// The service's preimage `hash`, if it is available.
+	fn lookup(&self, hash: &Hash) -> Option<Vec<u8>>;
 }
 
 /// What an accepted operation changes.
@@ -77,6 +79,60 @@ fn fetch_blobs(
 	Ok(fetched)
 }
 
+/// Look up and decode the subject list `list`.
+fn lookup_subject_list(env: &impl RefineEnv, list: &Preimage) -> core::result::Result<SubjectList, Rejection> {
+	let data = env.lookup(&list.hash).ok_or(Rejection::BlobUnavailable)?;
+	witness_types::decode_subject_list(&data).ok_or(Rejection::BadSubjectList)
+}
+
+/// Check that an op's `claims` are all by `check_hash` with one set of params, `params_hash` if
+/// given, and each cited once, and return their ids.
+fn check_claims(
+	check_hash: &Hash,
+	params_hash: Option<Hash>,
+	claims: &[AttestationClaim],
+) -> core::result::Result<Vec<AttestationId>, Rejection> {
+	// A check only trusts its own attestations, with the same params: otherwise a subject
+	// attested with lenient params (or by a lenient check) would be trusted by a strict one.
+	let params_hash = params_hash.or(claims.first().map(|c| c.params_hash));
+	if claims.iter().any(|c| c.check_hash != *check_hash || Some(c.params_hash) != params_hash) {
+		return Err(Rejection::ForeignAttestation);
+	}
+	let ids: Vec<AttestationId> = claims.iter().map(AttestationClaim::id).collect();
+	let mut sorted = ids.clone();
+	sorted.sort();
+	sorted.dedup();
+	if sorted.len() != ids.len() {
+		return Err(Rejection::BadTrustedRef);
+	}
+	Ok(ids)
+}
+
+/// The subjects `trusted` cites, in its order. Every claim must be used. Each claim's subject
+/// list is looked up once and dropped before the next, so refine holds one list at a time.
+fn resolve_trusted(
+	env: &impl RefineEnv,
+	claims: &[AttestationClaim],
+	trusted: &[TrustedRef],
+) -> core::result::Result<Vec<Preimage>, Rejection> {
+	let mut uses: Vec<Vec<usize>> = claims.iter().map(|_| Vec::new()).collect();
+	for (i, r) in trusted.iter().enumerate() {
+		uses.get_mut(r.claim as usize).ok_or(Rejection::BadTrustedRef)?.push(i);
+	}
+	let mut subjects = Vec::with_capacity(trusted.len());
+	subjects.resize(trusted.len(), Preimage { hash: [0; 32], len: 0 });
+	for (claim, uses) in claims.iter().zip(&uses) {
+		if uses.is_empty() {
+			return Err(Rejection::BadTrustedRef);
+		}
+		let list = lookup_subject_list(env, &claim.subjects)?;
+		for &i in uses {
+			subjects[i] = *list.get(trusted[i].entry as usize).ok_or(Rejection::BadTrustedRef)?;
+		}
+	}
+	Ok(subjects)
+}
+
 /// Run check blob `check_hash` in `mode` on `blobs`, `params` and `witness`.
 fn run(
 	env: &impl RefineEnv,
@@ -95,160 +151,180 @@ fn run(
 	env.run_check(&check, &witness_types::check_args(mode, &blobs, params, witness), gas)
 }
 
-/// Check that a reveal's attested blobs (`chain`, the bounty's) and `extra` layers are one
-/// chain from its root, all by `check_hash` with one set of params.
-fn check_reveal_chain(
-	check_hash: &Hash,
-	chain: &[AttestationClaim],
-	extra: &[AttestationClaim],
-) -> core::result::Result<(), Rejection> {
-	let Some(first) = chain.first().or(extra.first()) else { return Ok(()) };
-	let params_hash = first.params_hash;
-	if chain.iter().chain(extra).any(|c| c.check_hash != *check_hash || c.params_hash != params_hash) {
-		return Err(Rejection::ForeignAttestation);
+/// Refine a reveal: everything but the signatures and the claim, which it has none of.
+#[allow(clippy::too_many_arguments)]
+fn refine_reveal(
+	env: &impl RefineEnv,
+	bounty_id: BountyId,
+	check_hash: Hash,
+	params: Vec<u8>,
+	blobs: Vec<BlobRef>,
+	claims: Vec<AttestationClaim>,
+	trusted: Vec<TrustedRef>,
+	check_gas: Gas,
+	hunter: AccountId,
+	salt: Hash,
+	witness: Vec<u8>,
+) -> core::result::Result<Verified, Rejection> {
+	if check_gas > MAX_CHECK_GAS {
+		return Err(Rejection::CheckGasTooHigh);
 	}
-	let tip = chain.last().map(AttestationClaim::id);
-	if !witness_types::is_chain(chain, None, check_hash, &params_hash) ||
-		!witness_types::is_chain(extra, tip, check_hash, &params_hash)
-	{
-		return Err(Rejection::BrokenChain);
+	if witness.len() > MAX_WITNESS_LEN as usize {
+		return Err(Rejection::WitnessTooLong);
 	}
-	Ok(())
+	if params.len() > MAX_PARAMS_LEN as usize {
+		return Err(Rejection::ParamsTooLong);
+	}
+	let plain: Vec<Preimage> = blobs
+		.iter()
+		.filter_map(|b| match b {
+			BlobRef::Blob(p) => Some(*p),
+			BlobRef::Attested { .. } => None,
+		})
+		.collect();
+	if trusted.len() + plain.len() > MAX_BLOBS as usize {
+		return Err(Rejection::BlobsTooLarge);
+	}
+	// The attestations' own params are their attest params, not the bounty's.
+	let ids = check_claims(&check_hash, None, &claims)?;
+	// The reveal must trust every subject its bounty cites. Accumulate checks the blobs are the
+	// bounty's and the claims were recorded.
+	for blob in &blobs {
+		if let BlobRef::Attested { attestation, entry } = blob {
+			if !trusted.iter().any(|r| ids.get(r.claim as usize) == Some(attestation) && r.entry == *entry) {
+				return Err(Rejection::BadTrustedRef);
+			}
+		}
+	}
+	let trusted = resolve_trusted(env, &claims, &trusted)?;
+	let in_order = trusted.iter().map(|p| (*p, true)).chain(plain.iter().map(|p| (*p, false)));
+	let fetched = fetch_blobs(env, in_order)?;
+	run(env, &check_hash, CheckMode::Reveal, &fetched, &params, &witness, check_gas)?;
+	Ok(Verified::Reveal {
+		bounty_id,
+		check_hash,
+		params_hash: blake2b256(&params),
+		blobs_hash: blake2b256(&blobs.encode()),
+		attestations: ids,
+		check_gas,
+		commitment: witness_types::commitment(bounty_id, &witness, &hunter, &salt),
+		hunter,
+		witness_hash: blake2b256(&witness),
+	})
+}
+
+/// Refine an attestation.
+#[allow(clippy::too_many_arguments)]
+fn refine_attest(
+	env: &impl RefineEnv,
+	service_id: u32,
+	attester: AccountId,
+	nonce: u64,
+	check_hash: Hash,
+	params: Vec<u8>,
+	subjects: Preimage,
+	claims: Vec<AttestationClaim>,
+	trusted: Vec<TrustedRef>,
+	witness: Vec<u8>,
+	check_gas: Gas,
+	signature: Signature,
+) -> core::result::Result<Verified, Rejection> {
+	if check_gas > MAX_CHECK_GAS {
+		return Err(Rejection::CheckGasTooHigh);
+	}
+	if witness.len() > MAX_WITNESS_LEN as usize {
+		return Err(Rejection::WitnessTooLong);
+	}
+	if params.len() > MAX_PARAMS_LEN as usize {
+		return Err(Rejection::ParamsTooLong);
+	}
+	if trusted.len() > MAX_BLOBS as usize {
+		return Err(Rejection::BlobsTooLarge);
+	}
+	let params_hash = blake2b256(&params);
+	let parents = check_claims(&check_hash, Some(params_hash), &claims)?;
+	let claim = AttestationClaim {
+		check_hash,
+		params_hash,
+		subjects,
+		parents_root: witness_types::parents_root(&parents),
+	};
+	let message = witness_types::attest_message(service_id, &attester, nonce, &claim.id());
+	if !verify_signature(&attester, &message, &signature) {
+		return Err(Rejection::BadSignature);
+	}
+	let trusted = resolve_trusted(env, &claims, &trusted)?;
+	let list = lookup_subject_list(env, &subjects)?;
+	if trusted.len() + list.len() > MAX_BLOBS as usize {
+		return Err(Rejection::BlobsTooLarge);
+	}
+	// The trusted subjects, then the subjects to attest.
+	let in_order = trusted.iter().map(|p| (*p, true)).chain(list.iter().map(|p| (*p, false)));
+	let fetched = fetch_blobs(env, in_order)?;
+	run(env, &check_hash, CheckMode::Attest, &fetched, &params, &witness, check_gas)?;
+	Ok(Verified::Attest { attester, nonce, claim, parents })
 }
 
 /// Verify `op`, received by service `service_id`.
 pub fn refine(env: &impl RefineEnv, service_id: u32, op: Op) -> Verified {
-	match op {
-		Op::Mint { to, amount } => Verified::Mint { to, amount },
+	let verified = match op {
+		Op::Mint { to, amount } => Ok(Verified::Mint { to, amount }),
 		Op::CreateBounty { maker, nonce, terms, signature } => {
 			let message = witness_types::create_message(service_id, &maker, nonce, &terms);
-			if !verify_signature(&maker, &message, &signature) {
-				return Verified::Rejected(Rejection::BadSignature);
+			if verify_signature(&maker, &message, &signature) {
+				Ok(Verified::CreateBounty { maker, nonce, terms })
+			} else {
+				Err(Rejection::BadSignature)
 			}
-			Verified::CreateBounty { maker, nonce, terms }
 		},
 		Op::Commit { bounty_id, committer, nonce, commitment, signature } => {
 			let message =
 				witness_types::commit_message(service_id, bounty_id, &committer, nonce, &commitment);
-			if !verify_signature(&committer, &message, &signature) {
-				return Verified::Rejected(Rejection::BadSignature);
-			}
-			Verified::Commit { bounty_id, committer, nonce, commitment }
-		},
-		Op::Reveal { bounty_id, check_hash, params, blobs, extra, check_gas, hunter, salt, witness } => {
-			if check_gas > MAX_CHECK_GAS {
-				return Verified::Rejected(Rejection::CheckGasTooHigh);
-			}
-			if witness.len() > MAX_WITNESS_LEN as usize {
-				return Verified::Rejected(Rejection::WitnessTooLong);
-			}
-			if params.len() > MAX_PARAMS_LEN as usize {
-				return Verified::Rejected(Rejection::ParamsTooLong);
-			}
-			if blobs.len() + extra.len() > MAX_BLOBS as usize {
-				return Verified::Rejected(Rejection::BlobsTooLarge);
-			}
-			// The attested blobs lead, then come the plain ones.
-			let chain: Vec<AttestationClaim> = blobs
-				.iter()
-				.map_while(|b| match b {
-					RevealBlob::Attested(claim) => Some(claim.clone()),
-					RevealBlob::Blob(_) => None,
-				})
-				.collect();
-			let plain: Vec<Preimage> = blobs[chain.len()..]
-				.iter()
-				.map(|b| match b {
-					RevealBlob::Blob(p) => Some(*p),
-					RevealBlob::Attested(_) => None,
-				})
-				.collect::<Option<_>>()
-				.unwrap_or_default();
-			if chain.len() + plain.len() != blobs.len() {
-				return Verified::Rejected(Rejection::BrokenChain);
-			}
-			// Trust only this check's own attestations, each right after the chain it was
-			// verified on. Accumulate checks the bounty's claims match its terms (whose chain
-			// was checked when it was created) and that the extra layers' tip was recorded.
-			if let Err(rejection) = check_reveal_chain(&check_hash, &chain, &extra) {
-				return Verified::Rejected(rejection);
-			}
-			let trusted = chain.iter().chain(&extra).map(|c| (c.subject, true));
-			let blobs_in_order = trusted.chain(plain.iter().map(|p| (*p, false)));
-			let result = fetch_blobs(env, blobs_in_order).and_then(|fetched| {
-				run(env, &check_hash, CheckMode::Reveal, &fetched, &params, &witness, check_gas)
-			});
-			if let Err(rejection) = result {
-				return Verified::Rejected(rejection);
-			}
-			let refs: Vec<BlobRef> = blobs.iter().map(RevealBlob::blob_ref).collect();
-			Verified::Reveal {
-				bounty_id,
-				check_hash,
-				params_hash: blake2b256(&params),
-				blobs_hash: blake2b256(&refs.encode()),
-				extra_tip: extra.last().map(AttestationClaim::id),
-				check_gas,
-				commitment: witness_types::commitment(bounty_id, &witness, &hunter, &salt),
-				hunter,
-				witness_hash: blake2b256(&witness),
+			if verify_signature(&committer, &message, &signature) {
+				Ok(Verified::Commit { bounty_id, committer, nonce, commitment })
+			} else {
+				Err(Rejection::BadSignature)
 			}
 		},
-		Op::Finalize { bounty_id } => Verified::Finalize { bounty_id },
+		Op::Reveal { bounty_id, check_hash, params, blobs, claims, trusted, check_gas, hunter, salt, witness } =>
+			refine_reveal(
+				env, bounty_id, check_hash, params, blobs, claims, trusted, check_gas, hunter, salt, witness,
+			),
+		Op::Finalize { bounty_id } => Ok(Verified::Finalize { bounty_id }),
 		Op::Reclaim { bounty_id, maker, nonce, signature } => {
 			let message = witness_types::reclaim_message(service_id, bounty_id, &maker, nonce);
-			if !verify_signature(&maker, &message, &signature) {
-				return Verified::Rejected(Rejection::BadSignature);
+			if verify_signature(&maker, &message, &signature) {
+				Ok(Verified::Reclaim { bounty_id, maker, nonce })
+			} else {
+				Err(Rejection::BadSignature)
 			}
-			Verified::Reclaim { bounty_id, maker, nonce }
 		},
-		Op::Release { bounty_id, commitment } => Verified::Release { bounty_id, commitment },
-		Op::Pin { owner, nonce, blob, signature } => {
-			let message = witness_types::pin_message(service_id, &owner, nonce, &blob);
-			if !verify_signature(&owner, &message, &signature) {
-				return Verified::Rejected(Rejection::BadSignature);
+		Op::Release { bounty_id, commitment } => Ok(Verified::Release { bounty_id, commitment }),
+		Op::Pin { owner, nonce, blobs, signature } => {
+			let message = witness_types::pin_message(service_id, &owner, nonce, &blobs);
+			if verify_signature(&owner, &message, &signature) {
+				Ok(Verified::Pin { owner, nonce, blobs })
+			} else {
+				Err(Rejection::BadSignature)
 			}
-			Verified::Pin { owner, nonce, blob }
 		},
-		Op::Attest { attester, nonce, check_hash, params, subject, ancestors, check_gas, signature } => {
-			let claim = AttestationClaim {
-				check_hash,
-				params_hash: blake2b256(&params),
-				subject,
-				parent: ancestors.last().map(AttestationClaim::id),
-			};
-			let message = witness_types::attest_message(service_id, &attester, nonce, &claim.id());
-			if !verify_signature(&attester, &message, &signature) {
-				return Verified::Rejected(Rejection::BadSignature);
-			}
-			if check_gas > MAX_CHECK_GAS {
-				return Verified::Rejected(Rejection::CheckGasTooHigh);
-			}
-			if params.len() > MAX_PARAMS_LEN as usize {
-				return Verified::Rejected(Rejection::ParamsTooLong);
-			}
-			if ancestors.len() >= MAX_BLOBS as usize {
-				return Verified::Rejected(Rejection::BlobsTooLarge);
-			}
-			// A chain is verified under one check and one set of params: otherwise a layer
-			// attested with lenient params (or by a lenient check) would be trusted by a strict one.
-			if ancestors.iter().any(|a| a.check_hash != check_hash || a.params_hash != claim.params_hash) {
-				return Verified::Rejected(Rejection::ForeignAttestation);
-			}
-			if !witness_types::is_chain(&ancestors, None, &check_hash, &claim.params_hash) {
-				return Verified::Rejected(Rejection::BrokenChain);
-			}
-			// The chain's subjects, trusted and oldest first, then the subject.
-			let blobs = ancestors.iter().map(|a| (a.subject, true)).chain([(subject, false)]);
-			let result = fetch_blobs(env, blobs).and_then(|fetched| {
-				run(env, &check_hash, CheckMode::Attest, &fetched, &params, &[], check_gas)
-			});
-			if let Err(rejection) = result {
-				return Verified::Rejected(rejection);
-			}
-			Verified::Attest { attester, nonce, claim }
-		},
-	}
+		Op::Attest {
+			attester,
+			nonce,
+			check_hash,
+			params,
+			subjects,
+			claims,
+			trusted,
+			witness,
+			check_gas,
+			signature,
+		} => refine_attest(
+			env, service_id, attester, nonce, check_hash, params, subjects, claims, trusted, witness,
+			check_gas, signature,
+		),
+	};
+	verified.unwrap_or_else(Verified::Rejected)
 }
 
 /// Reads through to `state`, seeing this transaction's own writes.
@@ -305,6 +381,11 @@ impl<S: State> Tx<'_, S> {
 		self.get(&StorageKey::Attestation(*id)).ok_or("no such attestation")
 	}
 
+	fn subject_list(&self, list: &Preimage) -> Result<SubjectList> {
+		let data = self.state.lookup(&list.hash).ok_or("subject list unavailable")?;
+		witness_types::decode_subject_list(&data).ok_or("bad subject list")
+	}
+
 	/// Record a use of preimage `blob`, soliciting it if nothing used it yet.
 	fn acquire(&mut self, blob: Preimage) {
 		let key = StorageKey::PreimageRefs(blob.hash);
@@ -341,7 +422,7 @@ fn preimages(terms: &BountyTerms) -> impl Iterator<Item = Preimage> + '_ {
 	let check = Preimage { hash: terms.check_hash, len: terms.check_len };
 	let plain = terms.blobs.iter().filter_map(|b| match b {
 		BlobRef::Blob(p) => Some(*p),
-		BlobRef::Attested(_) => None,
+		BlobRef::Attested { .. } => None,
 	});
 	core::iter::once(check).chain(plain)
 }
@@ -373,26 +454,23 @@ pub fn accumulate(state: &impl State, verified: Verified, now: Slot) -> Result<E
 			{
 				return Err("check too large");
 			}
-			// Attested blobs come first, as one chain from its root by this bounty's check.
+			// Attested blobs must be subjects of this bounty's check's attestations, all with
+			// one set of attest params, as a reveal will only trust those.
 			let mut blobs_len = 0u64;
-			let mut tip = None;
-			let mut plain_seen = false;
+			let mut params_hash = None;
 			for blob in &terms.blobs {
 				blobs_len += match blob {
-					BlobRef::Blob(p) => {
-						plain_seen = true;
-						p.len
-					},
-					BlobRef::Attested(id) => {
-						let attestation = tx.attestation(id)?;
-						if attestation.claim.check_hash != terms.check_hash {
+					BlobRef::Blob(p) => p.len,
+					BlobRef::Attested { attestation, entry } => {
+						let claim = tx.attestation(attestation)?.claim;
+						if claim.check_hash != terms.check_hash {
 							return Err("attested by another check");
 						}
-						if plain_seen || attestation.claim.parent != tip {
-							return Err("attested blobs are not one chain");
+						if *params_hash.get_or_insert(claim.params_hash) != claim.params_hash {
+							return Err("attested with other params");
 						}
-						tip = Some(*id);
-						attestation.claim.subject.len
+						let list = tx.subject_list(&claim.subjects)?;
+						list.get(*entry as usize).ok_or("no such subject")?.len
 					},
 				} as u64;
 			}
@@ -433,17 +511,17 @@ pub fn accumulate(state: &impl State, verified: Verified, now: Slot) -> Result<E
 			check_hash,
 			params_hash,
 			blobs_hash,
-			extra_tip,
+			attestations,
 			check_gas,
 			commitment,
 			hunter,
 			witness_hash,
 		} => {
 			let mut bounty = tx.bounty(bounty_id)?;
-			// Refine checked the extra layers continue the bounty's chain; their ids bind the
-			// claims, so this makes sure they were really attested.
-			if let Some(tip) = extra_tip {
-				tx.attestation(&tip)?;
+			// Refine ran the check on the subjects of the claims the reveal supplied. Their ids
+			// bind the claims, so this makes sure they were really attested.
+			for id in &attestations {
+				tx.attestation(id)?;
 			}
 			if bounty.terms.check_hash != check_hash ||
 				bounty.terms.check_gas != check_gas ||
@@ -522,27 +600,37 @@ pub fn accumulate(state: &impl State, verified: Verified, now: Slot) -> Result<E
 			}
 			tx.remove(&key);
 		},
-		Verified::Pin { owner, nonce, blob } => {
-			if blob.len > MAX_BLOBS_LEN.max(MAX_CHECK_LEN) {
+		Verified::Pin { owner, nonce, blobs } => {
+			// A subject list and its subjects.
+			if blobs.len() > MAX_BLOBS as usize + 1 {
+				return Err("too many blobs");
+			}
+			if blobs.iter().any(|b| b.len > MAX_BLOBS_LEN.max(MAX_CHECK_LEN)) {
 				return Err("blob too large");
 			}
-			tx.charge(&owner, nonce, PIN_DEPOSIT)?;
-			tx.acquire(blob);
+			tx.charge(&owner, nonce, PIN_DEPOSIT * blobs.len() as Points)?;
+			for blob in blobs {
+				tx.acquire(blob);
+			}
 		},
-		Verified::Attest { attester, nonce, claim } => {
+		Verified::Attest { attester, nonce, claim, parents } => {
 			let id = claim.id();
 			if tx.attestation(&id).is_ok() {
 				return Err("already attested");
 			}
-			// Refine ran the check on the chain's claimed subjects. The parent's id binds the
-			// whole chain, and an attestation is only recorded once its own parent was, so this
-			// makes sure all of it was really attested.
-			if let Some(parent) = &claim.parent {
+			// Refine ran the check trusting the parents' claimed subjects. Their ids bind the
+			// claims, and an attestation is only recorded once its parents were, so this makes
+			// sure everything it rests on was really attested.
+			for parent in &parents {
 				tx.attestation(parent).map_err(|_| "no such parent attestation")?;
 			}
 			tx.charge(&attester, nonce, ATTEST_DEPOSIT)?;
 			// Attestations are kept for good, so their subjects are too.
-			tx.acquire(claim.subject);
+			let list = tx.subject_list(&claim.subjects)?;
+			tx.acquire(claim.subjects);
+			for subject in list {
+				tx.acquire(subject);
+			}
 			tx.set(&StorageKey::Attestation(id), &Attestation { claim, slot: now, attester });
 		},
 	}
