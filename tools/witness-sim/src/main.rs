@@ -9,6 +9,9 @@
 //!     witness-sim inspect slot                           the current slot (and pass one)
 //!     witness-sim inspect storage --raw SERVICE KEY      a storage value, hex
 //!     witness-sim inspect final service SERVICE          whether the service exists
+//!     witness-sim check BLOB ARGS GAS                    run a check blob on arguments (a file,
+//!                                                        see `witness_types::check_args`) with
+//!                                                        up to GAS, and print the gas it used
 //!
 //! State lives in `$WITNESS_SIM_DIR` (default `.witness-sim`), and the log the testnet's nodes
 //! would print (`refine: ...`, `check used N gas of L`) in its `log`.
@@ -272,6 +275,18 @@ fn main() -> ExitCode {
 			let Some(value) = value else { return fail("no such key") };
 			println!("0x{}", hex(&value));
 			return ExitCode::SUCCESS;
+		},
+		["check", blob, args, gas] => {
+			let (Ok(blob), Ok(args), Ok(gas)) = (std::fs::read(blob), std::fs::read(args), gas.parse::<Gas>()) else {
+				return fail("check BLOB ARGS GAS: cannot read BLOB or ARGS, or GAS is not a number");
+			};
+			return match run_check(&blob, &args, gas) {
+				Ok((result, used)) => {
+					println!("{result:?}: used {used} gas of {gas}");
+					ExitCode::SUCCESS
+				},
+				Err(rejection) => fail(&format!("{rejection:?}")),
+			};
 		},
 		["inspect", "final", "service", _service] => {
 			return if sim.state.service { ExitCode::SUCCESS } else { fail("no such service") };
