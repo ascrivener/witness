@@ -6,6 +6,10 @@
 # Starts a testnet (unless JAM_RPC is set, in which case it uses that one), builds and deploys
 # the service and the sample checks.
 #
+# With WITNESS_SIM=1 it runs against tools/witness-sim instead: the same ops through the same
+# rules, with checks in PolkaVM, natively, in seconds. No PolkaJam needed. The testnet stays the
+# judge of what fits a refine and of the node's behavior.
+#
 # --quick (about 6 minutes, a third of it starting the testnet) then mints, creates two bounties,
 # provides their check blobs and the dictionary blob, commits, and reveals a wrong and a right
 # witness on each. Then it attests a batch of two word volumes and a third on one of them,
@@ -35,6 +39,8 @@ esac
 cd "$(dirname "$0")/.."
 JAMT=${POLKAJAM_DIR:+$POLKAJAM_DIR/}jamt
 TESTNET=${POLKAJAM_DIR:+$POLKAJAM_DIR/}polkajam-testnet
+# Seconds between polls of the chain.
+POLL=2
 W=./target/debug/witness
 TMP=$(mktemp -d)
 LOG=$TMP/testnet.log
@@ -60,7 +66,7 @@ step() { printf '\n== %s\n' "$*"; }
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 
 slot() { "$JAMT" inspect slot; }
-wait_slot() { while [ "$(slot)" -lt "$1" ]; do sleep 2; done; }
+wait_slot() { while [ "$(slot)" -lt "$1" ]; do sleep $POLL; done; }
 
 # Raw storage value for `witness key` flags, or empty.
 storage() {
@@ -83,14 +89,14 @@ expect() {
 	for _ in $(seq 1 40); do
 		out=$(show "$@")
 		if grep -qE "$pattern" <<<"$out"; then echo "ok: $what"; return; fi
-		sleep 3
+		sleep $POLL
 	done
 	fail "$what: wanted /$pattern/, got: $out"
 }
 
 # Something that should not happen: give it time to (wrongly) happen, then check.
 expect_still() {
-	sleep 18
+	sleep $((POLL * 9))
 	expect "$@"
 }
 
@@ -102,7 +108,13 @@ commitment_of() { $W commit "$@" 2>&1 >/dev/null | awk '{print $2}'; }
 
 window_end() { show bounty --bounty "$1" | sed -nE 's/.*window_end: ([0-9]+).*/\1/p'; }
 
-if [ -z "${JAM_RPC:-}" ]; then
+if [ -n "${WITNESS_SIM:-}" ]; then
+	step "using witness-sim (state: $TMP/sim)"
+	cargo build -q -p witness-sim
+	JAMT=$PWD/target/debug/witness-sim POLL=0 JAM_RPC=sim
+	export WITNESS_SIM_DIR=$TMP/sim
+	LOG=$WITNESS_SIM_DIR/log
+elif [ -z "${JAM_RPC:-}" ]; then
 	step "starting testnet (log: $LOG)"
 	"$TESTNET" >"$LOG" 2>&1 &
 	TESTNET_PID=$!
@@ -189,12 +201,12 @@ reveal_dictionary() {
 step "deploying"
 before=$("$JAMT" list | wc -l)
 "$JAMT" create-service out/witness-service.jam 10000000000 >/dev/null
-for _ in $(seq 1 40); do [ "$("$JAMT" list | wc -l)" -gt "$before" ] && break; sleep 3; done
+for _ in $(seq 1 40); do [ "$("$JAMT" list | wc -l)" -gt "$before" ] && break; sleep $POLL; done
 SVC=$((16#$("$JAMT" list | tail -1 | cut -f1)))
 echo "service $SVC"
 # Work packages anchored before the service existed cannot see its code, and anchors trail the
 # best block, so wait until the service is in the finalized state, plus a margin.
-for _ in $(seq 1 40); do "$JAMT" inspect final service "$SVC" >/dev/null 2>&1 && break; sleep 3; done
+for _ in $(seq 1 40); do "$JAMT" inspect final service "$SVC" >/dev/null 2>&1 && break; sleep $POLL; done
 wait_slot $(( $(slot) + 3 ))
 
 if [ -n "$QUICK" ]; then
