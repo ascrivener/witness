@@ -43,9 +43,6 @@ impl witness_rules::State for Host {
 	fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
 		accumulate::get_storage(key)
 	}
-	fn lookup(&self, hash: &Hash) -> Option<Vec<u8>> {
-		accumulate::lookup(hash)
-	}
 }
 
 impl jam_pvm_common::Service for Service {
@@ -79,6 +76,12 @@ impl jam_pvm_common::Service for Service {
 }
 
 fn on_work_item(record: WorkItemRecord, now: Slot) {
+	let start = accumulate::gas();
+	on_work_item_inner(record, now);
+	info!(target = "witness", "accumulate used {} gas", start - accumulate::gas());
+}
+
+fn on_work_item_inner(record: WorkItemRecord, now: Slot) {
 	let Ok(output) = record.result else {
 		info!(target = "witness", "refine failed for item in {}", record.package);
 		return;

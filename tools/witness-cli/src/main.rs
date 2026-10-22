@@ -8,7 +8,7 @@ use ed25519_dalek::{Signer, SigningKey};
 use std::{collections::HashMap, process::ExitCode};
 use witness_types::{
 	Account, AccountId, Attestation, AttestationClaim, AttestationId, BlobRef, Bounty, BountyTerms,
-	CommitRecord, Hash, MIN_CLAIM_WINDOW, Op, Preimage, StorageKey, SubjectList, TrustedRef, Verified,
+	Bundle, CommitRecord, Hash, MIN_CLAIM_WINDOW, Op, Preimage, StorageKey, TrustedRef, Verified,
 	blake2b256,
 };
 
@@ -18,8 +18,8 @@ usage: witness <command> [--flag value ...]
   account   --seed S
   hash      --check FILE          the preimage hash of FILE, a check or a blob
   mint      --to S --amount N
-  list      --subjects PATHS --out LIST
-            writes a subject list of the files PATHS to LIST, and prints its hash
+  bundle    --subjects PATHS --out BUNDLE
+            writes a bundle of the files PATHS to BUNDLE, and prints its hash
   create    --service ID --maker S --nonce N --check FILE PARAMS [--blobs BLOBS] --reward N
             --check-gas G --expiry SLOT [--claim-window SLOTS]
   commit    --service ID --bounty ID --hunter S [--committer S] --nonce N --salt HEX WITNESS
@@ -30,9 +30,9 @@ usage: witness <command> [--flag value ...]
   reclaim   --service ID --bounty ID --maker S --nonce N
   release   --bounty ID --commitment HEX
   pin       --service ID --owner S --nonce N --blobs PATHS
-  attest    --service ID --attester S --nonce N --check FILE [PARAMS] --subjects LIST
+  attest    --service ID --attester S --nonce N --check FILE [PARAMS] --subjects BUNDLE
             [--trust REFS] [WITNESS] --check-gas G --claim-out CLAIM
-            attests every subject in LIST, trusting REFS, and writes the claim to CLAIM, for
+            attests every subject in BUNDLE, trusting REFS, and writes the claim to CLAIM, for
             citing the attestation later
   key       (--account S | --bounty ID [--commitment HEX] | --refs HASH | --attestation CLAIM
             | --next)
@@ -43,7 +43,7 @@ usage: witness <command> [--flag value ...]
 PARAMS:  --params HEX | --params-str STRING | --params-u128 N | --params-blake2b STRING (its hash)
 WITNESS: --witness HEX | --witness-str STRING | --witness-u64 N | --witness-file FILE
 PATHS:   comma-separated file paths
-BLOBS:   comma-separated, in order: CLAIM:ENTRY for entry ENTRY of an attestation's subjects, or
+BLOBS:   comma-separated, in order: CLAIM:ENTRY for entry ENTRY of an attestation's bundle, or
          a path of a plain blob
 REFS:    comma-separated CLAIM:ENTRY, for entry ENTRY (from 0) of the attestation whose claim
          `attest --claim-out` wrote to CLAIM
@@ -215,9 +215,10 @@ fn run(command: &str, f: &Flags) -> Result<(), String> {
 			println!("0x{}", to_hex(&f.check()?.0));
 			return Ok(());
 		},
-		"list" => {
-			let list: SubjectList = f.files("subjects")?;
-			let data = list.encode();
+		"bundle" => {
+			let paths = f.list("subjects")?;
+			let bundle: Bundle = paths.into_iter().map(read).collect::<Result<_, _>>()?;
+			let data = bundle.encode();
 			write(f.str("out")?, &data)?;
 			println!("0x{}", to_hex(&blake2b256(&data)));
 			return Ok(());

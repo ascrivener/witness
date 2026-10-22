@@ -47,8 +47,8 @@ printf '%-16s' apple banana cherry >"$VOL1"
 printf '%-16s' grape lemon mango >"$VOL2"
 printf '%-16s' peach plum >"$VOL3"
 printf '%-16s' zebra yak >"$BADVOL" # not sorted
-# Subject lists: volumes 1 and 2 are attested as one batch, then volume 3, then the bad one.
-LIST_A=$TMP/batch-a.list LIST_B=$TMP/batch-b.list BADLIST=$TMP/bad.list
+# Bundles: volumes 1 and 2 are attested as one batch, then volume 3, then the bad one.
+BUNDLE_A=$TMP/batch-a.bundle BUNDLE_B=$TMP/batch-b.bundle BAD_BUNDLE=$TMP/bad.bundle
 CLAIM_A=$TMP/batch-a.claim CLAIM_B=$TMP/batch-b.claim BADCLAIM=$TMP/bad.claim
 
 N=9903520302753827148829556741 # (2^61 - 1) * 4294967291
@@ -135,33 +135,33 @@ create_dictionary_bounty() {
 	"$JAMT" provide "$SVC" "$DICT" >/dev/null
 }
 
-# Pat pins the sorted-words check, the volumes and subject lists in one go. Pat attests volumes 1
+# Pat pins the sorted-words check and the bundles of volumes in one go. Pat attests volumes 1
 # and 2 as a batch, then volume 3 trusting volume 2, and fails to attest the unsorted volume.
 # Then bounty $1 (Alice, nonce $2) cites volumes 1 and 3, and hunter $3 (nonce $4) reveals a
 # wrong witness and a right one that also trusts volume 2.
 attestations() {
 	local bounty=$1 alice_nonce=$2 hunter=$3 hunter_nonce=$4
 	step "attesting word volumes"
-	$W list --subjects "$VOL1,$VOL2" --out "$LIST_A" >/dev/null
-	$W list --subjects "$VOL3" --out "$LIST_B" >/dev/null
-	$W list --subjects "$BADVOL" --out "$BADLIST" >/dev/null
-	local files=($WORDS_CHECK "$VOL1" "$VOL2" "$VOL3" "$BADVOL" "$LIST_A" "$LIST_B" "$BADLIST")
+	$W bundle --subjects "$VOL1,$VOL2" --out "$BUNDLE_A" >/dev/null
+	$W bundle --subjects "$VOL3" --out "$BUNDLE_B" >/dev/null
+	$W bundle --subjects "$BADVOL" --out "$BAD_BUNDLE" >/dev/null
+	local files=($WORDS_CHECK "$BUNDLE_A" "$BUNDLE_B" "$BAD_BUNDLE")
 	item "$($W mint --to pat --amount 200)"
 	expect "pat has 200" 'balance: 200, nonce: 0' account --account pat
 	item "$($W pin --service "$SVC" --owner pat --nonce 0 --blobs "$(IFS=,; echo "${files[*]}")")"
-	expect "pat paid for eight pins" 'balance: 120, nonce: 1' account --account pat
+	expect "pat paid for four pins" 'balance: 160, nonce: 1' account --account pat
 	for f in "${files[@]}"; do "$JAMT" provide "$SVC" "$f" >/dev/null; done
 	wait_slot $(( $(slot) + 2 ))
-	item "$($W attest --service "$SVC" --attester pat --nonce 1 --check $WORDS_CHECK --subjects "$LIST_A" \
+	item "$($W attest --service "$SVC" --attester pat --nonce 1 --check $WORDS_CHECK --subjects "$BUNDLE_A" \
 		--check-gas $GAS --claim-out "$CLAIM_A" 2>/dev/null)"
 	expect "volumes 1 and 2 attested" 'Attestation \{ claim' attestation --attestation "$CLAIM_A"
-	item "$($W attest --service "$SVC" --attester pat --nonce 2 --check $WORDS_CHECK --subjects "$LIST_B" \
+	item "$($W attest --service "$SVC" --attester pat --nonce 2 --check $WORDS_CHECK --subjects "$BUNDLE_B" \
 		--trust "$CLAIM_A:1" --check-gas $GAS --claim-out "$CLAIM_B" 2>/dev/null)"
 	expect "volume 3 attested after volume 2" 'Attestation \{ claim' attestation --attestation "$CLAIM_B"
-	item "$($W attest --service "$SVC" --attester pat --nonce 3 --check $WORDS_CHECK --subjects "$BADLIST" \
+	item "$($W attest --service "$SVC" --attester pat --nonce 3 --check $WORDS_CHECK --subjects "$BAD_BUNDLE" \
 		--trust "$CLAIM_A:1" --check-gas $GAS --claim-out "$BADCLAIM" 2>/dev/null)"
 	expect_still "unsorted volume not attested" '^none$' attestation --attestation "$BADCLAIM"
-	expect "pat paid for two attestations" 'balance: 100, nonce: 3' account --account pat
+	expect "pat paid for two attestations" 'balance: 140, nonce: 3' account --account pat
 
 	step "a bounty citing attested volumes"
 	local blobs="$CLAIM_A:0,$CLAIM_B:0"

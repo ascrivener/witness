@@ -13,19 +13,20 @@ Prototype: rewards are points from a faucet (`Mint`), not tokens.
 | `Mint` | — | credit points (faucet, at most `MAX_MINT`) |
 | `CreateBounty` | verify the maker's Ed25519 signature | check nonce, balance and limits, and that cited attestations exist, are by the bounty's check with one set of params, and have the cited entries; debit the reward; solicit the check blob and the bounty's plain blobs, except those already held; store the bounty |
 | `Commit` | verify the committer's signature | the bounty takes commitments; debit `COMMIT_DEPOSIT`; record the slot of `blake2b(bounty_id, x, hunter, salt)` |
-| `Reveal` | resolve the trusted subjects the reveal cites (the bounty's, and any more it adds) through their attestations' subject lists, and look them up with the check blob and the plain blobs; run the check on them (attested ones marked trusted), `params` and `x` in an inner PVM with the bounty's `check_gas` | the terms match, the cited attestations were recorded, and the commitment is older than this slot and made before expiry. The first valid reveal opens the claim window, and later ones replace the leader if their commitment is earlier. Refund the deposit |
+| `Reveal` | resolve the trusted subjects the reveal cites (the bounty's, and any more it adds) from their attestations' bundles, and look up the check blob and the plain blobs; run the check on them (attested ones marked trusted), `params` and `x` in an inner PVM with the bounty's `check_gas` | the terms match, the cited attestations were recorded, and the commitment is older than this slot and made before expiry. The first valid reveal opens the claim window, and later ones replace the leader if their commitment is earlier. Refund the deposit |
 | `Finalize` | — | once the claim window has closed, pay the leader and release the bounty's blobs |
 | `Reclaim` | verify the maker's signature | if no one revealed by `expiry + REVEAL_GRACE`, refund the maker and release the bounty's blobs |
 | `Release` | — | delete a commitment (named by bounty and hash) that can no longer be revealed; its deposit stays forfeit |
 | `Pin` | verify the owner's signature | debit `PIN_DEPOSIT` per preimage; hold them for good (solicit each unless already held) |
-| `Attest` | verify the attester's signature; resolve the trusted subjects it cites; look up the check, them, the subject list and its subjects; run the check in attest mode with the attester's witness | the parents were recorded and this wasn't yet; debit `ATTEST_DEPOSIT`; hold the subject list and its subjects for good; record the attestation |
+| `Attest` | verify the attester's signature; resolve the trusted subjects it cites; look up the check and the bundle; run the check in attest mode with the attester's witness | the parents were recorded and this wasn't yet; debit `ATTEST_DEPOSIT`; hold the bundle for good; record the attestation |
 
 ### Attestations
 
 An attestation records that a check, run once in attest mode with some params, accepted every
 subject in a list, given trusted subjects of earlier attestations: "check C verified B₁…Bₙ, given
-subjects of P₁…Pₖ". The list is a *subject list*, a preimage of `(hash, len)` entries. The
-attestation's id hashes the check, the params hash, the subject list and `parents_root`, the hash
+subjects of P₁…Pₖ". The subjects come in a *bundle*, one preimage holding them all (a
+`Vec<Vec<u8>>`); a subject's hash is that of its own bytes. The attestation's id hashes the
+check, the params hash, the bundle and `parents_root`, the hash
 of its parents' ids (sorted and deduplicated). Later work can then rely on any one of B₁…Bₙ
 without verifying it again:
 
@@ -33,7 +34,7 @@ without verifying it again:
   and they of others. A library is attested in batches, each batch trusting the subjects it
   uses, and independent batches in parallel.
 - **Bounties cite subjects.** A bounty's blobs can be `Attested { attestation, entry }`, entry
-  `entry` of an attestation's subject list, mixed with plain blobs. Its check receives the
+  `entry` of an attestation's bundle, mixed with plain blobs. Its check receives the
   attested subjects marked trusted, and can skip whatever its attest mode verified. For a Lean
   checker that means type-checking the statement's environment once, instead of on every reveal.
 - **Reveals can trust more.** A reveal must trust its bounty's attested subjects, and may add
@@ -50,12 +51,18 @@ check's attestations. So a trusted blob always means "my own attest mode accepte
 attester can't slip in a subject verified by a lenient check, or by this check with lenient params.
 
 Ops cite attestations compactly. Refine can't read state, so `Attest` and `Reveal` carry the
-claims they rely on (check, params hash, subject list, parents root), each once, and refer to
-trusted subjects as `TrustedRef { claim, entry }`. Refine looks up each claim's subject list, then
-the entries. Accumulate makes sure the claims were really recorded, by id.
+claims they rely on (check, params hash, bundle, parents root), each once, and refer to trusted
+subjects as `TrustedRef { claim, entry }`. Refine looks up each claim's bundle and takes the
+entries. Accumulate makes sure the claims were really recorded, by id.
 
-Subjects and subject lists must be on chain before refine can look them up, so they're pinned
-first (`Pin`, many at a time), and the check blob too unless a bounty already holds it. The
+Bundles exist for accumulate's sake. JAM gives accumulate 10M gas per work report, in the full
+spec as in the tiny one, and holding a preimage costs about 24k of it, so an attestation that
+held each subject as its own preimage could hold only a few hundred. A bundle is one preimage,
+so accumulating an attestation costs the same however many subjects it has. Refine, with 5×10⁹
+gas, does the per-subject work: slicing the bundle and hashing each subject.
+
+A bundle must be on chain before refine can look it up, so it's pinned first (`Pin`, up to
+`MAX_PINS` at a time), and the check blob too unless a bounty already holds it. The
 attester's witness is the evidence (a batch's proofs, say) and is not part of the claim. Pins and
 attestations are permanent for now, and so are the preimages they hold. See
 [docs/design/attestation-dag.md](docs/design/attestation-dag.md).
@@ -250,15 +257,15 @@ printf 'open\nsesame\n' > words.txt
 jamt item $SVC $($W create --service $SVC --maker alice --nonce 1 --check out/dictionary-check.jam --params 0x00 --blobs words.txt --reward 100 --check-gas 10000000 --expiry $(( $(jamt inspect slot) + 100 )))
 jamt provide $SVC out/dictionary-check.jam
 jamt provide $SVC words.txt
-# attest a list of blobs (pinned and provided first, with the list and the check), then cite
-# its entries in a bounty
+# attest a bundle of blobs (pinned and provided first, with the check), then cite its entries
+# in a bounty
 printf '%-16s' apple banana cherry > volume1.bin
 printf '%-16s' grape lemon > volume2.bin
-$W list --subjects volume1.bin,volume2.bin --out batch.list
+$W bundle --subjects volume1.bin,volume2.bin --out batch.bundle
 jamt item $SVC $($W mint --to pat --amount 100)
-jamt item $SVC $($W pin --service $SVC --owner pat --nonce 0 --blobs out/sorted-words-check.jam,volume1.bin,volume2.bin,batch.list)
-for f in out/sorted-words-check.jam volume1.bin volume2.bin batch.list; do jamt provide $SVC $f; done
-jamt item $SVC $($W attest --service $SVC --attester pat --nonce 1 --check out/sorted-words-check.jam --subjects batch.list --check-gas 10000000 --claim-out batch.claim)
+jamt item $SVC $($W pin --service $SVC --owner pat --nonce 0 --blobs out/sorted-words-check.jam,batch.bundle)
+for f in out/sorted-words-check.jam batch.bundle; do jamt provide $SVC $f; done
+jamt item $SVC $($W attest --service $SVC --attester pat --nonce 1 --check out/sorted-words-check.jam --subjects batch.bundle --check-gas 10000000 --claim-out batch.claim)
 # a later attestation trusts subjects of earlier ones: --trust batch.claim:1 (entry 1, volume 2)
 jamt item $SVC $($W create --service $SVC --maker alice --nonce 2 --check out/sorted-words-check.jam --params 0x00 --blobs batch.claim:0,batch.claim:1 --reward 100 --check-gas 10000000 --expiry $(( $(jamt inspect slot) + 100 )))
 # after the claim window (30 slots by default)

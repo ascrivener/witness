@@ -17,10 +17,11 @@
 //!
 //! Attestations let checks reuse verification across refines (see docs/design/attestation-dag.md):
 //! - `Pin` holds preimages for good, so refine can look them up.
-//! - `Attest` runs a check in attest mode on a list of subjects (a preimage listing them),
+//! - `Attest` runs a check in attest mode on a bundle of subjects (one preimage holding them all),
 //!   trusting subjects of earlier attestations it cites. If the check returns true, accumulate
-//!   records an [`Attestation`]: "check C, with these params, verified every subject in this list,
-//!   given those parents' subjects". Any subject in the list can then be trusted on its own.
+//!   records an [`Attestation`]: "check C, with these params, verified every subject in this
+//!   bundle, given those parents' subjects". Any subject in the bundle can then be trusted on its
+//!   own. A bundle is one preimage, so accumulate's work per attestation doesn't grow with it.
 //! - Bounties cite attested subjects, and reveals can cite more. The check receives them marked
 //!   trusted, and can skip re-verifying them.
 //! - Attestations form a DAG. Trust needs no context: an attestation is only recorded once its
@@ -81,7 +82,10 @@ pub const MAX_CLAIM_WINDOW: Slot = 14_400;
 pub const REVEAL_GRACE: Slot = 20;
 /// Points a commitment locks up; refunded on a valid reveal, forfeited otherwise.
 pub const COMMIT_DEPOSIT: Points = 10;
-/// Points a pin costs. Pins are permanent, so this is never refunded.
+/// Most preimages one `Pin` may hold. Accumulate pays about 24k gas per preimage it holds, of
+/// 10M per work report.
+pub const MAX_PINS: u32 = 64;
+/// Points a pin costs, per preimage. Pins are permanent, so this is never refunded.
 pub const PIN_DEPOSIT: Points = 10;
 /// Points an attestation costs. Attestations are permanent, so this is never refunded.
 pub const ATTEST_DEPOSIT: Points = 10;
@@ -107,27 +111,39 @@ pub struct Preimage {
 pub enum BlobRef {
 	/// A plain preimage: the check must verify whatever it relies on in it.
 	Blob(Preimage),
-	/// Entry `entry` of the subject list of an attestation by the bounty's own check, passed to
+	/// Entry `entry` of the bundle of an attestation by the bounty's own check, passed to
 	/// it as trusted.
 	Attested { attestation: AttestationId, entry: u32 },
 }
 
-/// A subject list: the preimages an attestation covers, encoded as a `Vec<Preimage>` and stored
-/// as a preimage itself.
-pub type SubjectList = Vec<Preimage>;
+/// A bundle: the subjects an attestation covers, encoded as a `Vec<Vec<u8>>` and stored as one
+/// preimage. A subject's hash is the Blake2b-256 of its own bytes.
+///
+/// Subjects are bundled rather than held as a preimage each because accumulate pays for every
+/// preimage it holds (about 24k gas each, of 10M per work report), so an attestation holding
+/// its subjects one by one could hold only a few hundred.
+pub type Bundle = Vec<Vec<u8>>;
 
-/// Longest encoding of a [`SubjectList`]: [`MAX_BLOBS`] entries and their length prefix.
-pub const MAX_SUBJECT_LIST_LEN: usize = 4 + 36 * MAX_BLOBS as usize;
+/// Largest bundle: [`MAX_BLOBS`] subjects of at most [`MAX_BLOBS_LEN`] bytes in all, and their
+/// length prefixes.
+pub const MAX_BUNDLE_LEN: u32 = MAX_BLOBS_LEN + 5 * (MAX_BLOBS + 1);
 
-/// Decode a subject list, which must be exactly one [`SubjectList`] of at most [`MAX_BLOBS`]
-/// entries.
-pub fn decode_subject_list(data: &[u8]) -> Option<SubjectList> {
-	if data.len() > MAX_SUBJECT_LIST_LEN {
+/// The subjects in an encoded [`Bundle`], without copying them; `None` unless `data` is exactly
+/// one bundle of at most [`MAX_BLOBS`] subjects.
+pub fn bundle_subjects(mut data: &[u8]) -> Option<Vec<&[u8]>> {
+	let input = &mut data;
+	let count = codec::Compact::<u32>::decode(input).ok()?.0;
+	if count > MAX_BLOBS {
 		return None;
 	}
-	let list = codec::DecodeAll::decode_all(&mut &data[..]).ok()?;
-	let list: SubjectList = list;
-	(list.len() <= MAX_BLOBS as usize).then_some(list)
+	let mut subjects = Vec::with_capacity(count as usize);
+	for _ in 0..count {
+		let len = codec::Compact::<u32>::decode(input).ok()?.0 as usize;
+		let (subject, rest) = input.split_at_checked(len)?;
+		subjects.push(subject);
+		*input = rest;
+	}
+	input.is_empty().then_some(subjects)
 }
 
 /// What an attestation says: check `check_hash`, run in attest mode with params hashing to
@@ -137,7 +153,7 @@ pub fn decode_subject_list(data: &[u8]) -> Option<SubjectList> {
 pub struct AttestationClaim {
 	pub check_hash: Hash,
 	pub params_hash: Hash,
-	/// A preimage holding the [`SubjectList`].
+	/// A preimage holding the [`Bundle`] of subjects.
 	pub subjects: Preimage,
 	/// See [`parents_root`]. Committing to the parents through a root keeps a claim four hashes
 	/// long however many parents it has, since ops carry claims.
@@ -161,7 +177,7 @@ pub fn parents_root(parents: &[AttestationId]) -> Hash {
 	blake2b256(&(b"witness/parents", ids).encode())
 }
 
-/// A trusted subject, as an op cites it: entry `entry` of the subject list of the op's claim
+/// A trusted subject, as an op cites it: entry `entry` of the bundle of the op's claim
 /// number `claim`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
 pub struct TrustedRef {
@@ -237,11 +253,11 @@ pub enum Op {
 	/// already forfeit.
 	Release { bounty_id: BountyId, commitment: Hash },
 	/// Hold `blobs` as preimages for good, paying [`PIN_DEPOSIT`] for each, so attestations can
-	/// use them: typically a subject list and its subjects.
+	/// use them: typically a check and bundles to attest.
 	Pin { owner: AccountId, nonce: u64, blobs: Vec<Preimage>, signature: Signature },
-	/// Attest that check `check_hash` accepts every subject in the list `subjects`, trusting the
-	/// subjects `trusted` cites, paying [`ATTEST_DEPOSIT`]. The check, the list and every subject
-	/// must already be held, by pins or bounties. Refine can't read state, so the attester
+	/// Attest that check `check_hash` accepts every subject in the bundle `subjects`, trusting
+	/// the subjects `trusted` cites, paying [`ATTEST_DEPOSIT`]. The check and the bundle must
+	/// already be held, by pins or bounties. Refine can't read state, so the attester
 	/// supplies the claims cited; accumulate checks they were recorded.
 	Attest {
 		attester: AccountId,
@@ -290,8 +306,8 @@ pub enum Rejection {
 	/// A trusted reference to a claim or entry that doesn't exist, a claim cited twice or that no
 	/// reference uses, or a reveal that doesn't trust its bounty's attested subjects.
 	BadTrustedRef,
-	/// A subject list that doesn't decode, or lists more than [`MAX_BLOBS`] subjects.
-	BadSubjectList,
+	/// A bundle that doesn't decode, or holds more than [`MAX_BLOBS`] subjects.
+	BadBundle,
 	/// The check blob is not a valid standard program, or needs more memory than allowed.
 	BadCheckBlob,
 	CheckFailed(CheckFailure),

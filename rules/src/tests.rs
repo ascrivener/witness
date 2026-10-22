@@ -1,7 +1,7 @@
 use super::*;
 use alloc::{collections::BTreeMap, vec};
 use ed25519_dalek::{Signer, SigningKey};
-use witness_types::{BountyTerms, CHECK_INTERFACE_VERSION, CheckFailure, check_args, commitment, parents_root};
+use witness_types::{BountyTerms, Bundle, CHECK_INTERFACE_VERSION, CheckFailure, check_args, commitment, parents_root};
 
 const SERVICE: u32 = 7;
 const CHECK: Hash = [0xc0; 32];
@@ -36,11 +36,12 @@ fn plain(i: usize) -> BlobRef {
 ///   start with `b"good"`, unless the witness is `b"no"`.
 struct Env {
 	blob_available: bool,
-	/// Subject lists, by hash.
-	lists: BTreeMap<Hash, Vec<u8>>,
+	/// Bundles, by hash.
+	bundles: BTreeMap<Hash, Vec<u8>>,
 }
 
 /// Split `args` (see `check_args`) into the mode, the blobs (trusted, data) and the witness.
+/// Subjects (trusted blobs, and every blob when attesting) must come with their real hashes.
 fn parse_args(args: &[u8]) -> (u8, Vec<(bool, Vec<u8>)>, Vec<u8>) {
 	let u32_at = |at: usize| u32::from_le_bytes(args[at..at + 4].try_into().unwrap()) as usize;
 	assert_eq!(args[0], CHECK_INTERFACE_VERSION);
@@ -48,9 +49,14 @@ fn parse_args(args: &[u8]) -> (u8, Vec<(bool, Vec<u8>)>, Vec<u8>) {
 	let blobs = (0..u32_at(2))
 		.map(|_| {
 			let trusted = args[at] == 1;
+			let hash = &args[at + 1..at + 33];
 			let len = u32_at(at + 33);
 			at += 37 + len;
-			(trusted, args[at - len..at].to_vec())
+			let data = &args[at - len..at];
+			if trusted || args[1] == CheckMode::Attest as u8 {
+				assert_eq!(hash, blake2b256(data), "a subject's hash");
+			}
+			(trusted, data.to_vec())
 		})
 		.collect();
 	(args[1], blobs, args[at + 4 + u32_at(at)..].to_vec())
@@ -61,8 +67,8 @@ impl RefineEnv for Env {
 		if *hash == CHECK || *hash == OTHER_CHECK {
 			return self.blob_available.then(|| BLOB.to_vec());
 		}
-		if let Some(list) = self.lists.get(hash) {
-			return Some(list.clone());
+		if let Some(bundle) = self.bundles.get(hash) {
+			return Some(bundle.clone());
 		}
 		EXTRA.iter().find(|(h, _)| h == hash).map(|(_, data)| data.to_vec())
 	}
@@ -85,7 +91,7 @@ impl RefineEnv for Env {
 	}
 }
 
-const ENV: Env = Env { blob_available: true, lists: BTreeMap::new() };
+const ENV: Env = Env { blob_available: true, bundles: BTreeMap::new() };
 
 impl Default for Env {
 	fn default() -> Self {
@@ -107,9 +113,6 @@ struct Chain {
 impl State for Chain {
 	fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
 		self.storage.get(key).cloned()
-	}
-	fn lookup(&self, hash: &Hash) -> Option<Vec<u8>> {
-		self.env.lookup(hash)
 	}
 }
 
@@ -142,7 +145,7 @@ impl Chain {
 		Ok(())
 	}
 
-	/// Refine `op`, with the subject lists made so far available.
+	/// Refine `op`, with the bundles made so far available.
 	fn refine(&self, op: Op) -> Verified {
 		refine(&self.env, SERVICE, op)
 	}
@@ -249,19 +252,20 @@ impl Chain {
 		self.submit(Op::Pin { owner: id(owner), nonce, blobs: blobs.to_vec(), signature })
 	}
 
-	/// Make a subject list of `subjects` available, and return it.
-	fn list(&mut self, subjects: &[Preimage]) -> Preimage {
-		self.raw_list(subjects.to_vec().encode())
+	/// Make a bundle of the data of `subjects` available, and return it.
+	fn bundle(&mut self, subjects: &[Preimage]) -> Preimage {
+		let bundle: Bundle = subjects.iter().map(|p| self.env.lookup(&p.hash).unwrap()).collect();
+		self.raw_bundle(bundle.encode())
 	}
 
-	/// Make `data` available as a subject list, whatever it holds.
-	fn raw_list(&mut self, data: Vec<u8>) -> Preimage {
-		let list = Preimage { hash: blake2b256(&data), len: data.len() as u32 };
-		self.env.lists.insert(list.hash, data);
-		list
+	/// Make `data` available as a bundle, whatever it holds.
+	fn raw_bundle(&mut self, data: Vec<u8>) -> Preimage {
+		let bundle = Preimage { hash: blake2b256(&data), len: data.len() as u32 };
+		self.env.bundles.insert(bundle.hash, data);
+		bundle
 	}
 
-	/// The op for `attester` to attest the subject list `subjects` with `check` and `params`,
+	/// The op for `attester` to attest the bundle `subjects` with `check` and `params`,
 	/// trusting `trusted` (claims and entries), and its claim.
 	fn attest_op(
 		&self,
@@ -303,17 +307,17 @@ impl Chain {
 		Ok(claim)
 	}
 
-	/// Carol attests a list of the extra blobs `subjects` with the bounty check and params
+	/// Carol attests a bundle of the extra blobs `subjects` with the bounty check and params
 	/// `b"batch"`, trusting `trusted`; returns the claim.
 	fn attest(&mut self, subjects: &[usize], trusted: &[(AttestationClaim, u32)]) -> Result<AttestationClaim> {
-		let list = self.list(&subjects.iter().map(|&i| extra(i)).collect::<Vec<_>>());
-		self.submit_attest(self.attest_op(CAROL, CHECK, b"batch", list, trusted))
+		let bundle = self.bundle(&subjects.iter().map(|&i| extra(i)).collect::<Vec<_>>());
+		self.submit_attest(self.attest_op(CAROL, CHECK, b"batch", bundle, trusted))
 	}
 
 	/// What refine makes of Carol attesting `subjects` with the bounty check, trusting `trusted`.
 	fn refine_attest(&mut self, subjects: &[usize], trusted: &[(AttestationClaim, u32)]) -> Verified {
-		let list = self.list(&subjects.iter().map(|&i| extra(i)).collect::<Vec<_>>());
-		self.refine(self.attest_op(CAROL, CHECK, b"batch", list, trusted).0)
+		let bundle = self.bundle(&subjects.iter().map(|&i| extra(i)).collect::<Vec<_>>());
+		self.refine(self.attest_op(CAROL, CHECK, b"batch", bundle, trusted).0)
 	}
 
 	fn refs(&self, h: Hash) -> Option<u32> {
@@ -780,9 +784,9 @@ fn pins_hold_preimages_for_good() {
 	assert_eq!(c.refs(CHECK), Some(1));
 	assert!(c.forgotten.is_empty());
 
-	let too_big = Preimage { hash: MISSING, len: MAX_BLOBS_LEN + 1 };
+	let too_big = Preimage { hash: MISSING, len: MAX_BUNDLE_LEN + 1 };
 	assert_eq!(c.pin(CAROL, &[extra(0), too_big]), Err("blob too large"));
-	assert_eq!(c.pin(CAROL, &vec![extra(0); MAX_BLOBS as usize + 2]), Err("too many blobs"));
+	assert_eq!(c.pin(CAROL, &vec![extra(0); MAX_PINS as usize + 1]), Err("too many blobs"));
 	assert_eq!(c.pin(CAROL, &vec![extra(0); 8]), Err("insufficient points"));
 	assert_eq!(c.account(CAROL), Account { balance: 100 - 3 * PIN_DEPOSIT, nonce: 2 });
 	let forged =
@@ -798,10 +802,9 @@ fn attesting_a_batch() {
 	let recorded: Attestation = c.get_typed(&StorageKey::Attestation(claim.id())).unwrap();
 	assert_eq!(recorded, Attestation { claim: claim.clone(), slot: c.now, attester: id(CAROL) });
 	assert_eq!(c.account(CAROL), Account { balance: 100 - ATTEST_DEPOSIT, nonce: 1 });
-	// The list and every subject in it are held for good.
+	// The bundle is held for good: one preimage, however many subjects.
 	assert_eq!(c.refs(claim.subjects.hash), Some(1));
-	assert_eq!(c.refs(EXTRA[GOOD1].0), Some(1));
-	assert_eq!(c.refs(EXTRA[GOOD2].0), Some(1));
+	assert_eq!(c.solicited, vec![CHECK, claim.subjects.hash]);
 
 	assert_eq!(c.attest(&[GOOD1, GOOD2], &[]), Err("already attested"));
 	assert_eq!(c.account(CAROL).balance, 100 - ATTEST_DEPOSIT, "nothing charged twice");
@@ -809,20 +812,22 @@ fn attesting_a_batch() {
 	let check_says_no = rejected(Rejection::CheckFailed(CheckFailure::False));
 	assert_eq!(c.refine_attest(&[GOOD1, BAD], &[]), check_says_no, "one bad subject spoils the batch");
 	assert_eq!(c.refine_attest(&[], &[]), check_says_no, "the mock wants subjects");
-	let missing_subject = c.list(&[extra(GOOD1), Preimage { hash: MISSING, len: 1 }]);
-	let op = c.attest_op(CAROL, CHECK, b"batch", missing_subject, &[]).0;
-	assert_eq!(c.refine(op), rejected(Rejection::BlobUnavailable));
 	let op = c.attest_op(CAROL, CHECK, b"batch", Preimage { hash: MISSING, len: 1 }, &[]).0;
-	assert_eq!(c.refine(op), rejected(Rejection::BlobUnavailable), "no such list");
-	for data in [vec![1, 2, 3], (vec![extra(GOOD1)], 0u8).encode(), vec![extra(GOOD1); MAX_BLOBS as usize + 1].encode()] {
-		let list = c.raw_list(data);
-		let op = c.attest_op(CAROL, CHECK, b"batch", list, &[]).0;
-		assert_eq!(c.refine(op), rejected(Rejection::BadSubjectList));
+	assert_eq!(c.refine(op), rejected(Rejection::BlobUnavailable), "no such bundle");
+	let good: Bundle = vec![b"good one".to_vec()];
+	for data in [vec![4, 2, 3], (good, 0u8).encode(), vec![Vec::<u8>::new(); MAX_BLOBS as usize + 1].encode()] {
+		let bundle = c.raw_bundle(data);
+		let op = c.attest_op(CAROL, CHECK, b"batch", bundle, &[]).0;
+		assert_eq!(c.refine(op), rejected(Rejection::BadBundle));
 	}
+	let big = vec![b"good".repeat(MAX_BLOBS_LEN as usize / 8 + 1); 2];
+	let bundle = c.raw_bundle(big.encode());
+	let op = c.attest_op(CAROL, CHECK, b"batch", bundle, &[]).0;
+	assert_eq!(c.refine(op), rejected(Rejection::BlobsTooLarge));
 
 	// The witness reaches the check.
-	let list = c.list(&[extra(GOOD1)]);
-	let (mut op, _) = c.attest_op(CAROL, CHECK, b"batch", list, &[]);
+	let bundle = c.bundle(&[extra(GOOD1)]);
+	let (mut op, _) = c.attest_op(CAROL, CHECK, b"batch", bundle, &[]);
 	let Op::Attest { witness, .. } = &mut op else { unreachable!() };
 	*witness = b"no".to_vec();
 	assert_eq!(c.refine(op.clone()), check_says_no);
@@ -832,7 +837,7 @@ fn attesting_a_batch() {
 	c.submit(op).unwrap();
 
 	// The signature covers the claim, so it can't be replayed for other subjects.
-	let other = c.list(&[extra(GOOD2)]);
+	let other = c.bundle(&[extra(GOOD2)]);
 	let (Op::Attest { signature, .. }, _) = c.attest_op(CAROL, CHECK, b"batch", other, &[]) else { unreachable!() };
 	let mut op = c.attest_op(CAROL, CHECK, b"batch", claim.subjects, &[]).0;
 	let Op::Attest { signature: s, .. } = &mut op else { unreachable!() };
@@ -854,7 +859,7 @@ fn attestations_form_a_dag() {
 
 	// A parent nobody attested: refine runs the check on its claimed subjects, and accumulate
 	// finds no such record.
-	let unattested = c.list(&[extra(BAD)]);
+	let unattested = c.bundle(&[extra(BAD)]);
 	let made_up = AttestationClaim {
 		check_hash: CHECK,
 		params_hash: blake2b256(b"batch"),
@@ -864,12 +869,12 @@ fn attestations_form_a_dag() {
 	assert_eq!(c.attest(&[GOOD2, GOOD1], &[(made_up, 0)]), Err("no such parent attestation"));
 
 	// A parent by another check is refused outright, recorded or not.
-	let list = c.list(&[extra(GOOD1)]);
-	let foreign = c.submit_attest(c.attest_op(CAROL, OTHER_CHECK, b"batch", list, &[])).unwrap();
+	let bundle = c.bundle(&[extra(GOOD1)]);
+	let foreign = c.submit_attest(c.attest_op(CAROL, OTHER_CHECK, b"batch", bundle, &[])).unwrap();
 	let foreign_attestation = Verified::Rejected(Rejection::ForeignAttestation);
 	assert_eq!(c.refine_attest(&[GOOD2], &[(foreign, 0)]), foreign_attestation);
 	// So is one attested with other params, which might have been more lenient.
-	let lenient = c.submit_attest(c.attest_op(CAROL, CHECK, b"lenient", list, &[])).unwrap();
+	let lenient = c.submit_attest(c.attest_op(CAROL, CHECK, b"lenient", bundle, &[])).unwrap();
 	assert_eq!(c.refine_attest(&[GOOD2], &[(lenient, 0)]), foreign_attestation);
 }
 
@@ -878,10 +883,10 @@ fn trusted_refs_must_be_exact() {
 	let mut c = setup();
 	let a = c.attest(&[GOOD1, GOOD2], &[]).unwrap();
 	let b = c.attest(&[GOOD2], &[]).unwrap();
-	let list = c.list(&[extra(GOOD1)]);
+	let bundle = c.bundle(&[extra(GOOD1)]);
 	let bad_ref = Verified::Rejected(Rejection::BadTrustedRef);
 	let with = |c: &Chain, claims: Vec<AttestationClaim>, trusted: Vec<TrustedRef>| {
-		let (mut op, _) = c.attest_op(CAROL, CHECK, b"batch", list, &[]);
+		let (mut op, _) = c.attest_op(CAROL, CHECK, b"batch", bundle, &[]);
 		let Op::Attest { claims: cs, trusted: ts, .. } = &mut op else { unreachable!() };
 		(*cs, *ts) = (claims, trusted);
 		// Signing over whatever parents the claims make.
@@ -889,7 +894,7 @@ fn trusted_refs_must_be_exact() {
 		let claim = AttestationClaim {
 			check_hash: CHECK,
 			params_hash: blake2b256(b"batch"),
-			subjects: list,
+			subjects: bundle,
 			parents_root: parents_root(&parents),
 		};
 		let msg = witness_types::attest_message(SERVICE, &id(CAROL), c.account(CAROL).nonce, &claim.id());
@@ -908,21 +913,20 @@ fn trusted_refs_must_be_exact() {
 }
 
 #[test]
-fn attested_subjects_outlive_the_bounties_that_held_them() {
-	let mut c = with_blobs();
-	let a = c.attest(&[0], &[]);
-	assert_eq!(a, Err("rejected in refine"), "the mock only attests good subjects");
+fn attested_bundles_outlive_the_bounties_that_held_them() {
+	let mut c = setup();
+	let bundle = c.bundle(&[extra(GOOD1)]);
 	let mut terms = c.terms();
-	terms.blobs = vec![plain(GOOD1)];
+	terms.blobs = vec![BlobRef::Blob(bundle)];
 	terms.reward = 100;
-	c.create(terms).unwrap(); // bounty 2
-	c.attest(&[GOOD1], &[]).unwrap();
-	assert_eq!(c.refs(EXTRA[GOOD1].0), Some(2));
-	let expiry = c.bounty(2).terms.expiry;
+	c.create(terms).unwrap(); // bounty 1
+	c.submit_attest(c.attest_op(CAROL, CHECK, b"batch", bundle, &[])).unwrap();
+	assert_eq!(c.refs(bundle.hash), Some(2));
+	let expiry = c.bounty(1).terms.expiry;
 	c.advance(expiry + REVEAL_GRACE - c.now);
-	c.reclaim(2).unwrap();
-	assert_eq!(c.refs(EXTRA[GOOD1].0), Some(1));
-	assert!(!c.forgotten.contains(&EXTRA[GOOD1].0));
+	c.reclaim(1).unwrap();
+	assert_eq!(c.refs(bundle.hash), Some(1));
+	assert!(!c.forgotten.contains(&bundle.hash));
 }
 
 /// Bounty 1 cites both subjects of a batch attested by its check.
@@ -940,7 +944,7 @@ fn with_attested_blobs() -> (Chain, AttestationClaim) {
 #[test]
 fn bounties_cite_attested_subjects_as_trusted() {
 	let (mut c, batch) = with_attested_blobs();
-	assert_eq!(c.refs(EXTRA[GOOD1].0), Some(1), "a citing bounty adds no hold");
+	assert_eq!(c.refs(batch.subjects.hash), Some(1), "a citing bounty adds no hold");
 	c.commit(1, BOB, b"trusted").unwrap();
 	c.advance(MIN_COMMIT_AGE);
 	c.reveal(1, BOB, b"trusted").unwrap();
@@ -973,11 +977,12 @@ fn bounties_cite_only_their_own_check_attestations() {
 	};
 	let a = |claim: &AttestationClaim, entry| BlobRef::Attested { attestation: claim.id(), entry };
 	assert_eq!(cite(&mut c, vec![BlobRef::Attested { attestation: [9; 32], entry: 0 }]), Err("no such attestation"));
-	assert_eq!(cite(&mut c, vec![a(&batch, 2)]), Err("no such subject"));
-	let list = c.list(&[extra(GOOD1)]);
-	let foreign = c.submit_attest(c.attest_op(CAROL, OTHER_CHECK, b"batch", list, &[])).unwrap();
+	// Accumulate doesn't read bundles, so an entry past the end only fails at reveal.
+	assert_eq!(cite(&mut c, vec![a(&batch, 2)]), Ok(())); // bounty 2
+	let bundle = c.bundle(&[extra(GOOD1)]);
+	let foreign = c.submit_attest(c.attest_op(CAROL, OTHER_CHECK, b"batch", bundle, &[])).unwrap();
 	assert_eq!(cite(&mut c, vec![a(&foreign, 0)]), Err("attested by another check"));
-	let lenient = c.submit_attest(c.attest_op(CAROL, CHECK, b"lenient", list, &[])).unwrap();
+	let lenient = c.submit_attest(c.attest_op(CAROL, CHECK, b"lenient", bundle, &[])).unwrap();
 	assert_eq!(cite(&mut c, vec![a(&batch, 0), a(&lenient, 0)]), Err("attested with other params"));
 	assert_eq!(cite(&mut c, vec![a(&lenient, 0)]), Ok(()), "any params, if only one set");
 	// Subjects can be cited in any order, and any of them alone.
@@ -986,7 +991,9 @@ fn bounties_cite_only_their_own_check_attestations() {
 
 	// At reveal, a claim by another check is refused in refine.
 	c.commit(1, BOB, b"trusted").unwrap();
+	c.commit(2, BOB, b"trusted").unwrap();
 	c.advance(MIN_COMMIT_AGE);
+	assert_eq!(c.refine(c.reveal_op(2, BOB, b"trusted", &[])), Verified::Rejected(Rejection::BadTrustedRef));
 	let op = c.reveal_op(1, BOB, b"trusted", &[(foreign, 0)]);
 	assert_eq!(c.refine(op), Verified::Rejected(Rejection::ForeignAttestation));
 	let op = c.reveal_op(1, BOB, b"trusted", &[(lenient, 0)]);
@@ -1030,8 +1037,8 @@ fn reveals_can_trust_more_subjects() {
 	// were trusted, which it isn't.
 	assert_eq!(c.reveal_with(1, BOB, b"trusted", &[(library.clone(), 0)]), Err("rejected in refine"));
 	// A claim that passes the check but was never recorded is refused in accumulate.
-	let list = c.list(&[extra(GOOD2)]);
-	let (_, unrecorded) = c.attest_op(CAROL, CHECK, b"batch", list, &[(library.clone(), 0)]);
+	let bundle = c.bundle(&[extra(GOOD2)]);
+	let (_, unrecorded) = c.attest_op(CAROL, CHECK, b"batch", bundle, &[(library.clone(), 0)]);
 	let witness = b"good onegood twoone";
 	assert_eq!(c.reveal_with(1, CAROL, witness, &[(unrecorded, 0)]), Err("no such attestation"));
 	c.reveal_with(1, CAROL, witness, &[(library, 0)]).unwrap();
@@ -1046,4 +1053,23 @@ fn parents_root_is_of_a_set() {
 	assert_eq!(parents_root(&[x, y]), parents_root(&[y, x, y]));
 	assert_ne!(parents_root(&[x]), parents_root(&[x, y]));
 	assert_ne!(parents_root(&[]), parents_root(&[x]));
+}
+
+#[test]
+fn blobs_too_large_in_all() {
+	let mut c = setup();
+	let half = c.raw_bundle(vec![0; MAX_BLOBS_LEN as usize / 2 + 1]);
+	let op = Op::Reveal {
+		bounty_id: 0,
+		check_hash: CHECK,
+		params: vec![],
+		blobs: vec![BlobRef::Blob(half), BlobRef::Blob(half)],
+		claims: vec![],
+		trusted: vec![],
+		check_gas: 1,
+		hunter: id(BOB),
+		salt: [0; 32],
+		witness: b"x".to_vec(),
+	};
+	assert_eq!(c.refine(op), Verified::Rejected(Rejection::BlobsTooLarge));
 }
