@@ -132,6 +132,10 @@ impl witness_rules::RefineEnv for Sim {
 		self.extrinsics.get(index).cloned()
 	}
 
+	fn extrinsic_hash(&self, index: usize) -> Option<witness_types::Hash> {
+		self.extrinsics.get(index).map(|x| witness_types::blake2b256(x))
+	}
+
 	fn run_check(&self, blob: &[u8], args: &[u8], gas: Gas) -> Result<(), Rejection> {
 		let (result, used) = run_check(blob, args, gas)?;
 		self.log(&format!("check used {used} gas of {gas}"));

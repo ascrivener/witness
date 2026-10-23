@@ -29,6 +29,8 @@ use witness_types::{
 pub trait RefineEnv {
 	/// Extrinsic `index` of the work item being refined.
 	fn extrinsic(&self, index: usize) -> Option<Vec<u8>>;
+	/// The Blake2b-256 hash of extrinsic `index`, as the work package commits to it.
+	fn extrinsic_hash(&self, index: usize) -> Option<Hash>;
 	/// Run check blob `blob` on `args` with at most `gas`; `Ok` iff it returned true.
 	fn run_check(&self, blob: &[u8], args: &[u8], gas: Gas) -> core::result::Result<(), Rejection>;
 }
@@ -84,6 +86,16 @@ impl<'e, E: RefineEnv> Extrinsics<'e, E> {
 		let (data, ranges) = self.fetch(at.extrinsic)?;
 		let range = ranges.get(at.index as usize).ok_or(Rejection::BadBlob)?;
 		Ok(data[range.clone()].to_vec())
+	}
+
+	/// Extrinsic `extrinsic`, whole, which must hash to `hash`. The work package commits to its
+	/// hash, so refine doesn't hash it again: a check blob is the biggest an op carries, and
+	/// hashing costs about 60 gas a byte in PVM.
+	fn whole(&self, extrinsic: u8, hash: &Hash) -> Refined<Vec<u8>> {
+		if self.env.extrinsic_hash(extrinsic as usize) != Some(*hash) {
+			return Err(Rejection::BadBlob);
+		}
+		self.env.extrinsic(extrinsic as usize).ok_or(Rejection::BadBlob)
 	}
 
 	/// The blob at `at`, which must hash to `hash`.
@@ -154,11 +166,11 @@ fn push_trusted(
 		let claim = claims.get(r.claim as usize).ok_or(Rejection::BadTrustedRef)?;
 		used[r.claim as usize] = true;
 		let subject = ex.blob(r.blob)?;
-		let leaf = merkle::leaf(&subject);
-		if !merkle::verify(&claim.subjects_root, claim.subject_count, r.entry, leaf, &r.path) {
+		let hash = blake2b256(&subject);
+		if !merkle::verify(&claim.subjects_root, claim.subject_count, r.entry, merkle::leaf(&hash), &r.path) {
 			return Err(Rejection::BadBlob);
 		}
-		blobs.push(blake2b256(&subject), true, subject)?;
+		blobs.push(hash, true, subject)?;
 	}
 	if used.contains(&false) {
 		return Err(Rejection::BadTrustedRef);
@@ -195,7 +207,7 @@ fn refine_reveal(
 	check_hash: Hash,
 	params: Vec<u8>,
 	blobs: Vec<BlobRef>,
-	check: BlobAt,
+	check: u8,
 	plain: Vec<BlobAt>,
 	claims: Vec<AttestationClaim>,
 	trusted: Vec<TrustedRef>,
@@ -238,7 +250,7 @@ fn refine_reveal(
 		}
 	}
 	let mut ex = Extrinsics::new(env);
-	let check = ex.blob_hashing_to(check, &check_hash)?;
+	let check = ex.whole(check, &check_hash)?;
 	// The trusted subjects, then the plain blobs.
 	let mut check_blobs = CheckBlobs::default();
 	push_trusted(&mut ex, &mut check_blobs, &claims, &trusted)?;
@@ -271,7 +283,7 @@ fn refine_attest(
 	attester: AccountId,
 	nonce: u64,
 	check_hash: Hash,
-	check: BlobAt,
+	check: u8,
 	params: Vec<u8>,
 	subjects: u8,
 	claims: Vec<AttestationClaim>,
@@ -296,7 +308,8 @@ fn refine_attest(
 	let parents = check_claims(&check_hash, Some(params_hash), &claims)?;
 	let mut ex = Extrinsics::new(env);
 	let subjects = ex.all(subjects)?;
-	let leaves: Vec<Hash> = subjects.iter().map(|s| merkle::leaf(s)).collect();
+	let hashes: Vec<Hash> = subjects.iter().map(|s| blake2b256(s)).collect();
+	let leaves: Vec<Hash> = hashes.iter().map(merkle::leaf).collect();
 	let claim = AttestationClaim {
 		check_hash,
 		params_hash,
@@ -308,12 +321,12 @@ fn refine_attest(
 	if !verify_signature(&attester, &message, &signature) {
 		return Err(Rejection::BadSignature);
 	}
-	let check = ex.blob_hashing_to(check, &check_hash)?;
+	let check = ex.whole(check, &check_hash)?;
 	// The trusted subjects, then the subjects to attest.
 	let mut check_blobs = CheckBlobs::default();
 	push_trusted(&mut ex, &mut check_blobs, &claims, &trusted)?;
-	for subject in subjects {
-		check_blobs.push(blake2b256(&subject), false, subject)?;
+	for (hash, subject) in hashes.into_iter().zip(subjects) {
+		check_blobs.push(hash, false, subject)?;
 	}
 	run(env, &check, CheckMode::Attest, &check_blobs, &params, &witness, check_gas)?;
 	Ok(Verified::Attest { attester, nonce, claim, parents })

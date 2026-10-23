@@ -17,6 +17,10 @@ const GROW_HEAP: u64 = 1;
 /// `witness_types::check_args`) with at most `gas`.
 ///
 /// Returns `Ok(())` only if the check halted with 1 in the first return register.
+/// Gas refine keeps for itself while a check runs: for the work it does after the check (logging
+/// and encoding its output) and between a check's host calls.
+const REFINE_RESERVE: Gas = 20_000_000;
+
 pub fn run_check(blob: &[u8], args: &[u8], gas: Gas) -> Result<(), Rejection> {
 	let program = StandardProgram::parse_jam_blob(blob).ok_or(Rejection::BadCheckBlob)?;
 	let layout = initialize(&program, args).ok_or(Rejection::BadCheckBlob)?;
@@ -50,9 +54,14 @@ pub fn run_check(blob: &[u8], args: &[u8], gas: Gas) -> Result<(), Rejection> {
 		let mut heap = Heap::new(&layout, MAX_CHECK_PAGES as u64);
 		let mut regs = layout.registers;
 		let failure = loop {
-			let (outcome, gas_left, new_regs) =
-				refine::invoke(vm, gas, regs).map_err(|_| Rejection::BadCheckBlob)?;
-			(gas, regs) = (gas_left, new_regs);
+			// The check's gas comes out of refine's own, and refine needs some left once the
+			// check returns, so it gets at most what refine can spare. A check that would need
+			// more runs out of gas, which only ever refuses an op.
+			let spare = (refine::gas() as i64).saturating_sub(REFINE_RESERVE as i64).max(0);
+			let lent = gas.min(spare);
+			let (outcome, lent_left, new_regs) =
+				refine::invoke(vm, lent, regs).map_err(|_| Rejection::BadCheckBlob)?;
+			(gas, regs) = (gas - (lent - lent_left), new_regs);
 			match outcome {
 				InvokeOutcome::Halt if regs[7] == 1 => return Ok(()),
 				InvokeOutcome::Halt => break CheckFailure::False,
