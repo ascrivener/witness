@@ -551,6 +551,14 @@ pub fn accumulate(state: &impl State, verified: Verified, now: Slot) -> Result<E
 			for id in &attestations {
 				tx.attestation(id)?;
 			}
+			// Refine made the claims share one set of params, and include the bounty's attested
+			// blobs, which share its attest params. A bounty citing none leaves the params free:
+			// a hunter could cite attestations made with params of their choosing (for Lean,
+			// pins under which anything is provable). So such a bounty takes no claims.
+			let cites = bounty.terms.blobs.iter().any(|b| matches!(b, BlobRef::Attested { .. }));
+			if !cites && !attestations.is_empty() {
+				return Err("the bounty cites no attestation");
+			}
 			if bounty.terms.check_hash != check_hash ||
 				bounty.terms.check_gas != check_gas ||
 				blake2b256(&bounty.terms.params) != params_hash ||

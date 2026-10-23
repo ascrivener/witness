@@ -1001,6 +1001,23 @@ fn bounties_cite_only_their_own_check_attestations() {
 }
 
 #[test]
+fn reveals_cite_attestations_only_if_their_bounty_does() {
+	// A bounty citing no attestation leaves a reveal's claims free to share any params. A hunter
+	// could cite attestations made with params of their choosing (for Lean, pins under which
+	// anything is provable), so such a bounty takes only reveals citing none.
+	let mut c = setup();
+	let bundle = c.bundle(&[extra(GOOD1)]);
+	let lenient = c.submit_attest(c.attest_op(CAROL, CHECK, b"lenient", bundle, &[])).unwrap();
+	c.commit(0, BOB, b"trusted").unwrap();
+	c.commit(0, CAROL, b"x").unwrap();
+	c.advance(MIN_COMMIT_AGE);
+	let op = c.reveal_op(0, BOB, b"trusted", &[(lenient, 0)]);
+	assert!(matches!(c.refine(op.clone()), Verified::Reveal { .. }), "refine can't tell");
+	assert_eq!(c.submit(op), Err("the bounty cites no attestation"));
+	c.reveal(0, CAROL, b"x").unwrap();
+}
+
+#[test]
 fn reveals_must_trust_the_bounty_subjects() {
 	let (mut c, _) = with_attested_blobs();
 	c.commit(1, BOB, b"x").unwrap();
