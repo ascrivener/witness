@@ -1,9 +1,9 @@
 //! Types shared by the witness service, check blobs and the host tooling.
 //!
 //! The protocol, in short:
-//! - A maker posts a bounty: a check blob `check(params, x) -> bool` (stored as a preimage of the
-//!   service), the `params` to run it with, any extra preimage blobs the check reads, a reward in
-//!   points, a gas limit for the check, an expiry slot and a claim window.
+//! - A maker posts a bounty: a check blob `check(params, x) -> bool` (by hash), the `params` to
+//!   run it with, any extra blobs the check reads (by hash), a reward in points, a gas limit for
+//!   the check, an expiry slot and a claim window.
 //! - A hunter commits to `blake2b(bounty_id, x, hunter, salt)`, paying [`COMMIT_DEPOSIT`], then
 //!   reveals `x` at least [`MIN_COMMIT_AGE`] slots later. Refine runs the check in an inner PVM.
 //! - The first valid reveal opens the claim window. Every valid reveal before it closes competes,
@@ -15,13 +15,15 @@
 //! - A valid reveal refunds its commitment's deposit; unrevealed commitments forfeit theirs, which
 //!   is what makes spamming commitments cost something.
 //!
+//! Blobs are never stored (see docs/design/extrinsics.md): an op's work item carries the blobs it
+//! uses as extrinsics, and refine checks each against a hash or Merkle root recorded on chain. So
+//! state holds only records, whatever the size of the blobs.
+//!
 //! Attestations let checks reuse verification across refines (see docs/design/attestation-dag.md):
-//! - `Pin` holds preimages for good, so refine can look them up.
-//! - `Attest` runs a check in attest mode on a bundle of subjects (one preimage holding them all),
-//!   trusting subjects of earlier attestations it cites. If the check returns true, accumulate
-//!   records an [`Attestation`]: "check C, with these params, verified every subject in this
-//!   bundle, given those parents' subjects". Any subject in the bundle can then be trusted on its
-//!   own. A bundle is one preimage, so accumulate's work per attestation doesn't grow with it.
+//! - `Attest` runs a check in attest mode on subjects (one extrinsic holding them all), trusting
+//!   subjects of earlier attestations it cites. If the check returns true, accumulate records an
+//!   [`Attestation`]: "check C, with these params, verified every subject under this Merkle root,
+//!   given those parents' subjects". Any of them can then be trusted on its own, with its path.
 //! - Bounties cite attested subjects, and reveals can cite more. The check receives them marked
 //!   trusted, and can skip re-verifying them.
 //! - Attestations form a DAG. Trust needs no context: an attestation is only recorded once its
@@ -54,7 +56,7 @@ pub type AttestationId = Hash;
 /// spec allows 5×10⁹. On a network with less (PolkaJam's "tiny" parameters allow 10⁹), a check
 /// given more than refine can spend just runs out of gas.
 pub const MAX_CHECK_GAS: Gas = 4_500_000_000;
-/// Largest check blob a bounty may solicit.
+/// Largest check blob a bounty may name.
 pub const MAX_CHECK_LEN: u32 = 1 << 20;
 /// Largest check parameters a bounty may carry.
 pub const MAX_PARAMS_LEN: u32 = 4096;
@@ -82,11 +84,6 @@ pub const MAX_CLAIM_WINDOW: Slot = 14_400;
 pub const REVEAL_GRACE: Slot = 20;
 /// Points a commitment locks up; refunded on a valid reveal, forfeited otherwise.
 pub const COMMIT_DEPOSIT: Points = 10;
-/// Most preimages one `Pin` may hold. Accumulate pays about 24k gas per preimage it holds, of
-/// 10M per work report.
-pub const MAX_PINS: u32 = 64;
-/// Points a pin costs, per preimage. Pins are permanent, so this is never refunded.
-pub const PIN_DEPOSIT: Points = 10;
 /// Points an attestation costs. Attestations are permanent, so this is never refunded.
 pub const ATTEST_DEPOSIT: Points = 10;
 /// Largest single faucet mint.
@@ -99,63 +96,125 @@ pub fn blake2b256(data: &[u8]) -> Hash {
 	out
 }
 
-/// A preimage of the service, by hash and length.
+/// A blob, by hash and length.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
-pub struct Preimage {
+pub struct BlobHash {
 	pub hash: Hash,
 	pub len: u32,
 }
 
-/// A blob a bounty gives its check.
+/// Where an op's blob is: entry `index` of extrinsic `extrinsic` of its work item. Each extrinsic
+/// is a [`Blobs`], so an op can carry more blobs than a work item has extrinsics.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
-pub enum BlobRef {
-	/// A plain preimage: the check must verify whatever it relies on in it.
-	Blob(Preimage),
-	/// Entry `entry` of the bundle of an attestation by the bounty's own check, passed to
-	/// it as trusted.
-	Attested { attestation: AttestationId, entry: u32 },
+pub struct BlobAt {
+	pub extrinsic: u8,
+	pub index: u32,
 }
 
-/// A bundle: the subjects an attestation covers, encoded as a `Vec<Vec<u8>>` and stored as one
-/// preimage. A subject's hash is the Blake2b-256 of its own bytes.
-///
-/// Subjects are bundled rather than held as a preimage each because accumulate pays for every
-/// preimage it holds (about 24k gas each, of 10M per work report), so an attestation holding
-/// its subjects one by one could hold only a few hundred.
-pub type Bundle = Vec<Vec<u8>>;
+/// An extrinsic: blobs, encoded as a `Vec<Vec<u8>>`.
+pub type Blobs = Vec<Vec<u8>>;
 
-/// Largest bundle: [`MAX_BLOBS`] subjects of at most [`MAX_BLOBS_LEN`] bytes in all, and their
-/// length prefixes.
-pub const MAX_BUNDLE_LEN: u32 = MAX_BLOBS_LEN + 5 * (MAX_BLOBS + 1);
-
-/// The subjects in an encoded [`Bundle`], without copying them; `None` unless `data` is exactly
-/// one bundle of at most [`MAX_BLOBS`] subjects.
-pub fn bundle_subjects(mut data: &[u8]) -> Option<Vec<&[u8]>> {
+/// The blobs in an encoded [`Blobs`], without copying them; `None` unless `data` is exactly one
+/// list of at most [`MAX_BLOBS`] blobs.
+pub fn blobs_in(mut data: &[u8]) -> Option<Vec<&[u8]>> {
 	let input = &mut data;
 	let count = codec::Compact::<u32>::decode(input).ok()?.0;
 	if count > MAX_BLOBS {
 		return None;
 	}
-	let mut subjects = Vec::with_capacity(count as usize);
+	let mut blobs = Vec::with_capacity(count as usize);
 	for _ in 0..count {
 		let len = codec::Compact::<u32>::decode(input).ok()?.0 as usize;
-		let (subject, rest) = input.split_at_checked(len)?;
-		subjects.push(subject);
+		let (blob, rest) = input.split_at_checked(len)?;
+		blobs.push(blob);
 		*input = rest;
 	}
-	input.is_empty().then_some(subjects)
+	input.is_empty().then_some(blobs)
+}
+
+/// A Merkle tree over an attestation's subjects. Leaves are `blake2b(0x00 ++ subject)` and inner
+/// nodes `blake2b(0x01 ++ left ++ right)`, so a leaf can't pass for a node. At each level, an odd
+/// node at the end is carried up as it is. The number of subjects fixes the shape.
+pub mod merkle {
+	use super::{Hash, blake2b256};
+	use alloc::vec::Vec;
+
+	pub fn leaf(subject: &[u8]) -> Hash {
+		blake2b256(&[&[0u8][..], subject].concat())
+	}
+
+	fn node(left: &Hash, right: &Hash) -> Hash {
+		blake2b256(&[&[1u8][..], left, right].concat())
+	}
+
+	fn up(level: &[Hash]) -> Vec<Hash> {
+		level.chunks(2).map(|pair| if let [l, r] = pair { node(l, r) } else { pair[0] }).collect()
+	}
+
+	/// The root over `leaves` (all zeros for none).
+	pub fn root(leaves: &[Hash]) -> Hash {
+		let mut level = leaves.to_vec();
+		while level.len() > 1 {
+			level = up(&level);
+		}
+		level.first().copied().unwrap_or([0; 32])
+	}
+
+	/// The path proving leaf `index` of `leaves`: the sibling at each level that has one.
+	pub fn path(leaves: &[Hash], mut index: usize) -> Vec<Hash> {
+		let mut level = leaves.to_vec();
+		let mut out = Vec::new();
+		while level.len() > 1 {
+			let sibling = index ^ 1;
+			if sibling < level.len() {
+				out.push(level[sibling]);
+			}
+			level = up(&level);
+			index /= 2;
+		}
+		out
+	}
+
+	/// Whether `path` proves `leaf` is leaf `index` of `count` under `root`.
+	pub fn verify(root: &Hash, count: u32, index: u32, leaf: Hash, path: &[Hash]) -> bool {
+		if index >= count {
+			return false;
+		}
+		let (mut index, mut width, mut hash, mut path) = (index as usize, count as usize, leaf, path.iter());
+		while width > 1 {
+			let sibling = index ^ 1;
+			if sibling < width {
+				let Some(s) = path.next() else { return false };
+				hash = if index % 2 == 0 { node(&hash, s) } else { node(s, &hash) };
+			}
+			index /= 2;
+			width = width.div_ceil(2);
+		}
+		path.next().is_none() && hash == *root
+	}
+}
+
+/// A blob a bounty gives its check.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
+pub enum BlobRef {
+	/// A plain blob: the check must verify whatever it relies on in it.
+	Blob(BlobHash),
+	/// Subject `entry` of an attestation by the bounty's own check, passed to it as trusted.
+	Attested { attestation: AttestationId, entry: u32 },
 }
 
 /// What an attestation says: check `check_hash`, run in attest mode with params hashing to
-/// `params_hash`, returned true for every subject in the list `subjects`, given trusted subjects
-/// of the attestations whose ids `parents_root` commits to.
+/// `params_hash`, returned true for every one of the `subject_count` subjects under
+/// `subjects_root`, given trusted subjects of the attestations whose ids `parents_root` commits
+/// to.
 #[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
 pub struct AttestationClaim {
 	pub check_hash: Hash,
 	pub params_hash: Hash,
-	/// A preimage holding the [`Bundle`] of subjects.
-	pub subjects: Preimage,
-	/// See [`parents_root`]. Committing to the parents through a root keeps a claim four hashes
+	/// See [`merkle`].
+	pub subjects_root: Hash,
+	pub subject_count: u32,
+	/// See [`parents_root`]. Committing to the parents through a root keeps a claim a few hashes
 	/// long however many parents it has, since ops carry claims.
 	pub parents_root: Hash,
 }
@@ -177,18 +236,23 @@ pub fn parents_root(parents: &[AttestationId]) -> Hash {
 	blake2b256(&(b"witness/parents", ids).encode())
 }
 
-/// A trusted subject, as an op cites it: entry `entry` of the bundle of the op's claim
-/// number `claim`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
+/// A trusted subject, as an op cites it: subject `entry` of the op's claim number `claim`, whose
+/// bytes are at `blob`, with its Merkle path.
+#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
 pub struct TrustedRef {
 	pub claim: u16,
 	pub entry: u32,
+	pub blob: BlobAt,
+	pub path: Vec<Hash>,
 }
 
-/// A recorded attestation. Kept for good.
+/// A recorded attestation. Kept for good, so it holds only what accumulate needs: the claim is
+/// its id.
 #[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
 pub struct Attestation {
-	pub claim: AttestationClaim,
+	/// The claim's check and params, which a bounty citing it must match.
+	pub check_hash: Hash,
+	pub params_hash: Hash,
 	/// The slot it was accumulated.
 	pub slot: Slot,
 	pub attester: AccountId,
@@ -203,8 +267,7 @@ pub struct BountyTerms {
 	/// Passed to the check alongside the witness, so one check blob can serve many bounties.
 	pub params: Vec<u8>,
 	/// Blobs refine passes to the check, such as a statement environment or a library: attested
-	/// subjects (trusted) and plain blobs. Plain blobs are solicited and released along with the
-	/// check blob; attested ones are held for good.
+	/// subjects (trusted) and plain blobs. A reveal supplies them all.
 	pub blobs: Vec<BlobRef>,
 	pub reward: Points,
 	pub check_gas: Gas,
@@ -235,6 +298,10 @@ pub enum Op {
 		check_hash: Hash,
 		params: Vec<u8>,
 		blobs: Vec<BlobRef>,
+		/// The check blob.
+		check: BlobAt,
+		/// The bounty's plain blobs, in order.
+		plain: Vec<BlobAt>,
 		/// The attestations `trusted` cites, each once: all by the bounty's check, with one set of
 		/// params, which the bounty's own attested blobs fix. A bounty citing no attestation takes
 		/// none, as otherwise the hunter would choose those params.
@@ -254,19 +321,16 @@ pub enum Op {
 	/// Delete a commitment that can no longer be revealed. Anyone may send it; the deposit is
 	/// already forfeit.
 	Release { bounty_id: BountyId, commitment: Hash },
-	/// Hold `blobs` as preimages for good, paying [`PIN_DEPOSIT`] for each, so attestations can
-	/// use them: typically a check and bundles to attest.
-	Pin { owner: AccountId, nonce: u64, blobs: Vec<Preimage>, signature: Signature },
-	/// Attest that check `check_hash` accepts every subject in the bundle `subjects`, trusting
-	/// the subjects `trusted` cites, paying [`ATTEST_DEPOSIT`]. The check and the bundle must
-	/// already be held, by pins or bounties. Refine can't read state, so the attester
-	/// supplies the claims cited; accumulate checks they were recorded.
+	/// Attest that check `check_hash` accepts every subject in extrinsic `subjects`, trusting the
+	/// subjects `trusted` cites, paying [`ATTEST_DEPOSIT`]. Refine can't read state, so the
+	/// attester supplies the claims cited; accumulate checks they were recorded.
 	Attest {
 		attester: AccountId,
 		nonce: u64,
 		check_hash: Hash,
+		check: BlobAt,
 		params: Vec<u8>,
-		subjects: Preimage,
+		subjects: u8,
 		/// The parent attestations, each once.
 		claims: Vec<AttestationClaim>,
 		trusted: Vec<TrustedRef>,
@@ -297,10 +361,9 @@ pub enum Rejection {
 	CheckGasTooHigh,
 	WitnessTooLong,
 	ParamsTooLong,
-	/// The check blob is not (yet) available as a preimage at the lookup anchor.
-	CheckUnavailable,
-	/// One of the bounty's blobs is not (yet) available as a preimage at the lookup anchor.
-	BlobUnavailable,
+	/// A blob the op names isn't in its extrinsics, or isn't what the op says it is (its hash,
+	/// or for a trusted subject its Merkle path, doesn't match).
+	BadBlob,
 	/// More than [`MAX_BLOBS`] blobs, or more than [`MAX_BLOBS_LEN`] bytes of them.
 	BlobsTooLarge,
 	/// An attestation by a check other than the one being run, or with other params.
@@ -308,8 +371,8 @@ pub enum Rejection {
 	/// A trusted reference to a claim or entry that doesn't exist, a claim cited twice or that no
 	/// reference uses, or a reveal that doesn't trust its bounty's attested subjects.
 	BadTrustedRef,
-	/// A bundle that doesn't decode, or holds more than [`MAX_BLOBS`] subjects.
-	BadBundle,
+	/// An extrinsic that doesn't decode as [`Blobs`], or holds more than [`MAX_BLOBS`].
+	BadExtrinsic,
 	/// The check blob is not a valid standard program, or needs more memory than allowed.
 	BadCheckBlob,
 	CheckFailed(CheckFailure),
@@ -339,7 +402,6 @@ pub enum Verified {
 	Finalize { bounty_id: BountyId },
 	Reclaim { bounty_id: BountyId, maker: AccountId, nonce: u64 },
 	Release { bounty_id: BountyId, commitment: Hash },
-	Pin { owner: AccountId, nonce: u64, blobs: Vec<Preimage> },
 	/// The check returned true in attest mode; accumulate records `claim` if `parents` (whose
 	/// root the claim covers) were.
 	Attest { attester: AccountId, nonce: u64, claim: AttestationClaim, parents: Vec<AttestationId> },
@@ -402,9 +464,6 @@ pub enum StorageKey {
 	/// would let anyone copy a commitment onto another bounty first and block the real one.
 	Commitment(BountyId, Hash),
 	NextBountyId,
-	/// How many holders a preimage has: unfinished bounties using it as a check blob or a plain
-	/// blob, pins, and attestations of it. The preimage is forgotten when it reaches zero.
-	PreimageRefs(Hash),
 	Attestation(AttestationId),
 }
 
@@ -427,11 +486,6 @@ pub fn commit_message(
 	commitment: &Hash,
 ) -> Vec<u8> {
 	(b"witness/commit", service_id, bounty_id, committer, nonce, commitment).encode()
-}
-
-/// The message an owner signs to pin `blobs` on service `service_id`.
-pub fn pin_message(service_id: u32, owner: &AccountId, nonce: u64, blobs: &[Preimage]) -> Vec<u8> {
-	(b"witness/pin", service_id, owner, nonce, blobs).encode()
 }
 
 /// The message an attester signs to attest the claim with id `id` on service `service_id`.
@@ -491,4 +545,29 @@ pub fn check_args(mode: CheckMode, blobs: &[CheckBlob], params: &[u8], witness: 
 	args.extend_from_slice(params);
 	args.extend_from_slice(witness);
 	args
+}
+
+#[cfg(test)]
+mod tests {
+	use super::merkle;
+
+	#[test]
+	fn merkle_paths_prove_exactly_their_leaf() {
+		for count in 1..=17u32 {
+			let leaves: alloc::vec::Vec<_> = (0..count).map(|i| merkle::leaf(&i.to_le_bytes())).collect();
+			let root = merkle::root(&leaves);
+			for i in 0..count {
+				let path = merkle::path(&leaves, i as usize);
+				assert!(merkle::verify(&root, count, i, leaves[i as usize], &path), "{i} of {count}");
+				let other = (i + 1) % count;
+				if other != i {
+					assert!(!merkle::verify(&root, count, other, leaves[i as usize], &path), "{i} as {other}");
+					assert!(!merkle::verify(&root, count, i, leaves[other as usize], &path), "{other} at {i}");
+				}
+				assert!(!merkle::verify(&root, count, count, leaves[i as usize], &path));
+			}
+		}
+		// A leaf can't pass for an inner node: its hash is domain-separated.
+		assert_ne!(merkle::leaf(&[]), merkle::root(&[]));
+	}
 }

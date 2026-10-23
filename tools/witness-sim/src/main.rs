@@ -4,8 +4,8 @@
 //!
 //!     witness-sim create-service SERVICE_BLOB BALANCE   start afresh, with the witness service
 //!     witness-sim list                                   the services, as `jamt list` prints them
-//!     witness-sim item SERVICE PAYLOAD                   refine and accumulate one op
-//!     witness-sim provide SERVICE FILE                   provide a solicited preimage
+//!     witness-sim item SERVICE PAYLOAD [EXTRINSIC...]    refine and accumulate one op, with
+//!                                                        its extrinsics (files)
 //!     witness-sim inspect slot                           the current slot (and pass one)
 //!     witness-sim inspect storage --raw SERVICE KEY      a storage value, hex
 //!     witness-sim inspect final service SERVICE          whether the service exists
@@ -16,8 +16,8 @@
 //! State lives in `$WITNESS_SIM_DIR` (default `.witness-sim`), and the log the testnet's nodes
 //! would print (`refine: ...`, `check used N gas of L`) in its `log`.
 //!
-//! What's real: the service's rules (`witness-rules`), preimages that must be solicited before they
-//! can be provided and are forgotten when released, and check blobs run in PolkaVM with the JAM
+//! What's real: the service's rules (`witness-rules`), extrinsics as refine fetches them, and
+//! check blobs run in PolkaVM with the JAM
 //! instruction set, gas metering and the `grow_heap` host call, as the service runs them in an
 //! inner PVM, with the gas PolkaJam v0.1.29 charges (PolkaVM's full cost model with L2 cache hits
 //! matched it exactly on the sample checks; `POLKAVM_DEFAULT_COST_MODEL` overrides it). What
@@ -31,13 +31,13 @@ use polkavm::{
 	ProgramCounter, ProgramParts, Reg, program::InstructionSetKind,
 };
 use std::{
-	collections::{BTreeMap, BTreeSet},
+	collections::BTreeMap,
 	io::Write,
 	path::PathBuf,
 	process::ExitCode,
 };
 use witness_types::{
-	CheckFailure, Gas, Hash, MAX_CHECK_PAGES, Op, Rejection, Verified, blake2b256,
+	CheckFailure, Gas, MAX_CHECK_PAGES, Op, Rejection, Verified,
 	program::{Access, Heap, PAGE_SIZE, StandardProgram, initialize},
 };
 
@@ -54,13 +54,13 @@ struct State {
 	slot: u32,
 	service: bool,
 	storage: BTreeMap<Vec<u8>, Vec<u8>>,
-	/// Preimages solicited and not forgotten; provided ones are files in `preimages/`.
-	solicited: BTreeSet<Hash>,
 }
 
 struct Sim {
 	dir: PathBuf,
 	state: State,
+	/// The extrinsics of the item being refined.
+	extrinsics: Vec<Vec<u8>>,
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -82,11 +82,11 @@ impl Sim {
 			.ok()
 			.and_then(|b| State::decode(&mut &b[..]).ok())
 			.unwrap_or_default();
-		Sim { dir, state }
+		Sim { dir, state, extrinsics: Vec::new() }
 	}
 
 	fn save(&self) {
-		std::fs::create_dir_all(self.dir.join("preimages")).unwrap();
+		std::fs::create_dir_all(&self.dir).unwrap();
 		std::fs::write(self.dir.join("state"), self.state.encode()).unwrap();
 	}
 
@@ -95,12 +95,9 @@ impl Sim {
 		writeln!(f, "sim: slot {} INFO witness  {line}", self.state.slot).unwrap();
 	}
 
-	fn preimage_path(&self, hash: &Hash) -> PathBuf {
-		self.dir.join("preimages").join(hex(hash))
-	}
-
-	fn item(&mut self, payload: &[u8]) {
+	fn item(&mut self, payload: &[u8], extrinsics: Vec<Vec<u8>>) {
 		self.state.slot += 1;
+		self.extrinsics = extrinsics;
 		let verified = match Op::decode(&mut &payload[..]) {
 			Ok(op) => witness_rules::refine(&*self, SERVICE, op),
 			Err(_) => Verified::Rejected(Rejection::BadPayload),
@@ -111,18 +108,11 @@ impl Sim {
 		}
 		match witness_rules::accumulate(&*self, verified, self.state.slot) {
 			Ok(effects) => {
-				for (hash, _) in effects.solicit {
-					self.state.solicited.insert(hash);
-				}
 				for (key, value) in effects.writes {
 					match value {
 						Some(v) => self.state.storage.insert(key, v),
 						None => self.state.storage.remove(&key),
 					};
-				}
-				for (hash, _) in effects.forget {
-					self.state.solicited.remove(&hash);
-					let _ = std::fs::remove_file(self.preimage_path(&hash));
 				}
 			},
 			Err(reason) => self.log(&format!("not applied: {reason}")),
@@ -137,8 +127,8 @@ impl witness_rules::State for Sim {
 }
 
 impl witness_rules::RefineEnv for Sim {
-	fn lookup(&self, hash: &Hash) -> Option<Vec<u8>> {
-		std::fs::read(self.preimage_path(hash)).ok()
+	fn extrinsic(&self, index: usize) -> Option<Vec<u8>> {
+		self.extrinsics.get(index).cloned()
 	}
 
 	fn run_check(&self, blob: &[u8], args: &[u8], gas: Gas) -> Result<(), Rejection> {
@@ -225,7 +215,7 @@ fn run_check(blob: &[u8], args: &[u8], gas: Gas) -> Result<(Result<(), Rejection
 
 fn usage() -> ExitCode {
 	eprintln!(
-		"usage: witness-sim (create-service BLOB BALANCE | list | item SERVICE PAYLOAD | provide SERVICE FILE \
+		"usage: witness-sim (create-service BLOB BALANCE | list | item SERVICE PAYLOAD [EXTRINSIC...] \
 		 | inspect slot | inspect storage --raw SERVICE KEY | inspect final service SERVICE)"
 	);
 	ExitCode::from(2)
@@ -251,20 +241,13 @@ fn main() -> ExitCode {
 			}
 			return ExitCode::SUCCESS;
 		},
-		["item", _service, payload] => {
+		["item", _service, payload, ref files @ ..] => {
 			let Some(payload) = from_hex(payload) else { return fail("payload is not hex") };
-			sim.item(&payload);
+			let Ok(extrinsics) = files.iter().map(std::fs::read).collect::<Result<Vec<_>, _>>() else {
+				return fail("cannot read an extrinsic");
+			};
+			sim.item(&payload, extrinsics);
 			println!("Item submitted at slot {}", sim.state.slot);
-		},
-		["provide", _service, file] => {
-			let Ok(data) = std::fs::read(file) else { return fail("cannot read the preimage") };
-			let hash = blake2b256(&data);
-			if !sim.state.solicited.contains(&hash) {
-				return fail("preimage not solicited");
-			}
-			sim.save();
-			std::fs::write(sim.preimage_path(&hash), data).unwrap();
-			println!("Preimage provided at slot {}", sim.state.slot);
 		},
 		["inspect", "slot"] => {
 			sim.state.slot += 1;

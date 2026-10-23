@@ -10,13 +10,15 @@
 # rules, with checks in PolkaVM, natively, in seconds. No PolkaJam needed. The testnet stays the
 # judge of what fits a refine and of the node's behavior.
 #
+# Reveals and attestations carry their blobs as extrinsics, which `jamt item` can't send, so
+# until witness has its own submitter (docs/design/extrinsics.md, step 2) only WITNESS_SIM=1 runs.
+#
 # --quick (about 6 minutes, a third of it starting the testnet) then mints, creates two bounties,
-# provides their check blobs and the dictionary blob, commits, and reveals a wrong and a right
-# witness on each. Then it attests a batch of two word volumes and a third on one of them,
-# refuses a bad one, and reveals on a bounty that cites two of them, trusting the third as well.
-# That covers everything that touches the node: deploy,
-# refine and accumulate, pins and preimage lookups, the inner PVM in both modes and growing its
-# heap. It skips the claim windows.
+# commits, and reveals a wrong and a right witness on each. Then it attests a batch of two word
+# volumes and a third on one of them, refuses a bad one, and reveals on a bounty that cites two
+# of them, trusting the third as well. That covers everything that touches the node: deploy,
+# refine and accumulate, extrinsics, the inner PVM in both modes and growing its heap. It skips
+# the claim windows.
 #
 # The full run (about 8 minutes, mostly claim windows) instead does:
 #   bounty 0 (factor check):     Bob commits; Mallory copies x, commits later and reveals first;
@@ -53,9 +55,10 @@ printf '%-16s' apple banana cherry >"$VOL1"
 printf '%-16s' grape lemon mango >"$VOL2"
 printf '%-16s' peach plum >"$VOL3"
 printf '%-16s' zebra yak >"$BADVOL" # not sorted
-# Bundles: volumes 1 and 2 are attested as one batch, then volume 3, then the bad one.
-BUNDLE_A=$TMP/batch-a.bundle BUNDLE_B=$TMP/batch-b.bundle BAD_BUNDLE=$TMP/bad.bundle
+# Volumes 1 and 2 are attested as one batch, then volume 3, then the bad one.
 CLAIM_A=$TMP/batch-a.claim CLAIM_B=$TMP/batch-b.claim BADCLAIM=$TMP/bad.claim
+# Where the CLI writes an op's extrinsics.
+X=$TMP/extrinsics
 
 N=9903520302753827148829556741 # (2^61 - 1) * 4294967291
 FACTOR=4294967291
@@ -106,13 +109,17 @@ expect_still() {
 }
 
 # One item per slot: the testnet silently drops some packages submitted together in one slot.
-item() { "$JAMT" item "$SVC" "$1" >/dev/null; wait_slot $(( $(slot) + 1 )); }
+# Any more arguments are extrinsic files.
+item() { "$JAMT" item "$SVC" "$@" >/dev/null; wait_slot $(( $(slot) + 1 )); }
+# An item with the extrinsics the CLI just wrote.
+itemx() { item "$1" "$X"/*; }
 
 # Print the commitment for `witness commit ARGS...` (the CLI reports it on stderr).
 commitment_of() { $W commit "$@" 2>&1 >/dev/null | awk '{print $2}'; }
 
 window_end() { show bounty --bounty "$1" | sed -nE 's/.*window_end: ([0-9]+).*/\1/p'; }
 
+[ -n "${WITNESS_SIM:-}" ] || fail "jamt item can't send extrinsics yet; run with WITNESS_SIM=1 (see the top of this script)"
 if [ -n "${WITNESS_SIM:-}" ]; then
 	step "using witness-sim (state: $TMP/sim)"
 	cargo build -q -p witness-sim
@@ -135,50 +142,32 @@ FACTOR_CHECK=out/factor-check.jam
 PREIMAGE_CHECK=out/blake2b-preimage-check.jam
 DICT_CHECK=out/dictionary-check.jam
 WORDS_CHECK=out/sorted-words-check.jam
-FACTOR_HASH=$($W hash --check $FACTOR_CHECK)
-PREIMAGE_HASH=$($W hash --check $PREIMAGE_CHECK)
-DICT_CHECK_HASH=$($W hash --check $DICT_CHECK)
-DICT_HASH=$($W hash --check "$DICT")
 
 # Create bounty $1 on the dictionary check (difficulty 0: any dictionary sentence), as Alice
-# with nonce $2, and provide its check and dictionary.
+# with nonce $2.
 create_dictionary_bounty() {
 	item "$($W create --service "$SVC" --maker alice --nonce "$2" --check $DICT_CHECK --params 0x00 \
 		--blobs "$DICT" --reward 100 --check-gas $GAS --expiry $(( $(slot) + 100 )))"
 	expect "bounty $1 open" 'status: Open' bounty --bounty "$1"
-	[ -n "$(storage --refs "$DICT_HASH")" ] || fail "dictionary not referenced"
-	echo "ok: dictionary referenced"
-	"$JAMT" provide "$SVC" $DICT_CHECK >/dev/null
-	"$JAMT" provide "$SVC" "$DICT" >/dev/null
 }
 
-# Pat pins the sorted-words check and the bundles of volumes in one go. Pat attests volumes 1
-# and 2 as a batch, then volume 3 trusting volume 2, and fails to attest the unsorted volume.
+# Pat attests volumes 1 and 2 as a batch, then volume 3 trusting volume 2, and fails to attest
+# the unsorted volume.
 # Then bounty $1 (Alice, nonce $2) cites volumes 1 and 3, and hunter $3 (nonce $4) reveals a
 # wrong witness and a right one that also trusts volume 2.
 attestations() {
 	local bounty=$1 alice_nonce=$2 hunter=$3 hunter_nonce=$4
 	step "attesting word volumes"
-	$W bundle --subjects "$VOL1,$VOL2" --out "$BUNDLE_A" >/dev/null
-	$W bundle --subjects "$VOL3" --out "$BUNDLE_B" >/dev/null
-	$W bundle --subjects "$BADVOL" --out "$BAD_BUNDLE" >/dev/null
-	local files=($WORDS_CHECK "$BUNDLE_A" "$BUNDLE_B" "$BAD_BUNDLE")
 	item "$($W mint --to pat --amount 200)"
 	expect "pat has 200" 'balance: 200, nonce: 0' account --account pat
-	item "$($W pin --service "$SVC" --owner pat --nonce 0 --blobs "$(IFS=,; echo "${files[*]}")")"
-	expect "pat paid for four pins" 'balance: 160, nonce: 1' account --account pat
-	for f in "${files[@]}"; do "$JAMT" provide "$SVC" "$f" >/dev/null; done
-	wait_slot $(( $(slot) + 2 ))
-	item "$($W attest --service "$SVC" --attester pat --nonce 1 --check $WORDS_CHECK --subjects "$BUNDLE_A" \
-		--check-gas $GAS --claim-out "$CLAIM_A" 2>/dev/null)"
-	expect "volumes 1 and 2 attested" 'Attestation \{ claim' attestation --attestation "$CLAIM_A"
-	item "$($W attest --service "$SVC" --attester pat --nonce 2 --check $WORDS_CHECK --subjects "$BUNDLE_B" \
-		--trust "$CLAIM_A:1" --check-gas $GAS --claim-out "$CLAIM_B" 2>/dev/null)"
-	expect "volume 3 attested after volume 2" 'Attestation \{ claim' attestation --attestation "$CLAIM_B"
-	item "$($W attest --service "$SVC" --attester pat --nonce 3 --check $WORDS_CHECK --subjects "$BAD_BUNDLE" \
-		--trust "$CLAIM_A:1" --check-gas $GAS --claim-out "$BADCLAIM" 2>/dev/null)"
+	local attest=(attest --service "$SVC" --attester pat --check $WORDS_CHECK --check-gas $GAS --extrinsics "$X")
+	itemx "$($W "${attest[@]}" --nonce 0 --subjects "$VOL1,$VOL2" --claim-out "$CLAIM_A" 2>/dev/null)"
+	expect "volumes 1 and 2 attested" 'Attestation \{ check_hash' attestation --attestation "$CLAIM_A"
+	itemx "$($W "${attest[@]}" --nonce 1 --subjects "$VOL3" --trust "$CLAIM_A:1" --claim-out "$CLAIM_B" 2>/dev/null)"
+	expect "volume 3 attested after volume 2" 'Attestation \{ check_hash' attestation --attestation "$CLAIM_B"
+	itemx "$($W "${attest[@]}" --nonce 2 --subjects "$BADVOL" --trust "$CLAIM_A:1" --claim-out "$BADCLAIM" 2>/dev/null)"
 	expect_still "unsorted volume not attested" '^none$' attestation --attestation "$BADCLAIM"
-	expect "pat paid for two attestations" 'balance: 140, nonce: 3' account --account pat
+	expect "pat paid for two attestations" 'balance: 180, nonce: 2' account --account pat
 
 	step "a bounty citing attested volumes"
 	local blobs="$CLAIM_A:0,$CLAIM_B:0"
@@ -189,18 +178,18 @@ attestations() {
 		--witness-str "cherry lemon plum" 2>/dev/null)"
 	expect "$hunter committed to bounty $bounty" "nonce: $((hunter_nonce + 1))" account --account "$hunter"
 	wait_slot $(( $(slot) + 4 )) # MIN_COMMIT_AGE
-	item "$($W reveal --bounty "$bounty" --check $WORDS_CHECK --params 0x00 --blobs "$blobs" --check-gas $GAS \
-		--hunter "$hunter" --salt 0x77 --witness-str "cherry lemon plum")"
+	itemx "$($W reveal --bounty "$bounty" --check $WORDS_CHECK --params 0x00 --blobs "$blobs" --check-gas $GAS \
+		--hunter "$hunter" --salt 0x77 --witness-str "cherry lemon plum" --extrinsics "$X")"
 	expect_still "a word in a volume not given changed nothing" 'status: Open' bounty --bounty "$bounty"
-	item "$($W reveal --bounty "$bounty" --check $WORDS_CHECK --params 0x00 --blobs "$blobs" --trust "$CLAIM_A:1" \
-		--check-gas $GAS --hunter "$hunter" --salt 0x77 --witness-str "cherry lemon plum")"
+	itemx "$($W reveal --bounty "$bounty" --check $WORDS_CHECK --params 0x00 --blobs "$blobs" --trust "$CLAIM_A:1" \
+		--check-gas $GAS --hunter "$hunter" --salt 0x77 --witness-str "cherry lemon plum" --extrinsics "$X")"
 	expect "$hunter's reveal on attested volumes opens the window" 'Revealing' bounty --bounty "$bounty"
 }
 
 # Reveal on dictionary bounty $1 as hunter $2 with salt $3 and witness $4.
 reveal_dictionary() {
-	item "$($W reveal --bounty "$1" --check $DICT_CHECK --params 0x00 --blobs "$DICT" --check-gas $GAS \
-		--hunter "$2" --salt "$3" --witness-str "$4")"
+	itemx "$($W reveal --bounty "$1" --check $DICT_CHECK --params 0x00 --blobs "$DICT" --check-gas $GAS \
+		--hunter "$2" --salt "$3" --witness-str "$4" --extrinsics "$X")"
 }
 
 step "deploying"
@@ -215,7 +204,7 @@ for _ in $(seq 1 40); do "$JAMT" inspect final service "$SVC" >/dev/null 2>&1 &&
 wait_slot $(( $(slot) + 3 ))
 
 if [ -n "$QUICK" ]; then
-	step "quick: mint, create, provide"
+	step "quick: mint, create"
 	item "$($W mint --to alice --amount 1000)"
 	item "$($W mint --to bob --amount 100)"
 	expect "alice has 1000" 'balance: 1000, nonce: 0' account --account alice
@@ -224,7 +213,6 @@ if [ -n "$QUICK" ]; then
 		--params-blake2b "$SECRET" --reward 100 --check-gas $GAS --expiry $(( $(slot) + 100 )))"
 	expect "bounty 0 open" 'status: Open' bounty --bounty 0
 	expect "alice paid 100" 'balance: 900, nonce: 1' account --account alice
-	"$JAMT" provide "$SVC" $PREIMAGE_CHECK >/dev/null
 
 	step "quick: commit, reveal"
 	BOB_C=$(commitment_of --service "$SVC" --bounty 0 --hunter bob --nonce 0 --salt 0x0b0b --witness-str "$SECRET")
@@ -232,11 +220,11 @@ if [ -n "$QUICK" ]; then
 	expect "bob committed, deposit taken" 'balance: 90, nonce: 1' account --account bob
 	wait_slot $(( $(slot) + 4 )) # MIN_COMMIT_AGE
 	# A witness the check rejects: the inner PVM runs and returns false, and nothing changes.
-	item "$($W reveal --bounty 0 --check $PREIMAGE_CHECK --params-blake2b "$SECRET" --check-gas $GAS \
-		--hunter bob --salt 0x0b0b --witness-str "wrong")"
+	itemx "$($W reveal --bounty 0 --check $PREIMAGE_CHECK --params-blake2b "$SECRET" --check-gas $GAS \
+		--hunter bob --salt 0x0b0b --witness-str "wrong" --extrinsics "$X")"
 	expect_still "wrong witness changed nothing" 'status: Open' bounty --bounty 0
-	item "$($W reveal --bounty 0 --check $PREIMAGE_CHECK --params-blake2b "$SECRET" --check-gas $GAS \
-		--hunter bob --salt 0x0b0b --witness-str "$SECRET")"
+	itemx "$($W reveal --bounty 0 --check $PREIMAGE_CHECK --params-blake2b "$SECRET" --check-gas $GAS \
+		--hunter bob --salt 0x0b0b --witness-str "$SECRET" --extrinsics "$X")"
 	expect "bob's reveal opens the window" 'Revealing' bounty --bounty 0
 	expect "bob's deposit refunded" 'balance: 100, nonce: 1' account --account bob
 	expect "bob's commitment consumed" '^none$' commitment --bounty 0 --commitment "$BOB_C"
@@ -275,8 +263,6 @@ item "$($W create --service "$SVC" --maker alice --nonce 2 --check $PREIMAGE_CHE
 expect "bounty 2 open" 'status: Open' bounty --bounty 2
 create_dictionary_bounty 3 3
 expect "alice paid 900" 'balance: 100, nonce: 4' account --account alice
-"$JAMT" provide "$SVC" $FACTOR_CHECK >/dev/null
-"$JAMT" provide "$SVC" $PREIMAGE_CHECK >/dev/null
 
 step "bounty 1: a commitment that is never revealed, and an early reclaim"
 DAVE_C=$(commitment_of --service "$SVC" --bounty 1 --hunter dave --nonce 0 --salt 0xda --witness-str "$SECRET")
@@ -303,19 +289,19 @@ wait_slot $(( $(slot) + 1 ))
 
 step "revealing"
 # A witness the check rejects: refine reports CheckFailed(False) and nothing changes.
-item "$($W reveal --bounty 2 --check $PREIMAGE_CHECK --params-blake2b "$SECRET" --check-gas $GAS \
-	--hunter carol --salt 0xca --witness-str "wrong")"
-item "$($W reveal --bounty 0 --check $FACTOR_CHECK --params-u128 $N --check-gas $GAS \
-	--hunter mallory --salt 0x0bad --witness-u64 $FACTOR)"
+itemx "$($W reveal --bounty 2 --check $PREIMAGE_CHECK --params-blake2b "$SECRET" --check-gas $GAS \
+	--hunter carol --salt 0xca --witness-str "wrong" --extrinsics "$X")"
+itemx "$($W reveal --bounty 0 --check $FACTOR_CHECK --params-u128 $N --check-gas $GAS \
+	--hunter mallory --salt 0x0bad --witness-u64 $FACTOR --extrinsics "$X")"
 expect "mallory's reveal opens the window" 'Revealing' bounty --bounty 0
 expect "mallory's deposit refunded" 'balance: 100, nonce: 1' account --account mallory
-item "$($W reveal --bounty 0 --check $FACTOR_CHECK --params-u128 $N --check-gas $GAS \
-	--hunter bob --salt 0x0b0b --witness-u64 $FACTOR)"
+itemx "$($W reveal --bounty 0 --check $FACTOR_CHECK --params-u128 $N --check-gas $GAS \
+	--hunter bob --salt 0x0b0b --witness-u64 $FACTOR --extrinsics "$X")"
 expect "bob's deposit refunded" 'balance: 100, nonce: 1' account --account bob
 expect "bob's commitment consumed" '^none$' commitment --bounty 0 --commitment "$BOB_C"
 expect "carol's wrong witness changed nothing" 'Open' bounty --bounty 2
-item "$($W reveal --bounty 2 --check $PREIMAGE_CHECK --params-blake2b "$SECRET" --check-gas $GAS \
-	--hunter carol --salt 0xca --witness-str "$SECRET")"
+itemx "$($W reveal --bounty 2 --check $PREIMAGE_CHECK --params-blake2b "$SECRET" --check-gas $GAS \
+	--hunter carol --salt 0xca --witness-str "$SECRET" --extrinsics "$X")"
 expect "carol's reveal opens bounty 2's window" 'Revealing' bounty --bounty 2
 expect "carol's commitment consumed" '^none$' commitment --bounty 2 --commitment "$CAROL_C"
 reveal_dictionary 3 erin 0xe1 "open sesame some word"
@@ -347,10 +333,6 @@ expect "bounty 3 claimed" 'Claimed' bounty --bounty 3
 expect "erin won bounty 3" 'balance: 200, nonce: 1' account --account erin
 expect "bounty 1 reclaimed" 'Reclaimed' bounty --bounty 1
 expect "alice refunded bounty 1" 'balance: 200, nonce: 5' account --account alice
-for h in "$FACTOR_HASH" "$PREIMAGE_HASH" "$DICT_CHECK_HASH" "$DICT_HASH"; do
-	[ -z "$(storage --refs "$h")" ] || fail "preimage $h still referenced"
-done
-echo "ok: every check blob and the dictionary released"
 item "$($W release --bounty 1 --commitment "$DAVE_C")"
 expect "dave's dead commitment deleted" '^none$' commitment --bounty 1 --commitment "$DAVE_C"
 expect "dave's deposit forfeit" 'balance: 90, nonce: 1' account --account dave
