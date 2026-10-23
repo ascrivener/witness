@@ -36,6 +36,8 @@ const NOWHERE: BlobAt = BlobAt { extrinsic: LIBRARY, index: 999 };
 const CHECK_AT: u8 = 0;
 const OTHER_CHECK_AT: u8 = 1;
 const LIBRARY: u8 = 2;
+/// Ops' citations are extrinsics from here on, kept apart from the lists of subjects.
+const CITED: u8 = 128;
 
 /// The work item's extrinsics: the two check blobs, each whole, then the library of extra blobs;
 /// tests add more (lists of subjects, or raw bytes). Every op in a test sees them all.
@@ -47,12 +49,14 @@ const LIBRARY: u8 = 2;
 ///   start with `b"good"`, unless the witness is `b"no"`.
 struct Env {
 	extrinsics: Vec<Vec<u8>>,
+	/// Extrinsics `CITED`, `CITED + 1`, ...: ops' citations, added as ops are made.
+	citations: core::cell::RefCell<Vec<Vec<u8>>>,
 }
 
 impl Default for Env {
 	fn default() -> Self {
 		let library: Blobs = EXTRA.into_iter().map(<[u8]>::to_vec).collect();
-		Env { extrinsics: vec![BLOB.to_vec(), OTHER_BLOB.to_vec(), library.encode()] }
+		Env { extrinsics: vec![BLOB.to_vec(), OTHER_BLOB.to_vec(), library.encode()], citations: Default::default() }
 	}
 }
 
@@ -102,7 +106,7 @@ impl Env {
 	}
 
 	/// The claims and references for trusting entries of `subjects`'s claims, each claim once.
-	fn cite(&self, subjects: &[(AttestationClaim, u32)]) -> (Vec<AttestationClaim>, Vec<TrustedRef>) {
+	fn citations(&self, subjects: &[(AttestationClaim, u32)]) -> Citations {
 		let mut claims: Vec<AttestationClaim> = Vec::new();
 		let trusted = subjects
 			.iter()
@@ -114,7 +118,27 @@ impl Env {
 				self.trusted_ref(i as u16, claim, *entry)
 			})
 			.collect();
-		(claims, trusted)
+		Citations { claims, trusted }
+	}
+
+	/// The extrinsic citing entries of `subjects`'s claims, if any.
+	fn cite(&self, subjects: &[(AttestationClaim, u32)]) -> Option<u8> {
+		let c = self.citations(subjects);
+		(!c.claims.is_empty()).then(|| self.add_citations(&c))
+	}
+
+	/// Add an extrinsic holding `citations`, and return its index.
+	fn add_citations(&self, citations: &Citations) -> u8 {
+		let mut all = self.citations.borrow_mut();
+		all.push(citations.encode());
+		CITED + u8::try_from(all.len() - 1).expect("fewer than 128 citations a test")
+	}
+
+	/// The citations in extrinsic `at`, if any.
+	fn cited(&self, at: Option<u8>) -> Citations {
+		at.map_or_else(Citations::default, |at| {
+			Citations::decode(&mut &self.citations.borrow()[(at - CITED) as usize][..]).unwrap()
+		})
 	}
 
 	/// Where each of `blobs`'s plain blobs is.
@@ -155,10 +179,13 @@ fn parse_args(args: &[u8]) -> (u8, Vec<(bool, Vec<u8>)>, Vec<u8>) {
 
 impl RefineEnv for Env {
 	fn extrinsic(&self, index: usize) -> Option<Vec<u8>> {
-		self.extrinsics.get(index).cloned()
+		match index.checked_sub(CITED as usize) {
+			Some(i) => self.citations.borrow().get(i).cloned(),
+			None => self.extrinsics.get(index).cloned(),
+		}
 	}
 	fn extrinsic_hash(&self, index: usize) -> Option<Hash> {
-		self.extrinsics.get(index).map(|x| blake2b256(x))
+		self.extrinsic(index).map(|x| blake2b256(&x))
 	}
 	fn run_check(&self, blob: &[u8], args: &[u8], _gas: Gas) -> core::result::Result<(), Rejection> {
 		assert!(blob == BLOB || blob == OTHER_BLOB);
@@ -239,8 +266,7 @@ fn bare_reveal(env: &Env, blobs: Vec<BlobRef>) -> Op {
 		check: CHECK_AT,
 		plain: env.plain_at(&blobs),
 		blobs,
-		claims: vec![],
-		trusted: vec![],
+		citations: None,
 		check_gas: 1,
 		hunter: id(BOB),
 		salt: [0; 32],
@@ -392,7 +418,7 @@ impl Chain {
 			})
 			.collect();
 		subjects.extend_from_slice(more);
-		let (claims, trusted) = self.env.cite(&subjects);
+		let citations = self.env.cite(&subjects);
 		Op::Reveal {
 			bounty_id: b,
 			check_hash: terms.check_hash,
@@ -400,8 +426,7 @@ impl Chain {
 			check: self.env.check_at(&terms.check_hash),
 			plain: self.env.plain_at(&terms.blobs),
 			blobs: terms.blobs,
-			claims,
-			trusted,
+			citations,
 			check_gas: terms.check_gas,
 			hunter: id(hunter),
 			salt: [hunter; 32],
@@ -439,8 +464,8 @@ impl Chain {
 		subjects: u8,
 		trusted: &[(AttestationClaim, u32)],
 	) -> (Op, AttestationClaim) {
-		let (claims, trusted) = self.env.cite(trusted);
-		let claim = self.claim(check_hash, params, subjects, &claims);
+		let citations = self.env.citations(trusted);
+		let claim = self.claim(check_hash, params, subjects, &citations.claims);
 		let nonce = self.account(attester).nonce;
 		let msg = witness_types::attest_message(SERVICE, &id(attester), nonce, &claim.id());
 		let op = Op::Attest {
@@ -450,8 +475,7 @@ impl Chain {
 			check: self.env.check_at(&check_hash),
 			params: params.to_vec(),
 			subjects,
-			claims,
-			trusted,
+			citations: (!citations.claims.is_empty()).then(|| self.env.add_citations(&citations)),
 			witness: b"proof".to_vec(),
 			check_gas: 1000,
 			signature: key(attester).sign(&msg).to_bytes(),
@@ -833,8 +857,7 @@ fn reveal_must_name_the_bounty_blobs() {
 			check: CHECK_AT,
 			plain: c.env.plain_at(&blobs),
 			blobs,
-			claims: vec![],
-			trusted: vec![],
+			citations: None,
 			check_gas: terms.check_gas,
 			hunter: id(BOB),
 			salt: [BOB; 32],
@@ -953,6 +976,26 @@ fn attestations_form_a_dag() {
 }
 
 #[test]
+fn citations_are_an_extrinsic_of_their_own() {
+	let mut c = setup();
+	let a = c.attest(&[GOOD1], &[]).unwrap();
+	let list = c.list(&[GOOD2]);
+	let (op, _) = c.attest_op(CAROL, check(), b"batch", list, &[(a, 0)]);
+	assert!(matches!(c.refine(op.clone()), Verified::Attest { .. }));
+	let garbage = c.env.add(vec![9, 9, 9]);
+	let with = |citations| {
+		let mut op = op.clone();
+		let Op::Attest { citations: at, .. } = &mut op else { unreachable!() };
+		*at = citations;
+		c.refine(op)
+	};
+	assert_eq!(with(Some(garbage)), Verified::Rejected(Rejection::BadExtrinsic), "not citations");
+	assert_eq!(with(Some(CITED + 100)), Verified::Rejected(Rejection::BadBlob), "no such extrinsic");
+	// Leaving them out changes the claim's parents, which the signature covers.
+	assert_eq!(with(None), Verified::Rejected(Rejection::BadSignature));
+}
+
+#[test]
 fn trusted_refs_must_be_exact() {
 	let mut c = setup();
 	let a = c.attest(&[GOOD1, GOOD2], &[]).unwrap();
@@ -965,8 +1008,8 @@ fn trusted_refs_must_be_exact() {
 		// Signing over whatever parents the claims make.
 		let claim = c.claim(check(), b"batch", list, &claims);
 		let msg = witness_types::attest_message(SERVICE, &id(CAROL), c.account(CAROL).nonce, &claim.id());
-		let Op::Attest { claims: cs, trusted: ts, signature, .. } = &mut op else { unreachable!() };
-		(*cs, *ts) = (claims, trusted);
+		let Op::Attest { citations, signature, .. } = &mut op else { unreachable!() };
+		*citations = Some(c.env.add_citations(&Citations { claims, trusted }));
 		*signature = key(CAROL).sign(&msg).to_bytes();
 		c.refine(op)
 	};
@@ -1086,18 +1129,21 @@ fn reveals_must_trust_the_bounty_subjects() {
 	let (mut c, _) = with_attested_blobs();
 	c.commit(1, BOB, b"x").unwrap();
 	c.advance(MIN_COMMIT_AGE);
+	// Change a reveal's trusted references, in a new citations extrinsic.
+	let recite = |op: &mut Op, f: &dyn Fn(&mut Vec<TrustedRef>)| {
+		let Op::Reveal { citations, .. } = op else { unreachable!() };
+		let mut cited = c.env.cited(*citations);
+		f(&mut cited.trusted);
+		*citations = Some(c.env.add_citations(&cited));
+	};
 	let mut op = c.reveal_op(1, BOB, b"x", &[]);
-	let Op::Reveal { trusted, .. } = &mut op else { unreachable!() };
-	trusted.pop();
+	recite(&mut op, &|t| drop(t.pop()));
 	assert_eq!(c.refine(op.clone()), Verified::Rejected(Rejection::BadTrustedRef), "one left out");
-	let Op::Reveal { trusted, .. } = &mut op else { unreachable!() };
-	let first = trusted[0].clone();
-	trusted.push(first);
+	recite(&mut op, &|t| t.push(t[0].clone()));
 	assert_eq!(c.refine(op), Verified::Rejected(Rejection::BadTrustedRef), "the wrong one instead");
 	// Order is the hunter's choice.
 	let mut op = c.reveal_op(1, BOB, b"x", &[]);
-	let Op::Reveal { trusted, .. } = &mut op else { unreachable!() };
-	trusted.reverse();
+	recite(&mut op, &|t| t.reverse());
 	c.submit(op).unwrap();
 }
 

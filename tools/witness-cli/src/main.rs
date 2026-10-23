@@ -13,6 +13,7 @@ use ed25519_dalek::{Signer, SigningKey};
 use std::{collections::HashMap, process::ExitCode};
 use mock_token::{BalanceKey, Holder, TokenOp};
 use witness_types::{
+	Citations,
 	Account, AccountId, AdminAction, Amount, Asset, Attestation, AttestationClaim, AttestationId, BlobAt,
 	BlobHash, BlobRef, Blobs, Bounty, BountyTerms, CommitRecord, Config, Hash, MIN_CLAIM_WINDOW, Op,
 	Proposal, StorageKey, TEST_ASSET, TrustedRef, Verified, blake2b256, merkle,
@@ -260,15 +261,21 @@ fn cite(subjects: &[(Cited, u32)], extrinsic: u8, blobs: &mut Blobs) -> Result<(
 }
 
 /// Write an op's extrinsics to `dir`, as files `0`, `1`, ..., replacing what was there: the check
-/// blob, whole, then `lists` of blobs.
-fn write_extrinsics(dir: &str, check: &[u8], lists: &[Blobs]) -> Result<(), String> {
+/// blob, whole, then `lists` of blobs, then the op's citations, whole, if it cites anything.
+/// Returns the citations' extrinsic.
+fn write_extrinsics(dir: &str, check: &[u8], lists: &[Blobs], citations: Citations) -> Result<Option<u8>, String> {
 	let _ = std::fs::remove_dir_all(dir);
 	std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {dir}: {e}"))?;
 	write(&format!("{dir}/0"), check)?;
 	for (i, blobs) in lists.iter().enumerate() {
 		write(&format!("{dir}/{}", i + 1), &blobs.encode())?;
 	}
-	Ok(())
+	if citations.claims.is_empty() && citations.trusted.is_empty() {
+		return Ok(None);
+	}
+	let at = lists.len() + 1;
+	write(&format!("{dir}/{at}"), &citations.encode())?;
+	Ok(Some(at as u8))
 }
 
 fn write(path: &str, data: &[u8]) -> Result<(), String> {
@@ -445,7 +452,8 @@ fn run(command: &str, f: &Flags) -> Result<(), String> {
 			Op::Commit { bounty_id, committer: committer_id, nonce, commitment, signature }
 		},
 		"reveal" => {
-			// Extrinsic 0 is the check, whole; 1 the plain blobs, then the trusted subjects.
+			// Extrinsic 0 is the check, whole; 1 the plain blobs, then the trusted subjects; 2 the
+			// citations, if any.
 			let (check_hash, _, check) = f.check()?;
 			let blobs = f.blobs()?;
 			let mut given = Blobs::new();
@@ -462,7 +470,7 @@ fn run(command: &str, f: &Flags) -> Result<(), String> {
 			}
 			subjects.extend(f.trust()?);
 			let (claims, trusted) = cite(&subjects, 1, &mut given)?;
-			write_extrinsics(f.extrinsics()?, &check, &[given])?;
+			let citations = write_extrinsics(f.extrinsics()?, &check, &[given], Citations { claims, trusted })?;
 			Op::Reveal {
 				bounty_id: f.num("bounty")?,
 				check_hash,
@@ -470,8 +478,7 @@ fn run(command: &str, f: &Flags) -> Result<(), String> {
 				blobs: blobs.into_iter().map(|(blob, _)| blob).collect(),
 				check: 0,
 				plain,
-				claims,
-				trusted,
+				citations,
 				check_gas: f.num("check-gas")?,
 				hunter: f.account("hunter")?,
 				salt: f.salt()?,
@@ -491,7 +498,8 @@ fn run(command: &str, f: &Flags) -> Result<(), String> {
 		},
 		"release" => Op::Release { bounty_id: f.num("bounty")?, commitment: f.hash("commitment")? },
 		"attest" => {
-			// Extrinsic 0 is the check, whole; 1 the subjects; 2 the trusted subjects.
+			// Extrinsic 0 is the check, whole; 1 the subjects; 2 the trusted subjects; 3 the
+			// citations, if any.
 			let service: u32 = f.num("service")?;
 			let attester = f.key("attester")?;
 			let nonce = f.num("nonce")?;
@@ -513,7 +521,7 @@ fn run(command: &str, f: &Flags) -> Result<(), String> {
 			let has_witness = ["witness", "witness-str", "witness-u64", "witness-file"].iter().any(|w| f.has(w));
 			let witness = if has_witness { f.witness()? } else { vec![] };
 			write(f.str("claim-out")?, &(claim.clone(), subjects.clone()).encode())?;
-			write_extrinsics(f.extrinsics()?, &check, &[subjects, given])?;
+			let citations = write_extrinsics(f.extrinsics()?, &check, &[subjects, given], Citations { claims, trusted })?;
 			eprintln!("attestation 0x{}", to_hex(&claim.id()));
 			let attester_id = attester.verifying_key().to_bytes();
 			let message = witness_types::attest_message(service, &attester_id, nonce, &claim.id());
@@ -525,8 +533,7 @@ fn run(command: &str, f: &Flags) -> Result<(), String> {
 				check: 0,
 				params,
 				subjects: 1,
-				claims,
-				trusted,
+				citations,
 				witness,
 				check_gas: f.num("check-gas")?,
 				signature,

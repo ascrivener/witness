@@ -382,6 +382,17 @@ pub struct TrustedRef {
 	pub path: Vec<Hash>,
 }
 
+/// What a reveal or an attestation cites: the attestations it rests on, each once, and the
+/// subjects of theirs it trusts. It travels as an extrinsic of its own rather than in the op:
+/// with a Merkle path a subject it can run to hundreds of kilobytes, and a work package's own
+/// bytes (its items' payloads) are few. JAM commits to the extrinsic's hash, and refine checks
+/// every reference against its claim.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Encode, Decode)]
+pub struct Citations {
+	pub claims: Vec<AttestationClaim>,
+	pub trusted: Vec<TrustedRef>,
+}
+
 /// A recorded attestation. Kept for good, so it holds only what accumulate needs: the claim is
 /// its id.
 #[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
@@ -441,14 +452,13 @@ pub enum Op {
 		check: u8,
 		/// The bounty's plain blobs, in order.
 		plain: Vec<BlobAt>,
-		/// The attestations `trusted` cites, each once: all by the bounty's check, with one set of
-		/// params, which the bounty's own attested blobs fix. A bounty citing no attestation takes
-		/// none, as otherwise the hunter would choose those params.
-		claims: Vec<AttestationClaim>,
-		/// Every subject passed to the check as trusted: those of the bounty's blobs, and any
-		/// more the reveal relies on (such as library a proof uses that the bounty didn't name).
-		/// They come first, in this order, then the bounty's plain blobs.
-		trusted: Vec<TrustedRef>,
+		/// The extrinsic holding the reveal's [`Citations`], whole, if it cites any. Its claims are
+		/// all by the bounty's check, with one set of params, which the bounty's own attested blobs
+		/// fix; a bounty citing no attestation takes none, as otherwise the hunter would choose
+		/// those params. Its trusted subjects are those of the bounty's blobs, and any more the
+		/// reveal relies on (such as library a proof uses that the bounty didn't name). They come
+		/// first, in this order, then the bounty's plain blobs.
+		citations: Option<u8>,
 		check_gas: Gas,
 		hunter: AccountId,
 		salt: Hash,
@@ -471,9 +481,9 @@ pub enum Op {
 		check: u8,
 		params: Vec<u8>,
 		subjects: u8,
-		/// The parent attestations, each once.
-		claims: Vec<AttestationClaim>,
-		trusted: Vec<TrustedRef>,
+		/// The extrinsic holding the attestation's [`Citations`], whole, if it trusts anything:
+		/// its parent attestations, each once, and the subjects it trusts.
+		citations: Option<u8>,
 		/// The attester's evidence, passed to the check (a batch's proofs, say). Not part of the
 		/// claim: the attestation is about the subjects, however they were shown.
 		witness: Vec<u8>,
@@ -519,7 +529,8 @@ pub enum Rejection {
 	/// A trusted reference to a claim or entry that doesn't exist, a claim cited twice or that no
 	/// reference uses, or a reveal that doesn't trust its bounty's attested subjects.
 	BadTrustedRef,
-	/// An extrinsic that doesn't decode as [`Blobs`], or holds more than [`MAX_BLOBS`].
+	/// An extrinsic that doesn't decode as [`Blobs`] (or as [`Citations`], for an op's citations),
+	/// or holds more than [`MAX_BLOBS`].
 	BadExtrinsic,
 	/// The check blob is not a valid standard program, or needs more memory than allowed.
 	BadCheckBlob,
