@@ -2,7 +2,8 @@
 //!
 //! Each work item's payload is one encoded [`Op`], and its extrinsics hold the blobs the op names.
 //! The rules live in `witness_rules`; this crate connects them to the host: extrinsics and the
-//! inner-PVM check for refine, storage for accumulate. See `witness_types` for the protocol.
+//! inner-PVM check for refine; storage, transfers in and out, and code upgrades for accumulate.
+//! See `witness_types` for the protocol.
 
 #![cfg_attr(any(target_arch = "riscv32", target_arch = "riscv64"), no_std)]
 
@@ -12,9 +13,10 @@ mod check_vm;
 
 use alloc::vec::Vec;
 use codec::{Decode, Encode};
-use jam_pvm_common::{accumulate, debug, info, refine};
+use jam_pvm_common::{accumulate, info, refine};
 use jam_types::{
-	AccumulateItem, Balance, CoreIndex, FOOTPRINT_STORAGE_OVERHEAD, Hash, ServiceId, Slot, WorkItemRecord, WorkOutput, WorkPackageHash, WorkPayload,
+	AccumulateItem, Balance, CoreIndex, FOOTPRINT_PREIMAGE_OVERHEAD, FOOTPRINT_STORAGE_OVERHEAD, Hash, Memo, ServiceId,
+	Slot, TransferRecord, WorkItemRecord, WorkOutput, WorkPackageHash, WorkPayload,
 };
 use witness_rules::Effects;
 use witness_types::{Gas, Op, Rejection, Verified};
@@ -73,13 +75,22 @@ impl jam_pvm_common::Service for Service {
 		for item in accumulate::accumulate_items() {
 			match item {
 				AccumulateItem::WorkItem(record) => on_work_item(record, now),
-				// Points are not backed by service balance yet, so transfers are just kept.
-				AccumulateItem::Transfer(t) => {
-					debug!(target = "witness", "transfer of {}", t.amount);
-				},
+				AccumulateItem::Transfer(t) => on_transfer(t),
 			}
 		}
 		None
+	}
+}
+
+/// A deposit, if it's from an accepted token service; its native balance stays with the service
+/// either way.
+fn on_transfer(t: TransferRecord) {
+	match witness_rules::on_transfer(&Host, t.source, t.amount, &t.memo.0).and_then(apply) {
+		Ok(()) => {
+			info!(target = "witness", "deposit from service {}", t.source);
+			accumulate::checkpoint();
+		},
+		Err(reason) => info!(target = "witness", "transfer of {} from service {}: {reason}", t.amount, t.source),
 	}
 }
 
@@ -116,12 +127,15 @@ fn on_work_item_inner(record: WorkItemRecord, now: Slot) {
 /// The most storage deposit `effects` could add, counting every write as a new item.
 fn deposit_needed(effects: &Effects) -> Balance {
 	let params = accumulate::protocol_parameters();
-	effects
+	let item = |bytes: u64| params.deposit_per_item + params.deposit_per_byte * bytes;
+	let writes: Balance = effects
 		.writes
 		.iter()
 		.filter_map(|(key, value)| value.as_ref().map(|v| (key.len() + v.len()) as u64))
-		.map(|bytes| params.deposit_per_item + params.deposit_per_byte * (bytes + FOOTPRINT_STORAGE_OVERHEAD))
-		.sum()
+		.map(|bytes| item(bytes + FOOTPRINT_STORAGE_OVERHEAD))
+		.sum();
+	let solicit = effects.solicit.map_or(0, |(_, len)| item(len as u64 + FOOTPRINT_PREIMAGE_OVERHEAD));
+	writes + solicit
 }
 
 /// Apply `effects` in full, or not at all.
@@ -132,6 +146,19 @@ fn apply(effects: Effects) -> Result<(), &'static str> {
 	if info.balance < info.threshold.saturating_add(deposit_needed(&effects)) {
 		return Err("service balance too low to store this");
 	}
+	// Likewise the transfers and the upgrade: check now what would make them fail later.
+	let mut transfers = alloc::vec::Vec::new();
+	for (destination, memo) in &effects.transfers {
+		let to = accumulate::service_info(*destination).ok_or("no such token service")?;
+		transfers.push((*destination, to.min_memo_gas, Memo(*memo)));
+	}
+	let gas_needed: u64 = transfers.iter().map(|(_, gas, _)| gas).sum();
+	if accumulate::gas() < gas_needed.saturating_add(1_000_000) {
+		return Err("not enough gas left to send the transfers");
+	}
+	if effects.upgrade.is_some_and(|code_hash| !accumulate::is_available(&code_hash)) {
+		return Err("the new code hasn't been provided");
+	}
 	for (key, value) in &effects.writes {
 		match value {
 			Some(value) => {
@@ -141,6 +168,18 @@ fn apply(effects: Effects) -> Result<(), &'static str> {
 				accumulate::remove_storage(key);
 			},
 		}
+	}
+	for (destination, gas, memo) in &transfers {
+		// No native balance moves: the memo carries the withdrawal.
+		accumulate::transfer(*destination, 0, *gas, memo).expect("destination and gas checked above");
+	}
+	if let Some((hash, len)) = effects.solicit {
+		// Already requested is fine: someone proposed the same code before.
+		let _ = accumulate::solicit(&hash, len as usize);
+	}
+	if let Some(code_hash) = effects.upgrade {
+		// The new code takes over from the next work item; the service keeps its id and state.
+		accumulate::upgrade(&code_hash.into(), info.min_item_gas, info.min_memo_gas);
 	}
 	Ok(())
 }

@@ -396,6 +396,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
+name = "mock-token"
+version = "0.1.0"
+dependencies = [
+ "jam-codec",
+ "witness-types",
+]
+
+[[package]]
+name = "mock-token-service"
+version = "0.1.0"
+dependencies = [
+ "jam-codec",
+ "jam-pvm-common",
+ "jam-types",
+ "mock-token",
+ "polkavm-derive",
+]
+
+[[package]]
 name = "pastey"
 version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -744,6 +763,7 @@ version = "0.1.0"
 dependencies = [
  "ed25519-dalek",
  "jam-codec",
+ "mock-token",
  "witness-types",
 ]
 
@@ -773,6 +793,7 @@ name = "witness-sim"
 version = "0.1.0"
 dependencies = [
  "jam-codec",
+ "mock-token",
  "polkavm",
  "witness-rules",
  "witness-types",

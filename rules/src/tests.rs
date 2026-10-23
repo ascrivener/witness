@@ -183,6 +183,10 @@ impl RefineEnv for Env {
 struct Chain {
 	env: Env,
 	storage: BTreeMap<Vec<u8>, Vec<u8>>,
+	/// Transfers sent, preimages solicited and upgrades made, in order.
+	sent: Vec<(u32, [u8; MEMO_LEN])>,
+	solicited: Vec<(Hash, u32)>,
+	upgraded: Vec<Hash>,
 	now: Slot,
 	/// Claims of the attestations recorded so far, as a hunter would keep them to reveal with.
 	claims: BTreeMap<AttestationId, AttestationClaim>,
@@ -200,6 +204,25 @@ fn key(seed: u8) -> SigningKey {
 
 fn id(seed: u8) -> AccountId {
 	key(seed).verifying_key().to_bytes()
+}
+
+/// A test account: a nonce and a balance of [`TEST_ASSET`].
+#[derive(Debug, PartialEq, Eq)]
+struct Account {
+	balance: Amount,
+	nonce: u64,
+}
+
+/// The deposits the test configuration sets.
+const COMMIT_DEPOSIT: Amount = 10;
+const ATTEST_DEPOSIT: Amount = 10;
+/// An accepted token service, and one that isn't.
+const TOKENS: u32 = 40;
+const OTHER_TOKENS: u32 = 41;
+
+/// The test build's admin: the witness CLI's `--seed admin`.
+fn admin_key() -> SigningKey {
+	SigningKey::from_bytes(&blake2b256(b"admin"))
 }
 
 const ALICE: u8 = 1;
@@ -230,13 +253,56 @@ impl Chain {
 	fn submit(&mut self, op: Op) -> Result<()> {
 		let verified = self.refine(op);
 		let fx = accumulate(self, verified, self.now)?;
+		self.apply(fx);
+		Ok(())
+	}
+
+	fn apply(&mut self, fx: Effects) {
 		for (k, v) in fx.writes {
 			match v {
 				Some(v) => self.storage.insert(k, v),
 				None => self.storage.remove(&k),
 			};
 		}
+		self.sent.extend(fx.transfers);
+		self.solicited.extend(fx.solicit);
+		self.upgraded.extend(fx.upgrade);
+	}
+
+	/// Service `source` sends a transfer with `memo`.
+	fn transfer(&mut self, source: u32, memo: &[u8]) -> Result<()> {
+		self.transfer_with(source, 0, memo)
+	}
+
+	fn transfer_with(&mut self, source: u32, native: u64, memo: &[u8]) -> Result<()> {
+		let fx = on_transfer(self, source, native, memo)?;
+		self.apply(fx);
 		Ok(())
+	}
+
+	/// Token service `service` deposits `amount` of its asset `asset_id` for `seed`.
+	fn deposit(&mut self, service: u32, asset_id: u32, seed: u8, amount: Amount) -> Result<()> {
+		let memo = DepositMemo { version: MEMO_VERSION, asset_id, amount, to: id(seed) };
+		self.transfer(service, &witness_types::memo(&memo))
+	}
+
+	fn balance(&self, seed: u8, asset: Asset) -> Amount {
+		self.get_typed(&StorageKey::Balance(id(seed), asset)).unwrap_or(0)
+	}
+
+	/// The admin proposes `action`.
+	fn propose(&mut self, action: AdminAction) -> Result<()> {
+		let nonce = self.nonce_of(&BUILD_ADMIN);
+		let signature = admin_key().sign(&witness_types::propose_message(SERVICE, &BUILD_ADMIN, nonce, &action));
+		self.submit(Op::Propose { admin: BUILD_ADMIN, nonce, action, signature: signature.to_bytes() })
+	}
+
+	fn nonce_of(&self, id: &AccountId) -> u64 {
+		self.get_typed::<witness_types::Account>(&StorageKey::Account(*id)).unwrap_or_default().nonce
+	}
+
+	fn config(&self) -> Option<Config> {
+		self.get_typed(&StorageKey::Config)
 	}
 
 	/// Refine `op`, with the extrinsics added so far.
@@ -248,8 +314,9 @@ impl Chain {
 		self.now += slots;
 	}
 
+	/// `seed`'s nonce and balance of the test asset.
 	fn account(&self, seed: u8) -> Account {
-		self.get_typed(&StorageKey::Account(id(seed))).unwrap_or_default()
+		Account { balance: self.balance(seed, TEST_ASSET), nonce: self.nonce_of(&id(seed)) }
 	}
 
 	fn bounty(&self, id: BountyId) -> Bounty {
@@ -260,7 +327,7 @@ impl Chain {
 		self.storage.get(&key.encode()).map(|v| T::decode(&mut &v[..]).unwrap())
 	}
 
-	fn mint(&mut self, seed: u8, amount: Points) {
+	fn mint(&mut self, seed: u8, amount: Amount) {
 		self.submit(Op::Mint { to: id(seed), amount }).unwrap();
 	}
 
@@ -270,6 +337,7 @@ impl Chain {
 			check_len: BLOB.len() as u32,
 			params: b"params".to_vec(),
 			blobs: vec![],
+			asset: TEST_ASSET,
 			reward: 500,
 			check_gas: 1000,
 			expiry: self.now + 50,
@@ -430,9 +498,21 @@ impl Chain {
 	}
 }
 
-/// Alice has a bounty 0 open; Bob, Carol and Mallory have points for deposits.
+/// The test configuration: token service [`TOKENS`], and deposits paid in the test asset.
+fn test_config() -> Config {
+	Config {
+		token_services: vec![TOKENS],
+		fee_asset: Some(TEST_ASSET),
+		commit_deposit: COMMIT_DEPOSIT,
+		attest_deposit: ATTEST_DEPOSIT,
+	}
+}
+
+/// Witness is configured; Alice has a bounty 0 open; Bob, Carol and Mallory have the test asset
+/// for deposits.
 fn setup() -> Chain {
 	let mut c = Chain { now: 100, ..Default::default() };
+	c.propose(AdminAction::Configure(test_config())).unwrap();
 	c.mint(ALICE, 1000);
 	for h in [BOB, CAROL, MALLORY] {
 		c.mint(h, 100);
@@ -604,7 +684,7 @@ fn commit_rules() {
 	let stale = Op::Commit { bounty_id: 0, committer: id(BOB), nonce: 0, commitment: other, signature };
 	assert_eq!(c.submit(stale), Err("bad nonce"));
 	let broke = 9;
-	assert_eq!(c.commit(0, broke, b"x"), Err("insufficient points"));
+	assert_eq!(c.commit(0, broke, b"x"), Err("insufficient balance"));
 
 	// A forged signature is caught in refine.
 	let forged = Op::Commit {
@@ -684,7 +764,7 @@ fn create_rules() {
 	assert_eq!(c.create(terms), Err("expiry too soon"));
 	let mut terms = c.terms();
 	terms.reward = 501;
-	assert_eq!(c.create(terms), Err("insufficient points"));
+	assert_eq!(c.create(terms), Err("insufficient balance"));
 	let mut terms = c.terms();
 	terms.params = vec![0; MAX_PARAMS_LEN as usize + 1];
 	assert_eq!(c.create(terms), Err("check too large"));
@@ -1087,4 +1167,136 @@ fn reveals_name_their_plain_blobs() {
 	let moved = with_plain(&c, &|p| *p = vec![BlobAt { extrinsic: copy, index: 1 }, BlobAt { extrinsic: copy, index: 0 }]);
 	assert!(matches!(moved, Verified::Reveal { .. }));
 	c.reveal(1, BOB, b"onetwo").unwrap();
+}
+
+#[test]
+fn deposits_come_only_from_accepted_token_services() {
+	let mut c = setup();
+	let usd = Asset { service: TOKENS, id: 7 };
+	c.deposit(TOKENS, 7, BOB, 250).unwrap();
+	c.deposit(TOKENS, 7, BOB, 50).unwrap();
+	assert_eq!(c.balance(BOB, usd), 300);
+	assert_eq!(c.balance(BOB, Asset { service: TOKENS, id: 8 }), 0, "asset by asset");
+	assert_eq!(c.deposit(OTHER_TOKENS, 7, BOB, 1), Err("not from an accepted token service"));
+	assert_eq!(c.transfer(TOKENS, &[0; MEMO_LEN]), Err("unknown memo version"));
+	assert_eq!(c.transfer(TOKENS, &[1, 2]), Err("not a deposit"));
+	assert_eq!(c.balance(BOB, usd), 300);
+	// Native balance sent along is recorded as the recipient's storage credit.
+	let memo = DepositMemo { version: MEMO_VERSION, asset_id: 7, amount: 1, to: id(CAROL) };
+	c.transfer_with(TOKENS, 500, &witness_types::memo(&memo)).unwrap();
+	c.transfer_with(TOKENS, 25, &witness_types::memo(&memo)).unwrap();
+	assert_eq!(c.get_typed::<u64>(&StorageKey::StorageCredit(id(CAROL))), Some(525));
+	assert_eq!(c.get_typed::<u64>(&StorageKey::StorageCredit(id(BOB))), None);
+	// Before witness is configured, nothing is accepted.
+	let mut fresh = Chain::default();
+	assert_eq!(fresh.deposit(TOKENS, 7, BOB, 1), Err("not from an accepted token service"));
+}
+
+#[test]
+fn withdrawals_send_a_memo_back() {
+	let mut c = setup();
+	let usd = Asset { service: TOKENS, id: 7 };
+	c.deposit(TOKENS, 7, BOB, 300).unwrap();
+	let withdraw = |asset: Asset, amount: Amount, nonce: u64| {
+		let to = [0x99; 32];
+		let msg = witness_types::withdraw_message(SERVICE, &id(BOB), nonce, &asset, amount, &to);
+		let signature = key(BOB).sign(&msg).to_bytes();
+		Op::Withdraw { account: id(BOB), nonce, asset, amount, to, signature }
+	};
+	c.submit(withdraw(usd, 120, 0)).unwrap();
+	assert_eq!(c.balance(BOB, usd), 180);
+	let memo = WithdrawalMemo { version: MEMO_VERSION, asset_id: 7, amount: 120, to: [0x99; 32] };
+	assert_eq!(c.sent, vec![(TOKENS, witness_types::memo(&memo))]);
+	assert_eq!(c.submit(withdraw(usd, 181, 1)), Err("insufficient balance"));
+	assert_eq!(c.submit(withdraw(usd, 1, 0)), Err("bad nonce"), "no replay");
+	assert_eq!(c.submit(withdraw(TEST_ASSET, 1, 1)), Err("the test asset can't be withdrawn"));
+	let mut forged = withdraw(usd, 1, 1);
+	let Op::Withdraw { amount, .. } = &mut forged else { unreachable!() };
+	*amount = 180;
+	assert_eq!(c.refine(forged), Verified::Rejected(Rejection::BadSignature));
+	assert_eq!(c.sent.len(), 1, "failed withdrawals send nothing");
+
+	// A balance can go back where it came from even once its service is no longer accepted.
+	c.storage.insert(StorageKey::Config.encode(), Config { token_services: vec![], ..test_config() }.encode());
+	c.submit(withdraw(usd, 180, 1)).unwrap();
+	assert_eq!(c.balance(BOB, usd), 0);
+}
+
+#[test]
+fn bounties_pay_in_their_asset_and_deposits_in_the_fee_asset() {
+	let mut c = setup();
+	let usd = Asset { service: TOKENS, id: 7 };
+	c.deposit(TOKENS, 7, ALICE, 1000).unwrap();
+	let mut terms = c.terms();
+	terms.asset = usd;
+	terms.reward = 600;
+	c.create(terms).unwrap(); // bounty 1
+	assert_eq!(c.balance(ALICE, usd), 400);
+	c.commit(1, BOB, b"x").unwrap();
+	assert_eq!(c.account(BOB).balance, 100 - COMMIT_DEPOSIT, "the deposit is in the fee asset");
+	c.advance(MIN_COMMIT_AGE);
+	c.reveal(1, BOB, b"x").unwrap();
+	c.advance(MIN_CLAIM_WINDOW);
+	c.finalize(1).unwrap();
+	assert_eq!(c.balance(BOB, usd), 600);
+	assert_eq!(c.account(BOB).balance, 100);
+
+	// Only accepted assets.
+	let mut terms = c.terms();
+	terms.asset = Asset { service: OTHER_TOKENS, id: 7 };
+	assert_eq!(c.create(terms), Err("asset not accepted"));
+	// Before witness is configured, commitments and attestations have no deposit to take.
+	let mut fresh = Chain { now: 100, ..Default::default() };
+	fresh.mint(ALICE, 1000);
+	fresh.mint(BOB, 100);
+	let terms = fresh.terms();
+	fresh.create(terms).unwrap();
+	assert_eq!(fresh.commit(0, BOB, b"x"), Err("witness is not configured"));
+	assert_eq!(fresh.attest(&[GOOD1], &[]), Err("witness is not configured"));
+}
+
+#[test]
+fn admin_actions_wait_out_the_delay() {
+	let mut c = setup();
+	assert_eq!(c.config(), Some(test_config()), "the first configuration applies at once");
+	let stricter = Config { commit_deposit: 20, ..test_config() };
+	c.propose(AdminAction::Configure(stricter.clone())).unwrap(); // proposal 0
+	assert_eq!(c.config(), Some(test_config()), "later ones wait");
+	assert_eq!(c.submit(Op::Apply { id: 0 }), Err("proposal not yet effective"));
+	c.advance(ADMIN_DELAY - 1);
+	assert_eq!(c.submit(Op::Apply { id: 0 }), Err("proposal not yet effective"));
+	c.advance(1);
+	c.submit(Op::Apply { id: 0 }).unwrap();
+	assert_eq!(c.config(), Some(stricter));
+	assert_eq!(c.submit(Op::Apply { id: 0 }), Err("no such proposal"));
+
+	// Only the admin proposes or cancels.
+	let action = AdminAction::SetAdmin(id(MALLORY));
+	let nonce = c.account(MALLORY).nonce;
+	let signature = key(MALLORY).sign(&witness_types::propose_message(SERVICE, &id(MALLORY), nonce, &action));
+	let op = Op::Propose { admin: id(MALLORY), nonce, action, signature: signature.to_bytes() };
+	assert_eq!(c.submit(op), Err("not the admin"));
+
+	// A cancelled proposal never applies.
+	c.propose(AdminAction::SetAdmin(id(CAROL))).unwrap(); // proposal 1
+	let nonce = c.nonce_of(&BUILD_ADMIN);
+	let signature = admin_key().sign(&witness_types::cancel_message(SERVICE, &BUILD_ADMIN, nonce, 1));
+	c.submit(Op::Cancel { admin: BUILD_ADMIN, nonce, id: 1, signature: signature.to_bytes() }).unwrap();
+	c.advance(ADMIN_DELAY);
+	assert_eq!(c.submit(Op::Apply { id: 1 }), Err("no such proposal"));
+
+	// Handing the role on: the new admin proposes, the old one no longer can.
+	c.propose(AdminAction::SetAdmin(id(CAROL))).unwrap(); // proposal 2
+	c.advance(ADMIN_DELAY);
+	c.submit(Op::Apply { id: 2 }).unwrap();
+	assert_eq!(c.propose(AdminAction::SetAdmin(BUILD_ADMIN)), Err("not the admin"));
+	let action = AdminAction::Upgrade { code_hash: [5; 32], code_len: 1000 };
+	let nonce = c.account(CAROL).nonce;
+	let signature = key(CAROL).sign(&witness_types::propose_message(SERVICE, &id(CAROL), nonce, &action));
+	c.submit(Op::Propose { admin: id(CAROL), nonce, action, signature: signature.to_bytes() }).unwrap(); // 3
+	assert_eq!(c.solicited, vec![([5; 32], 1000)], "an upgrade solicits its code when proposed");
+	assert!(c.upgraded.is_empty());
+	c.advance(ADMIN_DELAY);
+	c.submit(Op::Apply { id: 3 }).unwrap();
+	assert_eq!(c.upgraded, vec![[5; 32]]);
 }

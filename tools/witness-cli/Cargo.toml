@@ -14,3 +14,4 @@ path = "src/main.rs"
 witness-types = { workspace = true, features = ["std"] }
 codec = { workspace = true, features = ["std"] }
 ed25519-dalek = { workspace = true, features = ["std"] }
+mock-token = { workspace = true, features = ["std"] }

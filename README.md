@@ -4,26 +4,34 @@ A "find the witness" bounty market as a JAM service. A maker posts `check(params
 with a reward. Hunters commit to an `x` and then reveal it. Among the reveals that pass the
 check, the one whose commitment reached the chain first wins.
 
-Prototype: rewards are points from a faucet (`Mint`), not tokens.
+Rewards are paid in stablecoins (or any asset) held by token services: users deposit them by a
+transfer from the token service and withdraw them by a transfer back. Witness's own native
+balance only pays for the records it stores. See [docs/design/tokens.md](docs/design/tokens.md).
+Not yet deployed anywhere with real money: test builds also have a faucet (`Mint`).
 
 ## How it works
 
 | Op | Refine (in-core, stateless) | Accumulate (on-chain) |
 |---|---|---|
-| `Mint` | — | credit points (faucet, at most `MAX_MINT`) |
-| `CreateBounty` | verify the maker's Ed25519 signature | check nonce, balance and limits, and that cited attestations exist and are by the bounty's check with one set of params; debit the reward; store the bounty |
-| `Commit` | verify the committer's signature | the bounty takes commitments; debit `COMMIT_DEPOSIT`; record the slot of `blake2b(bounty_id, x, hunter, salt)` |
+| deposit (a transfer in) | — | from an accepted token service, with a deposit memo: credit the account it names with that asset |
+| `Withdraw` | verify the account's signature | debit the asset; send its token service a transfer whose memo pays the payee there |
+| `Mint` | — | test builds: credit the test asset (a faucet, at most `MAX_MINT`) |
+| `CreateBounty` | verify the maker's Ed25519 signature | check nonce, balance and limits, that the bounty's asset is accepted, and that cited attestations exist and are by the bounty's check with one set of params; escrow the reward; store the bounty |
+| `Commit` | verify the committer's signature | the bounty takes commitments; lock the configured commit deposit (in the fee asset); record the slot of `blake2b(bounty_id, x, hunter, salt)` |
 | `Reveal` | read the check blob, the plain blobs and the trusted subjects the reveal cites (the bounty's, and any more it adds) from the work item's extrinsics, checking each against the bounty's hashes or its claim's Merkle root; run the check on them (attested ones marked trusted), `params` and `x` in an inner PVM with the bounty's `check_gas` | the terms match, the cited attestations were recorded, and the commitment is older than this slot and made before expiry. The first valid reveal opens the claim window, and later ones replace the leader if their commitment is earlier. Refund the deposit |
 | `Finalize` | — | once the claim window has closed, pay the leader |
 | `Reclaim` | verify the maker's signature | if no one revealed by `expiry + REVEAL_GRACE`, refund the maker |
 | `Release` | — | delete a commitment (named by bounty and hash) that can no longer be revealed; its deposit stays forfeit |
-| `Attest` | read the check, the subjects and the trusted subjects it cites from the extrinsics, and compute the subjects' Merkle root; verify the attester's signature over the claim; run the check in attest mode with the attester's witness | the parents were recorded and this wasn't yet; debit `ATTEST_DEPOSIT`; record the attestation |
+| `Attest` | read the check, the subjects and the trusted subjects it cites from the extrinsics, and compute the subjects' Merkle root; verify the attester's signature over the claim; run the check in attest mode with the attester's witness | the parents were recorded and this wasn't yet; take the configured attest deposit (in the fee asset); record the attestation |
+| `Propose` | verify the admin's signature | record an admin action (a configuration, a new admin, or an upgrade, whose code it solicits) to take effect after `ADMIN_DELAY`; the first configuration applies at once |
+| `Apply` | — | carry out a proposal whose delay has passed |
+| `Cancel` | verify the admin's signature | drop a proposal |
 
 Blobs travel with the ops that use them: a work item's payload is the op, and its extrinsics
 hold the blobs it names: the check blob as an extrinsic of its own (the work package commits to
 its hash), and the rest in extrinsics that are each a SCALE `Vec<Vec<u8>>` of blobs, named as
 `BlobAt { extrinsic, index }`.
-So state holds only records: bounties, commitments, accounts and attestations. See
+So state holds only records: bounties, commitments, accounts, balances and attestations. See
 [docs/design/extrinsics.md](docs/design/extrinsics.md).
 
 ### Attestations
@@ -85,7 +93,9 @@ the real one. Keyed by bounty, the copy sits apart where no reveal can ever matc
 
 ### Spam
 
-Each commitment locks `COMMIT_DEPOSIT` points, and only a valid reveal gets them back.
+Each commitment locks the configured commit deposit, and only a valid reveal gets it back. Each
+attestation pays the attest deposit, for good. Both are in one fee asset the configuration
+names: they exist because every record is storage witness's sponsor pays for.
 Accumulate checks the service can pay the storage deposit for an operation before writing
 anything. An operation it can't store is rejected whole, and the other work items in the same
 batch still go through.
@@ -135,6 +145,9 @@ checks/dictionary/         sample: x is dictionary words hashing to D leading ze
 checks/sorted-words/       sample that attests: as dictionary, over attested sorted word volumes
 tools/witness-cli/         builds work-item payloads as hex, and reads state (`witness`)
 tools/witness-sim/         runs ops natively in place of a testnet, checks in PolkaVM
+tools/mock-token/          a test-only token service's rules: deposits into and withdrawals from
+                           witness, as a real one would send and take them
+tools/mock-token-service/  that, as a JAM service
 tools/full-gas-spec/       raises a PolkaJam dev chain spec's refine limit to the full spec's
 scripts/e2e.sh             end-to-end test on a local PolkaJam testnet
 ```
@@ -263,6 +276,8 @@ id `jamt create-service out/witness-service.jam 10000000000` produced, and
 (`jamt item` can't attach extrinsics; `witness-sim item` takes them the same way):
 
 ```bash
+# configure first, as the admin (test builds: --seed admin): the first configuration applies at once
+$SUBMIT $SVC $($W propose --service $SVC --nonce 0 --token-services $TOKEN_SVC --fee-asset test --commit-deposit 10 --attest-deposit 10)
 $SUBMIT $SVC $($W mint --to alice --amount 1000)
 $SUBMIT $SVC $($W create --service $SVC --maker alice --nonce 0 --check out/blake2b-preimage-check.jam --params-blake2b "open sesame" --reward 500 --check-gas 10000000 --expiry $(( $(jamt inspect slot) + 100 )))
 $SUBMIT $SVC $($W mint --to bob --amount 100)
@@ -282,20 +297,32 @@ $SUBMIT $SVC $($W attest --service $SVC --attester pat --nonce 0 --check out/sor
 $SUBMIT $SVC $($W create --service $SVC --maker alice --nonce 2 --check out/sorted-words-check.jam --params 0x00 --blobs batch.claim:0,batch.claim:1 --reward 100 --check-gas 10000000 --expiry $(( $(jamt inspect slot) + 100 )))
 # after the claim window (30 slots by default)
 $SUBMIT $SVC $($W finalize --bounty 0)
+# a stablecoin: the test token service ($TOKEN_SVC) mints alice some, she moves 600 into witness,
+# and later withdraws 100 back out
+$SUBMIT $TOKEN_SVC $($W token-faucet --to alice --asset 1 --amount 1000)
+$SUBMIT $TOKEN_SVC $($W token-send --from alice --asset 1 --amount 600 --to-service $SVC --to alice)
+$SUBMIT $SVC $($W create --service $SVC --maker alice --nonce 3 --check out/blake2b-preimage-check.jam --params-blake2b "open sesame" --asset $TOKEN_SVC:1 --reward 500 --check-gas 10000000 --expiry $(( $(jamt inspect slot) + 100 )))
+$SUBMIT $SVC $($W withdraw --service $SVC --account alice --nonce 4 --asset $TOKEN_SVC:1 --amount 100 --to alice)
 ```
 
 Wait a block (about 6 s) after deploying before sending items.
 
 To read state, get the raw value with `jamt inspect storage --raw $SVC $($W key --account bob)`,
-then decode it with `$W decode --account <value>`. The same works for `--bounty`, and for
+then decode it with `$W decode --account <value>`. The same works for `--bounty`, for balances
+with `key --balance WHO --asset A` and `decode --balance`, for `--config` and `--proposal N`, and for
 commitments with `key --bounty ID --commitment HEX` and `decode --commitment <value>`, and for
 attestations with `key --attestation CLAIM` and `decode --attestation <value>`. The node logs (target `witness`) show each refine result, and why accumulate did
 or did not apply it.
 
 ## Known gaps
 
-- Points are unbacked: anyone can `Mint`, so the commit deposit stops casual spam but not someone
-  with a faucet. There are no withdrawals. Real value would come from service transfers.
+- No real token service speaks witness's memos yet; `mock-token-service` stands in. One that
+  doesn't (Asset Hub on JAM, say) would need a thin adapter service in front of it.
+- Storage is sponsored: witness records native balance sent along with deposits as storage
+  credit, but doesn't spend it yet.
+- While a person holds the admin key, users trust them with the rules, and so with their
+  balances; the timelock gives them time to withdraw. Test builds have a faucet: a deployment
+  with real money builds witness-service without the `faucet` feature.
 - One op per work item, and no batching. Signed ops take sequential nonces, so one account can't
   have two signed ops in flight at once.
 - The latest Gray Paper (0.8.0 on `main`) replaces `machine(code, pc)` with `compile` (which can

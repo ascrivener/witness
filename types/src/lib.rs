@@ -2,10 +2,11 @@
 //!
 //! The protocol, in short:
 //! - A maker posts a bounty: a check blob `check(params, x) -> bool` (by hash), the `params` to
-//!   run it with, any extra blobs the check reads (by hash), a reward in points, a gas limit for
+//!   run it with, any extra blobs the check reads (by hash), a reward in an asset, a gas limit for
 //!   the check, an expiry slot and a claim window.
-//! - A hunter commits to `blake2b(bounty_id, x, hunter, salt)`, paying [`COMMIT_DEPOSIT`], then
-//!   reveals `x` at least [`MIN_COMMIT_AGE`] slots later. Refine runs the check in an inner PVM.
+//! - A hunter commits to `blake2b(bounty_id, x, hunter, salt)`, paying the configured commit
+//!   deposit, then reveals `x` at least [`MIN_COMMIT_AGE`] slots later. Refine runs the check in
+//!   an inner PVM.
 //! - The first valid reveal opens the claim window. Every valid reveal before it closes competes,
 //!   and the one whose commitment reached the chain earliest wins. Someone who copies `x` out of a
 //!   reveal can only commit after seeing it, so they always lose to the original. Ties within a
@@ -30,6 +31,10 @@
 //!   parents were, so a cited attestation rests, by induction, on subjects that were all checked.
 //! - A check only ever trusts its own attestations: everything an op cites is by the same check
 //!   with the same attest params, and a bounty may only cite its own check's attestations.
+//!
+//! Money is assets of token services (see docs/design/tokens.md): an account's balances are
+//! credited by deposit transfers from accepted token services and paid out by withdrawal
+//! transfers back. An admin configures which, under a timelock.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
@@ -41,12 +46,13 @@ use codec::{Decode, Encode};
 pub mod program;
 
 pub type Hash = [u8; 32];
-/// An Ed25519 public key. Points balances are held per account.
+/// An Ed25519 public key. Balances are held per account and per asset.
 pub type AccountId = [u8; 32];
 pub type Signature = [u8; 64];
 pub type BountyId = u64;
 pub type Slot = u32;
-pub type Points = u64;
+/// An amount of an asset, in its smallest unit.
+pub type Amount = u128;
 pub type Gas = u64;
 /// See [`AttestationClaim::id`].
 pub type AttestationId = Hash;
@@ -82,12 +88,131 @@ pub const MAX_CLAIM_WINDOW: Slot = 14_400;
 /// Slots after expiry during which commitments made before expiry may still open the claim
 /// window, and before which the maker may not reclaim.
 pub const REVEAL_GRACE: Slot = 20;
-/// Points a commitment locks up; refunded on a valid reveal, forfeited otherwise.
-pub const COMMIT_DEPOSIT: Points = 10;
-/// Points an attestation costs. Attestations are permanent, so this is never refunded.
-pub const ATTEST_DEPOSIT: Points = 10;
 /// Largest single faucet mint.
-pub const MAX_MINT: Points = 1_000_000;
+pub const MAX_MINT: Amount = 1_000_000;
+/// Slots between an admin proposing an action and its taking effect: about 7 days of 6-second
+/// slots, time for anyone who disagrees to withdraw first. A test build can set it with
+/// `WITNESS_ADMIN_DELAY`.
+pub const ADMIN_DELAY: Slot = match option_env!("WITNESS_ADMIN_DELAY") {
+	Some(slots) => parse_slots(slots),
+	None => 100_800,
+};
+
+const fn parse_slots(digits: &str) -> Slot {
+	let digits = digits.as_bytes();
+	assert!(!digits.is_empty(), "WITNESS_ADMIN_DELAY must be a number of slots");
+	let (mut n, mut i) = (0u32, 0);
+	while i < digits.len() {
+		assert!(digits[i].is_ascii_digit(), "WITNESS_ADMIN_DELAY must be a number of slots");
+		n = n * 10 + (digits[i] - b'0') as u32;
+		i += 1;
+	}
+	n
+}
+
+/// The admin until the role is handed on: the key in `WITNESS_ADMIN` (64 hex digits) when the
+/// service is built, or else, for test builds, the witness CLI's `--seed admin`.
+pub const BUILD_ADMIN: AccountId = match option_env!("WITNESS_ADMIN") {
+	Some(hex) => parse_key(hex),
+	None => parse_key("5402051ea9ef82b9a3e2e27e3a2a4b58f047c002ae6f3a0510f9849e720f253a"),
+};
+
+const fn parse_key(hex: &str) -> AccountId {
+	const fn digit(c: u8) -> u8 {
+		match c {
+			b'0'..=b'9' => c - b'0',
+			b'a'..=b'f' => c - b'a' + 10,
+			b'A'..=b'F' => c - b'A' + 10,
+			_ => panic!("WITNESS_ADMIN must be 64 hex digits"),
+		}
+	}
+	let hex = hex.as_bytes();
+	assert!(hex.len() == 64, "WITNESS_ADMIN must be 64 hex digits");
+	let mut key = [0; 32];
+	let mut i = 0;
+	while i < 32 {
+		key[i] = digit(hex[2 * i]) << 4 | digit(hex[2 * i + 1]);
+		i += 1;
+	}
+	key
+}
+
+/// An asset: asset `id` of token service `service` (0 for a service with one asset).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Encode, Decode)]
+pub struct Asset {
+	pub service: u32,
+	pub id: u32,
+}
+
+/// The faucet's asset, on test builds: no token service backs it, so it can't be withdrawn.
+pub const TEST_ASSET: Asset = Asset { service: u32::MAX, id: 0 };
+
+/// What the admin sets (see docs/design/tokens.md).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Encode, Decode)]
+pub struct Config {
+	/// Token services whose deposits are credited, and whose assets bounties may pay in.
+	pub token_services: Vec<u32>,
+	/// The asset spam deposits are paid in.
+	pub fee_asset: Option<Asset>,
+	/// Locked per commitment, refunded on a valid reveal.
+	pub commit_deposit: Amount,
+	/// Paid per attestation, kept: attestations are permanent records.
+	pub attest_deposit: Amount,
+}
+
+/// What an admin proposal does once its delay has passed.
+#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
+pub enum AdminAction {
+	/// Replace the configuration. The first one, made before any, applies at once: nobody's
+	/// funds are at stake yet.
+	Configure(Config),
+	/// Hand the admin role to another key.
+	SetAdmin(AccountId),
+	/// Replace the service's code with the blob hashing to `code_hash`, which proposing solicits.
+	Upgrade { code_hash: Hash, code_len: u32 },
+}
+
+/// A pending admin proposal.
+#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
+pub struct Proposal {
+	pub action: AdminAction,
+	/// The first slot it can be applied in.
+	pub effective: Slot,
+}
+
+/// The version byte memos start with.
+pub const MEMO_VERSION: u8 = 1;
+
+/// A deposit transfer's memo, from a token service: credit `amount` of its asset `asset_id` to
+/// witness account `to`.
+#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
+pub struct DepositMemo {
+	pub version: u8,
+	pub asset_id: u32,
+	pub amount: Amount,
+	pub to: AccountId,
+}
+
+/// A withdrawal transfer's memo, to a token service: pay `amount` of its asset `asset_id` to its
+/// account `to`, out of witness's.
+#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
+pub struct WithdrawalMemo {
+	pub version: u8,
+	pub asset_id: u32,
+	pub amount: Amount,
+	pub to: [u8; 32],
+}
+
+/// The length of a JAM transfer memo.
+pub const MEMO_LEN: usize = 128;
+
+/// `value` as a memo: encoded, then zero-padded.
+pub fn memo(value: &impl Encode) -> [u8; MEMO_LEN] {
+	let mut memo = [0; MEMO_LEN];
+	let data = value.encode();
+	memo[..data.len()].copy_from_slice(&data);
+	memo
+}
 
 pub fn blake2b256(data: &[u8]) -> Hash {
 	let h = blake2b_simd::Params::new().hash_length(32).hash(data);
@@ -273,7 +398,9 @@ pub struct BountyTerms {
 	/// Blobs refine passes to the check, such as a statement environment or a library: attested
 	/// subjects (trusted) and plain blobs. A reveal supplies them all.
 	pub blobs: Vec<BlobRef>,
-	pub reward: Points,
+	/// The asset the reward is escrowed and paid in.
+	pub asset: Asset,
+	pub reward: Amount,
 	pub check_gas: Gas,
 	/// Commitments made at or after this slot are not accepted.
 	pub expiry: Slot,
@@ -284,8 +411,8 @@ pub struct BountyTerms {
 /// A work-item payload: exactly one operation per work item.
 #[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
 pub enum Op {
-	/// Prototype faucet: points have no backing value yet.
-	Mint { to: AccountId, amount: Points },
+	/// Test faucet, crediting [`TEST_ASSET`].
+	Mint { to: AccountId, amount: Amount },
 	CreateBounty { maker: AccountId, nonce: u64, terms: BountyTerms, signature: Signature },
 	/// `committer` pays the deposit and signs; the payout key is inside the commitment.
 	Commit {
@@ -346,6 +473,14 @@ pub enum Op {
 		check_gas: Gas,
 		signature: Signature,
 	},
+	/// Pay `amount` of `asset` out to `to`, the payee's account in the asset's token service.
+	Withdraw { account: AccountId, nonce: u64, asset: Asset, amount: Amount, to: [u8; 32], signature: Signature },
+	/// The admin proposes `action`, to take effect after [`ADMIN_DELAY`].
+	Propose { admin: AccountId, nonce: u64, action: AdminAction, signature: Signature },
+	/// Carry out proposal `id` once its delay has passed. Anyone may send it.
+	Apply { id: u64 },
+	/// The admin drops proposal `id`.
+	Cancel { admin: AccountId, nonce: u64, id: u64, signature: Signature },
 }
 
 /// Why a check did not return true.
@@ -388,7 +523,7 @@ pub enum Rejection {
 /// Accumulate trusts these and only applies the state rules.
 #[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
 pub enum Verified {
-	Mint { to: AccountId, amount: Points },
+	Mint { to: AccountId, amount: Amount },
 	CreateBounty { maker: AccountId, nonce: u64, terms: BountyTerms },
 	Commit { bounty_id: BountyId, committer: AccountId, nonce: u64, commitment: Hash },
 	/// The check returned true for a witness whose commitment is `commitment`.
@@ -411,13 +546,16 @@ pub enum Verified {
 	/// The check returned true in attest mode; accumulate records `claim` if `parents` (whose
 	/// root the claim covers) were.
 	Attest { attester: AccountId, nonce: u64, claim: AttestationClaim, parents: Vec<AttestationId> },
+	Withdraw { account: AccountId, nonce: u64, asset: Asset, amount: Amount, to: [u8; 32] },
+	Propose { admin: AccountId, nonce: u64, action: AdminAction },
+	Apply { id: u64 },
+	Cancel { admin: AccountId, nonce: u64, id: u64 },
 	Rejected(Rejection),
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Encode, Decode)]
 pub struct Account {
-	pub balance: Points,
-	/// Next nonce expected on a signed operation (CreateBounty, Commit, Reclaim).
+	/// Next nonce expected on a signed operation.
 	pub nonce: u64,
 }
 
@@ -458,7 +596,9 @@ pub struct CommitRecord {
 	/// The slot at which the commitment was accumulated.
 	pub slot: Slot,
 	pub committer: AccountId,
-	pub deposit: Points,
+	/// What the committer locked: the fee asset and commit deposit of the time.
+	pub deposit_asset: Asset,
+	pub deposit: Amount,
 }
 
 /// Service storage keys (encoded as the raw storage key).
@@ -471,6 +611,16 @@ pub enum StorageKey {
 	Commitment(BountyId, Hash),
 	NextBountyId,
 	Attestation(AttestationId),
+	/// An account's balance of an asset, absent at zero.
+	Balance(AccountId, Asset),
+	Config,
+	/// The current admin, once it has been handed on from the build's.
+	Admin,
+	Proposal(u64),
+	NextProposalId,
+	/// Native balance an account has sent along with its deposits, for paying for its own
+	/// storage (see docs/design/tokens.md). Recorded, not yet spent: the sponsor pays for now.
+	StorageCredit(AccountId),
 }
 
 /// The commitment a hunter posts before revealing `witness`.
@@ -497,6 +647,28 @@ pub fn commit_message(
 /// The message an attester signs to attest the claim with id `id` on service `service_id`.
 pub fn attest_message(service_id: u32, attester: &AccountId, nonce: u64, id: &AttestationId) -> Vec<u8> {
 	(b"witness/attest", service_id, attester, nonce, id).encode()
+}
+
+/// The message an account signs to withdraw on service `service_id`.
+pub fn withdraw_message(
+	service_id: u32,
+	account: &AccountId,
+	nonce: u64,
+	asset: &Asset,
+	amount: Amount,
+	to: &[u8; 32],
+) -> Vec<u8> {
+	(b"witness/withdraw", service_id, account, nonce, asset, amount, to).encode()
+}
+
+/// The message the admin signs to propose `action` on service `service_id`.
+pub fn propose_message(service_id: u32, admin: &AccountId, nonce: u64, action: &AdminAction) -> Vec<u8> {
+	(b"witness/propose", service_id, admin, nonce, action).encode()
+}
+
+/// The message the admin signs to cancel proposal `id` on service `service_id`.
+pub fn cancel_message(service_id: u32, admin: &AccountId, nonce: u64, id: u64) -> Vec<u8> {
+	(b"witness/cancel", service_id, admin, nonce, id).encode()
 }
 
 /// The message a maker signs to reclaim bounty `bounty_id` on service `service_id`.

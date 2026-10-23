@@ -1,6 +1,6 @@
 # Stablecoin balances from token services
 
-Status: proposed.
+Status: implemented (storage credit recorded, not yet spent).
 
 ## Why
 
@@ -69,7 +69,9 @@ becomes the recipient's **storage credit**, and when an account's ops store reco
 debits its credit by what JAM charges for them, refunding it when they're removed. An account with
 no credit falls back to the sponsor. So once wallets can buy and hide a few cents of the storage
 token (JAMKB, as proposed), people pay for their own state and the sponsor becomes optional,
-without a redesign. Credit isn't withdrawable at first: it only ever backs storage.
+without a redesign. Credit isn't withdrawable at first: it only ever backs storage. For now
+witness records credit as it arrives but doesn't spend it: nobody holds the storage token yet,
+and the sponsor pays. Spending it is the switch to flip later.
 
 ## Administration
 
