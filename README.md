@@ -271,7 +271,8 @@ types (`Vec`, `BTreeMap`) work. Checks get no other host calls, so no logging or
 ## Using it by hand
 
 `scripts/e2e.sh` is the worked example. In short, with `W=./target/debug/witness`, `SVC` the
-id `jamt create-service out/witness-service.jam 10000000000` produced, and
+id `jamt create-service out/witness-service.jam 10000000000 --min-memo-gas 300000` produced
+(the memo gas is `DEPOSIT_GAS`, what a deposit must carry), and
 `SUBMIT="python3 scripts/jam-submit.py"`, which takes extrinsic files after the payload
 (`jamt item` can't attach extrinsics; `witness-sim item` takes them the same way):
 

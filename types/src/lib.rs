@@ -203,6 +203,13 @@ pub struct WithdrawalMemo {
 	pub to: [u8; 32],
 }
 
+/// Gas a deposit transfer must carry: what witness's accumulate needs to credit it. A transfer's
+/// gas limit is all the receiver gets to process it, and a deposit it can't process is lost
+/// after the token service has already moved the funds. So witness is deployed with this as its
+/// `min_memo_gas`, and JAM refuses any transfer to it carrying less.
+/// Crediting one used about 37,000 gas on PolkaJam v0.1.29; this leaves room to spare.
+pub const DEPOSIT_GAS: Gas = 300_000;
+
 /// The length of a JAM transfer memo.
 pub const MEMO_LEN: usize = 128;
 

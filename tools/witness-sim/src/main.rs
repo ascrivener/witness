@@ -297,7 +297,7 @@ fn main() -> ExitCode {
 		ExitCode::FAILURE
 	};
 	match args[..] {
-		["create-service", blob, _balance] => {
+		["create-service", blob, _balance, ..] => {
 			let is_token = std::fs::read(blob).is_ok_and(|b| b.windows(10).any(|w| w == b"mock-token"));
 			if is_token {
 				sim.state.token_service = true;

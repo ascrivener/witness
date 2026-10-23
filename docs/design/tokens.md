@@ -36,6 +36,12 @@ transfer's native balance, if any, is credited to `to` as storage credit (see St
 from any other service, or that doesn't decode, credits nothing; its native balance stays with
 witness's storage.
 
+A deposit must carry at least `DEPOSIT_GAS` (3×10⁵; crediting one used about 37,000 on PolkaJam): a transfer's gas limit is all the receiver
+gets to process it, and a deposit witness can't process is lost after the token service has
+moved the funds. So witness is deployed with that as its `min_memo_gas`, and JAM refuses
+transfers to it that carry less. Likewise witness gives a withdrawal the token service's own
+`min_memo_gas`, which the token service must set to cover paying it out.
+
 **Withdrawal** (witness to token service): `{ asset_id: u32, amount: u128, to: [u8; 32] }`, where
 `to` is the payee's account in the token service. Witness sends it from accumulate, with no native
 balance, when it applies a signed `Withdraw { account, nonce, asset, amount, to, signature }`,

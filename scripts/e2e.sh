@@ -218,11 +218,12 @@ reveal_dictionary() {
 		--hunter "$2" --salt "$3" --witness-str "$4" --extrinsics "$X")"
 }
 
-# Deploy blob $1 and print its service id, once it's in the finalized state. Work packages
-# anchored before the service existed cannot see its code, and anchors trail the best block.
+# Deploy blob $1, with memo gas $2 (what a transfer to it must carry), and print its service
+# id, once it's in the finalized state. Work packages anchored before the service existed cannot
+# see its code, and anchors trail the best block.
 deploy() {
 	local before; before=$("$JAMT" list | wc -l)
-	"$JAMT" create-service "$1" 10000000000 >/dev/null
+	"$JAMT" create-service "$1" 10000000000 --min-memo-gas "$2" >/dev/null
 	for _ in $(seq 1 40); do [ "$("$JAMT" list | wc -l)" -gt "$before" ] && break; sleep $POLL; done
 	local id=$((16#$("$JAMT" list | tail -1 | cut -f1)))
 	for _ in $(seq 1 40); do "$JAMT" inspect final service "$id" >/dev/null 2>&1 && break; sleep $POLL; done
@@ -250,9 +251,10 @@ stablecoin() {
 }
 
 step "deploying"
-SVC=$(deploy out/witness-service.jam)
+# witness_types::DEPOSIT_GAS: what witness needs to credit a deposit.
+SVC=$(deploy out/witness-service.jam 300000)
 echo "service $SVC"
-TOKEN_SVC=$(deploy out/mock-token-service.jam)
+TOKEN_SVC=$(deploy out/mock-token-service.jam 300000)
 echo "test token service $TOKEN_SVC"
 wait_slot $(( $(slot) + 3 ))
 # The first configuration applies at once. Spam deposits are in the faucet's test asset.
@@ -424,9 +426,14 @@ NEW_CODE=$($W hash --check "$UPGRADE/witness-service.jam")
 if [ "${JAM_RPC:-}" = sim ]; then
 	grep -q "upgraded to code ${NEW_CODE#0x}" "$LOG" || fail "the service's code didn't change"
 else
-	code=$(python3 -c "import sys; sys.path.insert(0, 'scripts'); from jamrpc import Rpc, unb64, url
-r = Rpc(url()); print('0x' + unb64(r.call('serviceData', r.call('bestBlock')['header_hash'], $SVC))[1:33].hex())")
-	[ "$code" = "$NEW_CODE" ] || fail "the service's code is $code, not $NEW_CODE"
+	# Work items name the code they expect, as of the finalized block (see jam-submit.py), so
+	# wait for the upgrade to be final before sending more.
+	final_code() {
+		python3 -c "import sys; sys.path.insert(0, 'scripts'); from jamrpc import Rpc, unb64, url
+r = Rpc(url()); print('0x' + unb64(r.call('serviceData', r.call('finalizedBlock')['header_hash'], $SVC))[1:33].hex())"
+	}
+	for _ in $(seq 1 40); do [ "$(final_code)" = "$NEW_CODE" ] && break; sleep $POLL; done
+	[ "$(final_code)" = "$NEW_CODE" ] || fail "the service's code is $(final_code), not $NEW_CODE"
 fi
 echo "ok: the service runs the new code"
 item "$($W mint --to erin --amount 5)"

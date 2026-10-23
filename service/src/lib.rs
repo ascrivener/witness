@@ -85,10 +85,11 @@ impl jam_pvm_common::Service for Service {
 /// A deposit, if it's from an accepted token service; its native balance stays with the service
 /// either way.
 fn on_transfer(t: TransferRecord) {
+	let start = accumulate::gas();
 	match witness_rules::on_transfer(&Host, t.source, t.amount, &t.memo.0).and_then(apply) {
 		Ok(()) => {
-			info!(target = "witness", "deposit from service {}", t.source);
 			accumulate::checkpoint();
+			info!(target = "witness", "deposit from service {} used {} gas", t.source, start - accumulate::gas());
 		},
 		Err(reason) => info!(target = "witness", "transfer of {} from service {}: {reason}", t.amount, t.source),
 	}
@@ -138,6 +139,9 @@ fn deposit_needed(effects: &Effects) -> Balance {
 	writes + solicit
 }
 
+/// Gas for sending one transfer, beyond the gas it carries.
+const TRANSFER_OVERHEAD: u64 = 20_000;
+
 /// Apply `effects` in full, or not at all.
 fn apply(effects: Effects) -> Result<(), &'static str> {
 	// Every write below must succeed: a failure part-way would leave half an operation applied.
@@ -152,8 +156,9 @@ fn apply(effects: Effects) -> Result<(), &'static str> {
 		let to = accumulate::service_info(*destination).ok_or("no such token service")?;
 		transfers.push((*destination, to.min_memo_gas, Memo(*memo)));
 	}
-	let gas_needed: u64 = transfers.iter().map(|(_, gas, _)| gas).sum();
-	if accumulate::gas() < gas_needed.saturating_add(1_000_000) {
+	// Each transfer's gas comes out of this accumulate's, with a little for the host calls.
+	let gas_needed: u64 = transfers.iter().map(|(_, gas, _)| gas.saturating_add(TRANSFER_OVERHEAD)).sum();
+	if accumulate::gas() < gas_needed {
 		return Err("not enough gas left to send the transfers");
 	}
 	if effects.upgrade.is_some_and(|code_hash| !accumulate::is_available(&code_hash)) {
