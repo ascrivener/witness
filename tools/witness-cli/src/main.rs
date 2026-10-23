@@ -1,4 +1,7 @@
 //! Builds witness work-item payloads and prints them as hex, for `jamt item <service> 0x...`.
+//! Reveals and attestations also write their work item's extrinsics, the blobs they name, as
+//! files (`--extrinsics DIR`: `DIR/0`, `DIR/1`, ...), which `jamt item` can't send yet; witness-sim
+//! takes them after the payload.
 //!
 //! Accounts are derived from a seed phrase (`--maker alice`): the Ed25519 secret key is
 //! `blake2b256(seed)`. Fine for a points-only prototype, not for anything of value.
@@ -7,35 +10,31 @@ use codec::{Decode, Encode};
 use ed25519_dalek::{Signer, SigningKey};
 use std::{collections::HashMap, process::ExitCode};
 use witness_types::{
-	Account, AccountId, Attestation, AttestationClaim, AttestationId, BlobRef, Bounty, BountyTerms,
-	Bundle, CommitRecord, Hash, MIN_CLAIM_WINDOW, Op, Preimage, StorageKey, TrustedRef, Verified,
-	blake2b256,
+	Account, AccountId, Attestation, AttestationClaim, AttestationId, BlobAt, BlobHash, BlobRef, Blobs,
+	Bounty, BountyTerms, CommitRecord, Hash, MIN_CLAIM_WINDOW, Op, StorageKey, TrustedRef, Verified,
+	blake2b256, merkle,
 };
 
 const USAGE: &str = "\
 usage: witness <command> [--flag value ...]
 
   account   --seed S
-  hash      --check FILE          the preimage hash of FILE, a check or a blob
+  hash      --check FILE          the hash of FILE, a check or a blob
   mint      --to S --amount N
-  bundle    --subjects PATHS --out BUNDLE
-            writes a bundle of the files PATHS to BUNDLE, and prints its hash
   create    --service ID --maker S --nonce N --check FILE PARAMS [--blobs BLOBS] --reward N
             --check-gas G --expiry SLOT [--claim-window SLOTS]
   commit    --service ID --bounty ID --hunter S [--committer S] --nonce N --salt HEX WITNESS
   reveal    --bounty ID --check FILE PARAMS [--blobs BLOBS] [--trust REFS] --check-gas G
-            --hunter S --salt HEX WITNESS
+            --hunter S --salt HEX WITNESS --extrinsics DIR
             trusts the bounty's attested blobs, in order, then REFS
   finalize  --bounty ID
   reclaim   --service ID --bounty ID --maker S --nonce N
   release   --bounty ID --commitment HEX
-  pin       --service ID --owner S --nonce N --blobs PATHS
-  attest    --service ID --attester S --nonce N --check FILE [PARAMS] --subjects BUNDLE
-            [--trust REFS] [WITNESS] --check-gas G --claim-out CLAIM
-            attests every subject in BUNDLE, trusting REFS, and writes the claim to CLAIM, for
-            citing the attestation later
-  key       (--account S | --bounty ID [--commitment HEX] | --refs HASH | --attestation CLAIM
-            | --next)
+  attest    --service ID --attester S --nonce N --check FILE [PARAMS] --subjects PATHS
+            [--trust REFS] [WITNESS] --check-gas G --claim-out CLAIM --extrinsics DIR
+            attests the files PATHS, in order, trusting REFS, and writes the claim and the
+            subjects to CLAIM, for citing the attestation later
+  key       (--account S | --bounty ID [--commitment HEX] | --attestation CLAIM | --next)
             storage key, for `jamt inspect storage <service> <key>`
   decode    (--output HEX | --account HEX | --bounty HEX | --commitment HEX | --attestation HEX)
             decode a refine output or a stored value
@@ -43,7 +42,7 @@ usage: witness <command> [--flag value ...]
 PARAMS:  --params HEX | --params-str STRING | --params-u128 N | --params-blake2b STRING (its hash)
 WITNESS: --witness HEX | --witness-str STRING | --witness-u64 N | --witness-file FILE
 PATHS:   comma-separated file paths
-BLOBS:   comma-separated, in order: CLAIM:ENTRY for entry ENTRY of an attestation's bundle, or
+BLOBS:   comma-separated, in order: CLAIM:ENTRY for subject ENTRY (from 0) of an attestation, or
          a path of a plain blob
 REFS:    comma-separated CLAIM:ENTRY, for entry ENTRY (from 0) of the attestation whose claim
          `attest --claim-out` wrote to CLAIM
@@ -125,9 +124,11 @@ impl Flags {
 		let salt = self.hex("salt")?;
 		Ok(<Hash>::try_from(&salt[..]).unwrap_or_else(|_| blake2b256(&salt)))
 	}
-	fn check(&self) -> Result<(Hash, u32), String> {
-		let blob = file_ref(self.str("check")?)?;
-		Ok((blob.hash, blob.len))
+	/// The `--check` blob, and its hash and length.
+	fn check(&self) -> Result<(Hash, u32, Vec<u8>), String> {
+		let data = read(self.str("check")?)?;
+		let blob = blob_hash(&data);
+		Ok((blob.hash, blob.len, data))
 	}
 	/// A comma-separated list flag, empty if absent.
 	fn list(&self, name: &str) -> Result<Vec<&str>, String> {
@@ -136,52 +137,79 @@ impl Flags {
 		}
 		Ok(self.str(name)?.split(',').collect())
 	}
-	fn files(&self, name: &str) -> Result<Vec<Preimage>, String> {
-		self.list(name)?.into_iter().map(file_ref).collect()
-	}
-	/// The `--trust` references, as claims and entries.
-	fn trust(&self) -> Result<Vec<(AttestationClaim, u32)>, String> {
+	/// The `--trust` references, as claims (with their subjects) and entries.
+	fn trust(&self) -> Result<Vec<(Cited, u32)>, String> {
 		self.list("trust")?
 			.into_iter()
 			.map(|r| claim_entry(r)?.ok_or_else(|| format!("{r} is not CLAIM:ENTRY")))
 			.collect()
 	}
-	/// The `--blobs`, with the claims of the attested ones.
-	fn blobs(&self) -> Result<Vec<(BlobRef, Option<AttestationClaim>)>, String> {
+	/// The `--blobs`, with the claims of the attested ones and the data of the plain ones.
+	fn blobs(&self) -> Result<Vec<(BlobRef, Blob)>, String> {
 		self.list("blobs")?
 			.into_iter()
 			.map(|blob| match claim_entry(blob)? {
-				Some((claim, entry)) => Ok((BlobRef::Attested { attestation: claim.id(), entry }, Some(claim))),
-				None => Ok((BlobRef::Blob(file_ref(blob)?), None)),
+				Some((cited, entry)) => {
+					Ok((BlobRef::Attested { attestation: cited.0.id(), entry }, Blob::Attested(cited, entry)))
+				},
+				None => {
+					let data = read(blob)?;
+					Ok((BlobRef::Blob(blob_hash(&data)), Blob::Plain(data)))
+				},
 			})
 			.collect()
 	}
+	fn extrinsics(&self) -> Result<&str, String> {
+		self.str("extrinsics")
+	}
+}
+
+/// What a claim file holds: an attestation's claim and its subjects, which citing it needs.
+type Cited = (AttestationClaim, Blobs);
+
+/// A blob of a bounty, as given to `--blobs`.
+enum Blob {
+	Attested(Cited, u32),
+	Plain(Vec<u8>),
 }
 
 /// `CLAIM:ENTRY` as a claim and an entry, or `None` if it isn't of that form.
-fn claim_entry(s: &str) -> Result<Option<(AttestationClaim, u32)>, String> {
+fn claim_entry(s: &str) -> Result<Option<(Cited, u32)>, String> {
 	let Some((path, entry)) = s.rsplit_once(':') else { return Ok(None) };
 	let Ok(entry) = entry.parse() else { return Ok(None) };
 	Ok(Some((read_claim(path)?, entry)))
 }
 
-/// The claims and references for trusting `subjects`, each claim once.
-fn cite(subjects: &[(AttestationClaim, u32)]) -> (Vec<AttestationClaim>, Vec<TrustedRef>) {
+/// The claims and references for trusting `subjects`, each claim once, with the subjects added to
+/// extrinsic `extrinsic`'s `blobs`.
+fn cite(subjects: &[(Cited, u32)], extrinsic: u8, blobs: &mut Blobs) -> Result<(Vec<AttestationClaim>, Vec<TrustedRef>), String> {
 	let mut ids: Vec<AttestationId> = Vec::new();
 	let mut claims = Vec::new();
-	let trusted = subjects
-		.iter()
-		.map(|(claim, entry)| {
-			let id = claim.id();
-			let i = ids.iter().position(|i| *i == id).unwrap_or_else(|| {
-				ids.push(id);
-				claims.push(claim.clone());
-				ids.len() - 1
-			});
-			TrustedRef { claim: i as u16, entry: *entry }
-		})
-		.collect();
-	(claims, trusted)
+	let mut trusted = Vec::new();
+	for ((claim, list), entry) in subjects {
+		let id = claim.id();
+		let i = ids.iter().position(|i| *i == id).unwrap_or_else(|| {
+			ids.push(id);
+			claims.push(claim.clone());
+			ids.len() - 1
+		});
+		let subject = list.get(*entry as usize).ok_or_else(|| format!("the claim has no subject {entry}"))?;
+		let leaves: Vec<Hash> = list.iter().map(|s| merkle::leaf(s)).collect();
+		let blob = BlobAt { extrinsic, index: blobs.len() as u32 };
+		blobs.push(subject.clone());
+		trusted.push(TrustedRef { claim: i as u16, entry: *entry, blob, path: merkle::path(&leaves, *entry as usize) });
+	}
+	Ok((claims, trusted))
+}
+
+/// Write `extrinsics` to `dir`, as files `0`, `1`, ..., replacing what was there.
+fn write_extrinsics(dir: &str, extrinsics: &[Blobs]) -> Result<(), String> {
+	let _ = std::fs::remove_dir_all(dir);
+	std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {dir}: {e}"))?;
+	for (i, blobs) in extrinsics.iter().enumerate() {
+		write(&format!("{dir}/{i}"), &blobs.encode())?;
+	}
+	Ok(())
 }
 
 fn write(path: &str, data: &[u8]) -> Result<(), String> {
@@ -192,13 +220,12 @@ fn read(path: &str) -> Result<Vec<u8>, String> {
 	std::fs::read(path).map_err(|e| format!("cannot read {path}: {e}"))
 }
 
-fn file_ref(path: &str) -> Result<Preimage, String> {
-	let blob = read(path)?;
-	Ok(Preimage { hash: blake2b256(&blob), len: blob.len() as u32 })
+fn blob_hash(data: &[u8]) -> BlobHash {
+	BlobHash { hash: blake2b256(data), len: data.len() as u32 }
 }
 
-fn read_claim(path: &str) -> Result<AttestationClaim, String> {
-	AttestationClaim::decode(&mut &read(path)?[..]).map_err(|e| format!("{path} is not a claim: {e}"))
+fn read_claim(path: &str) -> Result<Cited, String> {
+	Cited::decode(&mut &read(path)?[..]).map_err(|e| format!("{path} is not a claim: {e}"))
 }
 
 fn decode<T: Decode + std::fmt::Debug>(bytes: &[u8]) -> Result<String, String> {
@@ -213,14 +240,6 @@ fn run(command: &str, f: &Flags) -> Result<(), String> {
 		},
 		"hash" => {
 			println!("0x{}", to_hex(&f.check()?.0));
-			return Ok(());
-		},
-		"bundle" => {
-			let paths = f.list("subjects")?;
-			let bundle: Bundle = paths.into_iter().map(read).collect::<Result<_, _>>()?;
-			let data = bundle.encode();
-			write(f.str("out")?, &data)?;
-			println!("0x{}", to_hex(&blake2b256(&data)));
 			return Ok(());
 		},
 		"decode" => {
@@ -245,10 +264,8 @@ fn run(command: &str, f: &Flags) -> Result<(), String> {
 				StorageKey::Commitment(f.num("bounty")?, f.hash("commitment")?)
 			} else if f.has("bounty") {
 				StorageKey::Bounty(f.num("bounty")?)
-			} else if f.has("refs") {
-				StorageKey::PreimageRefs(f.hash("refs")?)
 			} else if f.has("attestation") {
-				StorageKey::Attestation(read_claim(f.str("attestation")?)?.id())
+				StorageKey::Attestation(read_claim(f.str("attestation")?)?.0.id())
 			} else {
 				StorageKey::NextBountyId
 			};
@@ -260,7 +277,7 @@ fn run(command: &str, f: &Flags) -> Result<(), String> {
 			let service: u32 = f.num("service")?;
 			let maker = f.key("maker")?;
 			let nonce = f.num("nonce")?;
-			let (check_hash, check_len) = f.check()?;
+			let (check_hash, check_len, _) = f.check()?;
 			let claim_window =
 				if f.has("claim-window") { f.num("claim-window")? } else { MIN_CLAIM_WINDOW };
 			let terms = BountyTerms {
@@ -297,21 +314,31 @@ fn run(command: &str, f: &Flags) -> Result<(), String> {
 			Op::Commit { bounty_id, committer: committer_id, nonce, commitment, signature }
 		},
 		"reveal" => {
+			// Extrinsic 0 is the check; 1 the plain blobs, then the trusted subjects.
+			let (check_hash, _, check) = f.check()?;
 			let blobs = f.blobs()?;
-			let mut subjects: Vec<(AttestationClaim, u32)> = blobs
-				.iter()
-				.filter_map(|(blob, claim)| match (blob, claim) {
-					(BlobRef::Attested { entry, .. }, Some(claim)) => Some((claim.clone(), *entry)),
-					_ => None,
-				})
-				.collect();
+			let mut given = Blobs::new();
+			let mut subjects = Vec::new();
+			let mut plain = Vec::new();
+			for (_, blob) in &blobs {
+				match blob {
+					Blob::Attested(cited, entry) => subjects.push((cited.clone(), *entry)),
+					Blob::Plain(data) => {
+						plain.push(BlobAt { extrinsic: 1, index: given.len() as u32 });
+						given.push(data.clone());
+					},
+				}
+			}
 			subjects.extend(f.trust()?);
-			let (claims, trusted) = cite(&subjects);
+			let (claims, trusted) = cite(&subjects, 1, &mut given)?;
+			write_extrinsics(f.extrinsics()?, &[vec![check], given])?;
 			Op::Reveal {
 				bounty_id: f.num("bounty")?,
-				check_hash: f.check()?.0,
+				check_hash,
 				params: f.params()?,
 				blobs: blobs.into_iter().map(|(blob, _)| blob).collect(),
+				check: BlobAt { extrinsic: 0, index: 0 },
+				plain,
 				claims,
 				trusted,
 				check_gas: f.num("check-gas")?,
@@ -332,34 +359,30 @@ fn run(command: &str, f: &Flags) -> Result<(), String> {
 			Op::Reclaim { bounty_id, maker: maker_id, nonce, signature }
 		},
 		"release" => Op::Release { bounty_id: f.num("bounty")?, commitment: f.hash("commitment")? },
-		"pin" => {
-			let service: u32 = f.num("service")?;
-			let owner = f.key("owner")?;
-			let nonce = f.num("nonce")?;
-			let blobs = f.files("blobs")?;
-			let owner_id = owner.verifying_key().to_bytes();
-			let signature = owner.sign(&witness_types::pin_message(service, &owner_id, nonce, &blobs)).to_bytes();
-			Op::Pin { owner: owner_id, nonce, blobs, signature }
-		},
 		"attest" => {
+			// Extrinsic 0 is the check; 1 the subjects; 2 the trusted subjects.
 			let service: u32 = f.num("service")?;
 			let attester = f.key("attester")?;
 			let nonce = f.num("nonce")?;
-			let check_hash = f.check()?.0;
+			let (check_hash, _, check) = f.check()?;
 			let has_params = ["params", "params-str", "params-u128", "params-blake2b"].iter().any(|p| f.has(p));
 			let params = if has_params { f.params()? } else { vec![] };
-			let subjects = file_ref(f.str("subjects")?)?;
-			let (claims, trusted) = cite(&f.trust()?);
+			let subjects: Blobs = f.list("subjects")?.into_iter().map(read).collect::<Result<_, _>>()?;
+			let mut given = Blobs::new();
+			let (claims, trusted) = cite(&f.trust()?, 2, &mut given)?;
 			let parents: Vec<AttestationId> = claims.iter().map(AttestationClaim::id).collect();
+			let leaves: Vec<Hash> = subjects.iter().map(|s| merkle::leaf(s)).collect();
 			let claim = AttestationClaim {
 				check_hash,
 				params_hash: blake2b256(&params),
-				subjects,
+				subjects_root: merkle::root(&leaves),
+				subject_count: subjects.len() as u32,
 				parents_root: witness_types::parents_root(&parents),
 			};
 			let has_witness = ["witness", "witness-str", "witness-u64", "witness-file"].iter().any(|w| f.has(w));
 			let witness = if has_witness { f.witness()? } else { vec![] };
-			write(f.str("claim-out")?, &claim.encode())?;
+			write(f.str("claim-out")?, &(claim.clone(), subjects.clone()).encode())?;
+			write_extrinsics(f.extrinsics()?, &[vec![check], subjects, given])?;
 			eprintln!("attestation 0x{}", to_hex(&claim.id()));
 			let attester_id = attester.verifying_key().to_bytes();
 			let message = witness_types::attest_message(service, &attester_id, nonce, &claim.id());
@@ -368,8 +391,9 @@ fn run(command: &str, f: &Flags) -> Result<(), String> {
 				attester: attester_id,
 				nonce,
 				check_hash,
+				check: BlobAt { extrinsic: 0, index: 0 },
 				params,
-				subjects,
+				subjects: 1,
 				claims,
 				trusted,
 				witness,

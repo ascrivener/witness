@@ -11,30 +11,34 @@ Prototype: rewards are points from a faucet (`Mint`), not tokens.
 | Op | Refine (in-core, stateless) | Accumulate (on-chain) |
 |---|---|---|
 | `Mint` | — | credit points (faucet, at most `MAX_MINT`) |
-| `CreateBounty` | verify the maker's Ed25519 signature | check nonce, balance and limits, and that cited attestations exist, are by the bounty's check with one set of params, and have the cited entries; debit the reward; solicit the check blob and the bounty's plain blobs, except those already held; store the bounty |
+| `CreateBounty` | verify the maker's Ed25519 signature | check nonce, balance and limits, and that cited attestations exist and are by the bounty's check with one set of params; debit the reward; store the bounty |
 | `Commit` | verify the committer's signature | the bounty takes commitments; debit `COMMIT_DEPOSIT`; record the slot of `blake2b(bounty_id, x, hunter, salt)` |
-| `Reveal` | resolve the trusted subjects the reveal cites (the bounty's, and any more it adds) from their attestations' bundles, and look up the check blob and the plain blobs; run the check on them (attested ones marked trusted), `params` and `x` in an inner PVM with the bounty's `check_gas` | the terms match, the cited attestations were recorded, and the commitment is older than this slot and made before expiry. The first valid reveal opens the claim window, and later ones replace the leader if their commitment is earlier. Refund the deposit |
-| `Finalize` | — | once the claim window has closed, pay the leader and release the bounty's blobs |
-| `Reclaim` | verify the maker's signature | if no one revealed by `expiry + REVEAL_GRACE`, refund the maker and release the bounty's blobs |
+| `Reveal` | read the check blob, the plain blobs and the trusted subjects the reveal cites (the bounty's, and any more it adds) from the work item's extrinsics, checking each against the bounty's hashes or its claim's Merkle root; run the check on them (attested ones marked trusted), `params` and `x` in an inner PVM with the bounty's `check_gas` | the terms match, the cited attestations were recorded, and the commitment is older than this slot and made before expiry. The first valid reveal opens the claim window, and later ones replace the leader if their commitment is earlier. Refund the deposit |
+| `Finalize` | — | once the claim window has closed, pay the leader |
+| `Reclaim` | verify the maker's signature | if no one revealed by `expiry + REVEAL_GRACE`, refund the maker |
 | `Release` | — | delete a commitment (named by bounty and hash) that can no longer be revealed; its deposit stays forfeit |
-| `Pin` | verify the owner's signature | debit `PIN_DEPOSIT` per preimage; hold them for good (solicit each unless already held) |
-| `Attest` | verify the attester's signature; resolve the trusted subjects it cites; look up the check and the bundle; run the check in attest mode with the attester's witness | the parents were recorded and this wasn't yet; debit `ATTEST_DEPOSIT`; hold the bundle for good; record the attestation |
+| `Attest` | read the check, the subjects and the trusted subjects it cites from the extrinsics, and compute the subjects' Merkle root; verify the attester's signature over the claim; run the check in attest mode with the attester's witness | the parents were recorded and this wasn't yet; debit `ATTEST_DEPOSIT`; record the attestation |
+
+Blobs travel with the ops that use them: a work item's payload is the op, and its extrinsics
+(each a SCALE `Vec<Vec<u8>>` of blobs) hold the blobs it names, as `BlobAt { extrinsic, index }`.
+So state holds only records: bounties, commitments, accounts and attestations. See
+[docs/design/extrinsics.md](docs/design/extrinsics.md).
 
 ### Attestations
 
 An attestation records that a check, run once in attest mode with some params, accepted every
 subject in a list, given trusted subjects of earlier attestations: "check C verified B₁…Bₙ, given
-subjects of P₁…Pₖ". The subjects come in a *bundle*, one preimage holding them all (a
-`Vec<Vec<u8>>`); a subject's hash is that of its own bytes. The attestation's id hashes the
-check, the params hash, the bundle and `parents_root`, the hash
-of its parents' ids (sorted and deduplicated). Later work can then rely on any one of B₁…Bₙ
+subjects of P₁…Pₖ". The claim commits to the subjects by the root of a binary Merkle tree over
+them (`witness_types::merkle`) and their count; a subject's hash is that of its own bytes. The
+attestation's id hashes the check, the params hash, the subjects' root and count, and
+`parents_root`, the hash of its parents' ids (sorted and deduplicated). Later work can then rely on any one of B₁…Bₙ
 without verifying it again:
 
 - **Attestations form a DAG.** An attestation can trust subjects of any number of earlier ones,
   and they of others. A library is attested in batches, each batch trusting the subjects it
   uses, and independent batches in parallel.
-- **Bounties cite subjects.** A bounty's blobs can be `Attested { attestation, entry }`, entry
-  `entry` of an attestation's bundle, mixed with plain blobs. Its check receives the
+- **Bounties cite subjects.** A bounty's blobs can be `Attested { attestation, entry }`, subject
+  `entry` of an attestation, mixed with plain blobs. Its check receives the
   attested subjects marked trusted, and can skip whatever its attest mode verified. For a Lean
   checker that means type-checking the statement's environment once, instead of on every reveal.
 - **Reveals can trust more.** A reveal must trust its bounty's attested subjects, and may add
@@ -51,21 +55,17 @@ check's attestations. So a trusted blob always means "my own attest mode accepte
 attester can't slip in a subject verified by a lenient check, or by this check with lenient params.
 
 Ops cite attestations compactly. Refine can't read state, so `Attest` and `Reveal` carry the
-claims they rely on (check, params hash, bundle, parents root), each once, and refer to trusted
-subjects as `TrustedRef { claim, entry }`. Refine looks up each claim's bundle and takes the
-entries. Accumulate makes sure the claims were really recorded, by id.
+claims they rely on (check, params hash, subjects' root and count, parents root), each once, and
+refer to trusted subjects as `TrustedRef { claim, entry, blob, path }`: subject `entry` of the
+claim, its bytes at `blob` in the extrinsics, and its Merkle path. Refine checks the path against
+the claim's root, so it hashes only the subjects it uses. Accumulate makes sure the claims were
+really recorded, by id.
 
-Bundles exist for accumulate's sake. JAM gives accumulate 10M gas per work report, in the full
-spec as in the tiny one, and holding a preimage costs about 24k of it, so an attestation that
-held each subject as its own preimage could hold only a few hundred. A bundle is one preimage,
-so accumulating an attestation costs the same however many subjects it has. Refine, with 5×10⁹
-gas, does the per-subject work: slicing the bundle and hashing each subject.
-
-A bundle must be on chain before refine can look it up, so it's pinned first (`Pin`, up to
-`MAX_PINS` at a time), and the check blob too unless a bounty already holds it. The
-attester's witness is the evidence (a batch's proofs, say) and is not part of the claim. Pins and
-attestations are permanent for now, and so are the preimages they hold. See
-[docs/design/attestation-dag.md](docs/design/attestation-dag.md).
+Accumulating an attestation stores one small record, however many subjects it has. The
+subjects live off chain, with whoever cites them (for Lean, anyone can rebuild them from source);
+losing them costs liveness, never soundness, since refine checks every byte it's given. The
+attester's witness is the evidence (a batch's proofs, say) and is not part of the claim.
+Attestations are permanent. See [docs/design/attestation-dag.md](docs/design/attestation-dag.md).
 
 ### Front-running
 
@@ -86,8 +86,7 @@ the real one. Keyed by bounty, the copy sits apart where no reveal can ever matc
 Each commitment locks `COMMIT_DEPOSIT` points, and only a valid reveal gets them back.
 Accumulate checks the service can pay the storage deposit for an operation before writing
 anything. An operation it can't store is rejected whole, and the other work items in the same
-batch still go through. Check blobs and extra blobs are reference-counted and forgotten when no
-unfinished bounty uses them.
+batch still go through.
 
 ### Checks
 
@@ -166,7 +165,7 @@ cargo jam-build --out-dir out
 `witness hash --check out/factor-check.jam` prints the check hash a bounty on that blob uses.
 
 The end-to-end script runs in seconds against `tools/witness-sim`, which takes the `jamt`
-commands the script uses and runs each op through the service's rules natively, with preimages
+commands the script uses and runs each op through the service's rules natively, with extrinsics
 and storage in memory and checks in PolkaVM. It charges checks the gas PolkaJam v0.1.29 does
 (PolkaVM's full cost model with L2 cache hits matched it exactly on the sample checks), but not
 refine or accumulate themselves, and a slot passes with every op, so the testnet stays the judge
@@ -176,16 +175,18 @@ of what fits and of the node's behavior. Use it while iterating:
 WITNESS_SIM=1 scripts/e2e.sh          # the full run, in about 7 seconds
 ```
 
-CI (`.github/workflows/ci.yml`) runs the unit tests and builds the blobs. The end-to-end script
-needs a PolkaJam release, so run it locally. It starts its own testnet, deploys, and checks the
+CI (`.github/workflows/ci.yml`) runs the unit tests and builds the blobs. Reveals and
+attestations carry extrinsics, which `jamt item` can't send, so until witness has its own
+submitter (step 2 of [docs/design/extrinsics.md](docs/design/extrinsics.md)) the script runs only
+with `WITNESS_SIM=1`. Against a testnet it needs a PolkaJam release, so run it locally. It starts its own testnet, deploys, and checks the
 chain state at each step. It has two modes:
 
 - **`--quick`** (about 4 minutes): two bounties, from create to a reveal, one of them on a check
   that reads a blob and grows its heap. It exercises everything that touches the node: deploy,
-  refine and accumulate, the preimage lookups, the inner PVM and its heap. Run it before opening
+  refine and accumulate, extrinsics, the inner PVM and its heap. Run it before opening
   any PR that changes code.
 - **Full** (about 10 minutes, mostly waiting out claim windows): four bounties, adding the
-  front-run, finalize, reclaim, release, blob release and deposit checks. Run it when changing `service/`,
+  front-run, finalize, reclaim, release and deposit checks. Run it when changing `service/`,
   `check_vm`, the build setup, or anything about timing (windows, expiry, grace), and before a
   release. The bounty logic itself is covered by the unit tests in `rules/`, so a rules-only
   change needs only those plus `--quick`.
@@ -254,39 +255,33 @@ types (`Vec`, `BTreeMap`) work. Checks get no other host calls, so no logging or
 
 ## Using it by hand
 
-`scripts/e2e.sh` is the worked example. In short, with `W=./target/debug/witness` and `SVC` the
-id `jamt create-service out/witness-service.jam 10000000000` produced:
+`scripts/e2e.sh` is the worked example. In short, with `W=./target/debug/witness`, `SVC` the
+id `jamt create-service out/witness-service.jam 10000000000` produced, and `JAMT` a submitter
+that takes extrinsic files after the payload (witness-sim does; `jamt` doesn't yet):
 
 ```bash
-jamt item $SVC $($W mint --to alice --amount 1000)
-jamt item $SVC $($W create --service $SVC --maker alice --nonce 0 --check out/blake2b-preimage-check.jam --params-blake2b "open sesame" --reward 500 --check-gas 10000000 --expiry $(( $(jamt inspect slot) + 100 )))
-jamt provide $SVC out/blake2b-preimage-check.jam
-jamt item $SVC $($W mint --to bob --amount 100)
-jamt item $SVC $($W commit --service $SVC --bounty 0 --hunter bob --nonce 0 --salt 0x0b0b --witness-str "open sesame")
-jamt item $SVC $($W reveal --bounty 0 --check out/blake2b-preimage-check.jam --params-blake2b "open sesame" --check-gas 10000000 --hunter bob --salt 0x0b0b --witness-str "open sesame")
-# a bounty with extra blobs names them, in order, on create and on every reveal; provide each one
+$JAMT item $SVC $($W mint --to alice --amount 1000)
+$JAMT item $SVC $($W create --service $SVC --maker alice --nonce 0 --check out/blake2b-preimage-check.jam --params-blake2b "open sesame" --reward 500 --check-gas 10000000 --expiry $(( $($JAMT inspect slot) + 100 )))
+$JAMT item $SVC $($W mint --to bob --amount 100)
+$JAMT item $SVC $($W commit --service $SVC --bounty 0 --hunter bob --nonce 0 --salt 0x0b0b --witness-str "open sesame")
+# a reveal writes its extrinsics (the check, the blobs) to a directory, to send with it
+$JAMT item $SVC $($W reveal --bounty 0 --check out/blake2b-preimage-check.jam --params-blake2b "open sesame" --check-gas 10000000 --hunter bob --salt 0x0b0b --witness-str "open sesame" --extrinsics x) x/*
+# a bounty with extra blobs names them, in order, on create and on every reveal
 printf 'open\nsesame\n' > words.txt
-jamt item $SVC $($W create --service $SVC --maker alice --nonce 1 --check out/dictionary-check.jam --params 0x00 --blobs words.txt --reward 100 --check-gas 10000000 --expiry $(( $(jamt inspect slot) + 100 )))
-jamt provide $SVC out/dictionary-check.jam
-jamt provide $SVC words.txt
-# attest a bundle of blobs (pinned and provided first, with the check), then cite its entries
-# in a bounty
+$JAMT item $SVC $($W create --service $SVC --maker alice --nonce 1 --check out/dictionary-check.jam --params 0x00 --blobs words.txt --reward 100 --check-gas 10000000 --expiry $(( $($JAMT inspect slot) + 100 )))
+# attest a list of blobs, then cite its subjects in a bounty; the claim file keeps the subjects,
+# which citing them needs
 printf '%-16s' apple banana cherry > volume1.bin
 printf '%-16s' grape lemon > volume2.bin
-$W bundle --subjects volume1.bin,volume2.bin --out batch.bundle
-jamt item $SVC $($W mint --to pat --amount 100)
-jamt item $SVC $($W pin --service $SVC --owner pat --nonce 0 --blobs out/sorted-words-check.jam,batch.bundle)
-for f in out/sorted-words-check.jam batch.bundle; do jamt provide $SVC $f; done
-jamt item $SVC $($W attest --service $SVC --attester pat --nonce 1 --check out/sorted-words-check.jam --subjects batch.bundle --check-gas 10000000 --claim-out batch.claim)
+$JAMT item $SVC $($W mint --to pat --amount 100)
+$JAMT item $SVC $($W attest --service $SVC --attester pat --nonce 0 --check out/sorted-words-check.jam --subjects volume1.bin,volume2.bin --check-gas 10000000 --claim-out batch.claim --extrinsics x) x/*
 # a later attestation trusts subjects of earlier ones: --trust batch.claim:1 (entry 1, volume 2)
-jamt item $SVC $($W create --service $SVC --maker alice --nonce 2 --check out/sorted-words-check.jam --params 0x00 --blobs batch.claim:0,batch.claim:1 --reward 100 --check-gas 10000000 --expiry $(( $(jamt inspect slot) + 100 )))
+$JAMT item $SVC $($W create --service $SVC --maker alice --nonce 2 --check out/sorted-words-check.jam --params 0x00 --blobs batch.claim:0,batch.claim:1 --reward 100 --check-gas 10000000 --expiry $(( $($JAMT inspect slot) + 100 )))
 # after the claim window (30 slots by default)
-jamt item $SVC $($W finalize --bounty 0)
+$JAMT item $SVC $($W finalize --bounty 0)
 ```
 
-Wait a block (about 6 s) after deploying, and after `provide`, before sending items that depend on
-it. Refine reads the chain as of the package's anchor block, so an anchor that's too early fails
-with `CheckUnavailable`.
+Wait a block (about 6 s) after deploying before sending items.
 
 To read state, get the raw value with `jamt inspect storage --raw $SVC $($W key --account bob)`,
 then decode it with `$W decode --account <value>`. The same works for `--bounty`, and for
@@ -306,9 +301,10 @@ or did not apply it.
 - Witnesses come from the work-item payload, so they're limited to `MAX_WITNESS_LEN` (64 KiB).
   Taking them from extrinsic data would raise that to the package's input limit.
 - The limits (`MAX_CHECK_LEN`, `MAX_CHECK_PAGES`, `MAX_CHECK_GAS`, `MAX_BLOBS_LEN`) are constants.
-- Closed bounties stay in storage as a record. Only their commitments and check blobs are cleaned
-  up.
-- Pins and attestations, and the preimages they hold, are never released.
+- Closed bounties stay in storage as a record. Only their commitments are cleaned up.
+- Attestations are never released.
+- Ops with extrinsics can't be sent with `jamt item`; witness needs its own work-package
+  submitter (docs/design/extrinsics.md, step 2).
 - A check only trusts its own attestations. Building on another checker's attested layers would
   need the check to learn which checker made each one.
 - Attestations form linear chains, and a check receives a subject's whole chain, so a refine must
