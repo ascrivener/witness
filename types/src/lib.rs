@@ -235,7 +235,9 @@ pub enum Op {
 		check_hash: Hash,
 		params: Vec<u8>,
 		blobs: Vec<BlobRef>,
-		/// The attestations `trusted` cites, each once.
+		/// The attestations `trusted` cites, each once: all by the bounty's check, with one set of
+		/// params, which the bounty's own attested blobs fix. A bounty citing no attestation takes
+		/// none, as otherwise the hunter would choose those params.
 		claims: Vec<AttestationClaim>,
 		/// Every subject passed to the check as trusted: those of the bounty's blobs, and any
 		/// more the reveal relies on (such as library a proof uses that the bounty didn't name).
