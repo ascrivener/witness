@@ -1,0 +1,17 @@
+[package]
+name = "mock-token-service"
+description = "A test-only JAM token service for witness's deposits and withdrawals"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[package.metadata.jam]
+type = "service"
+
+[dependencies]
+mock-token.workspace = true
+codec.workspace = true
+jam-pvm-common = { workspace = true, features = ["service", "logging"] }
+jam-types.workspace = true
+polkavm-derive.workspace = true

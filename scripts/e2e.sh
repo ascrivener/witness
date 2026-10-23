@@ -16,9 +16,10 @@
 # --quick (about 6 minutes, a third of it starting the testnet) then mints, creates two bounties,
 # commits, and reveals a wrong and a right witness on each. Then it attests a batch of two word
 # volumes and a third on one of them, refuses a bad one, and reveals on a bounty that cites two
-# of them, trusting the third as well. That covers everything that touches the node: deploy,
-# refine and accumulate, extrinsics, the inner PVM in both modes and growing its heap. It skips
-# the claim windows.
+# of them, trusting the third as well, and a stablecoin round trip through the test token
+# service (mock-token-service): a deposit into witness, a bounty paid in it, a withdrawal. That
+# covers everything that touches the node: deploy, refine and accumulate, extrinsics, transfers
+# in and out, the inner PVM in both modes and growing its heap. It skips the claim windows.
 #
 # The full run (about 8 minutes, mostly claim windows) instead does:
 #   bounty 0 (factor check):     Bob commits; Mallory copies x, commits later and reveals first;
@@ -28,6 +29,8 @@
 #   bounty 2 (preimage check):   shares bounty 1's check blob; Carol reveals and wins.
 #   bounty 3 (dictionary check): reads a dictionary blob and allocates; Erin reveals and wins.
 #   bounty 4 (sorted-words check): the attestation steps above, with Erin revealing.
+#   then the stablecoin round trip, a configuration change waiting out the admin delay (the
+#   script builds with a short one), and an upgrade to another build of the service.
 # checking the chain state after each step.
 set -euo pipefail
 
@@ -71,23 +74,40 @@ fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 slot() { "$JAMT" inspect slot; }
 wait_slot() { while [ "$(slot)" -lt "$1" ]; do sleep $POLL; done; }
 
-# Raw storage value for `witness key` flags, or empty.
-storage() {
+# Raw storage value of service $1 at key $2, or empty.
+raw_storage() {
 	local v
 	# jamt cuts values over 1 KiB short; witness-sim doesn't.
 	if [ "${JAM_RPC:-}" = sim ]; then
-		v=$("$JAMT" inspect storage --raw "$SVC" "$($W key "$@")" 2>/dev/null || true)
+		v=$("$JAMT" inspect storage --raw "$1" "$2" 2>/dev/null || true)
 	else
-		v=$(python3 scripts/jam-storage.py "$SVC" "$($W key "$@")" 2>/dev/null || true)
+		v=$(python3 scripts/jam-storage.py "$1" "$2" 2>/dev/null || true)
 	fi
 	case $v in 0x*) echo "$v" ;; *) echo "" ;; esac
 }
 
-# `witness decode --KIND` of the value at `witness key ARGS...`, or "none".
+# Raw storage value for `witness key` flags, or empty.
+storage() { raw_storage "$SVC" "$($W key "$@")"; }
+
+# `witness decode --KIND` of the value at `witness key ARGS...`, or "none". Two kinds aren't one
+# value: `account --account WHO` shows WHO's nonce and balance of the test asset, and
+# `token --account WHO --asset ID` WHO's balance in the test token service.
 show() {
 	local kind=$1; shift
-	local v; v=$(storage "$@")
-	if [ -n "$v" ]; then $W decode "--$kind" "$v"; else echo none; fi
+	local v
+	case $kind in
+		account)
+			local nonce balance
+			v=$(storage "$@"); nonce=$([ -n "$v" ] && $W decode --account "$v" | sed -nE 's/.*nonce: ([0-9]+).*/\1/p')
+			v=$(storage --balance "$2" --asset test); balance=$([ -n "$v" ] && $W decode --balance "$v")
+			echo "balance: ${balance:-0}, nonce: ${nonce:-0}"
+			return ;;
+		token) v=$(raw_storage "$TOKEN_SVC" "$($W token-key "$@")"); kind=token-balance ;;
+		*) v=$(storage "$@") ;;
+	esac
+	if [ -z "$v" ]; then echo none
+	elif [ "$kind" = token-balance ]; then $W token-decode --balance "$v"
+	else $W decode "--$kind" "$v"; fi
 }
 
 # Wait until `show KIND ARGS...` matches PATTERN.
@@ -113,6 +133,8 @@ expect_still() {
 item() { submit "$SVC" "$@" >/dev/null; wait_slot $(( $(slot) + 1 )); }
 # An item with the extrinsics the CLI just wrote.
 itemx() { item "$1" "$X"/*; }
+# An item for the test token service.
+token_item() { submit "$TOKEN_SVC" "$1" >/dev/null; wait_slot $(( $(slot) + 1 )); }
 
 # Print the commitment for `witness commit ARGS...` (the CLI reports it on stderr).
 commitment_of() { $W commit "$@" 2>&1 >/dev/null | awk '{print $2}'; }
@@ -134,6 +156,9 @@ elif [ -z "${JAM_RPC:-}" ]; then
 	trap 'pkill -P $TESTNET_PID 2>/dev/null; kill $TESTNET_PID 2>/dev/null || true' EXIT
 	for _ in $(seq 1 60); do "$JAMT" list >/dev/null 2>&1 && break; sleep 2; done
 fi
+
+# A short admin delay, so the timelock can be shown taking effect (deployments keep 7 days).
+export WITNESS_ADMIN_DELAY=${WITNESS_ADMIN_DELAY:-12}
 
 step "building"
 command -v cargo-jam-build >/dev/null || fail "needs cargo-jam-build: cargo install cargo-jam-build --version 0.1.29 --locked"
@@ -193,16 +218,49 @@ reveal_dictionary() {
 		--hunter "$2" --salt "$3" --witness-str "$4" --extrinsics "$X")"
 }
 
+# Deploy blob $1, with memo gas $2 (what a transfer to it must carry), and print its service
+# id, once it's in the finalized state. Work packages anchored before the service existed cannot
+# see its code, and anchors trail the best block.
+deploy() {
+	local before; before=$("$JAMT" list | wc -l)
+	"$JAMT" create-service "$1" 10000000000 --min-memo-gas "$2" >/dev/null
+	for _ in $(seq 1 40); do [ "$("$JAMT" list | wc -l)" -gt "$before" ] && break; sleep $POLL; done
+	local id=$((16#$("$JAMT" list | tail -1 | cut -f1)))
+	for _ in $(seq 1 40); do "$JAMT" inspect final service "$id" >/dev/null 2>&1 && break; sleep $POLL; done
+	echo "$id"
+}
+
+# The stablecoin round trip, with Alice's next nonce $1: the test token service mints Alice 1000
+# of its asset 1, and she deposits 600 into witness, posts a bounty paid in it with a reward of
+# 500, and withdraws the 100 left back to the token service.
+stablecoin() {
+	local nonce=$1 asset=$TOKEN_SVC:1
+	step "stablecoin: a deposit, a bounty paid in it, a withdrawal"
+	token_item "$($W token-faucet --to alice --asset 1 --amount 1000)"
+	expect "the token service minted alice 1000" '^1000$' token --account alice --asset 1
+	token_item "$($W token-send --from alice --asset 1 --amount 600 --to-service "$SVC" --to alice)"
+	expect "alice deposited 600 into witness" '^600$' balance --balance alice --asset "$asset"
+	expect "witness holds the 600 with the token service" '^600$' token --service-holder "$SVC" --asset 1
+	item "$($W create --service "$SVC" --maker alice --nonce "$nonce" --check $PREIMAGE_CHECK \
+		--params-blake2b "$SECRET" --asset "$asset" --reward 500 --check-gas $GAS --expiry $(( $(slot) + 100 )))"
+	expect "alice escrowed the reward" '^100$' balance --balance alice --asset "$asset"
+	item "$($W withdraw --service "$SVC" --account alice --nonce $((nonce + 1)) --asset "$asset" --amount 100 --to alice)"
+	expect "alice withdrew the rest" '^none$' balance --balance alice --asset "$asset"
+	expect "the token service paid it back to her" '^500$' token --account alice --asset 1
+	expect "witness holds the escrowed 500" '^500$' token --service-holder "$SVC" --asset 1
+}
+
 step "deploying"
-before=$("$JAMT" list | wc -l)
-"$JAMT" create-service out/witness-service.jam 10000000000 >/dev/null
-for _ in $(seq 1 40); do [ "$("$JAMT" list | wc -l)" -gt "$before" ] && break; sleep $POLL; done
-SVC=$((16#$("$JAMT" list | tail -1 | cut -f1)))
+# witness_types::DEPOSIT_GAS: what witness needs to credit a deposit.
+SVC=$(deploy out/witness-service.jam 300000)
 echo "service $SVC"
-# Work packages anchored before the service existed cannot see its code, and anchors trail the
-# best block, so wait until the service is in the finalized state, plus a margin.
-for _ in $(seq 1 40); do "$JAMT" inspect final service "$SVC" >/dev/null 2>&1 && break; sleep $POLL; done
+TOKEN_SVC=$(deploy out/mock-token-service.jam 300000)
+echo "test token service $TOKEN_SVC"
 wait_slot $(( $(slot) + 3 ))
+# The first configuration applies at once. Spam deposits are in the faucet's test asset.
+item "$($W propose --service "$SVC" --nonce 0 --token-services "$TOKEN_SVC" --fee-asset test \
+	--commit-deposit 10 --attest-deposit 10)"
+expect "witness configured" 'fee_asset: Some' config --config
 
 if [ -n "$QUICK" ]; then
 	step "quick: mint, create"
@@ -241,6 +299,7 @@ if [ -n "$QUICK" ]; then
 	expect "bob's dictionary reveal opens the window" 'Revealing' bounty --bounty 1
 
 	attestations 2 2 bob 2
+	stablecoin 3
 	printf '\nquick end-to-end checks passed (claim windows, finalize and reclaim not run)\n'
 	exit 0
 fi
@@ -339,5 +398,45 @@ expect "dave's dead commitment deleted" '^none$' commitment --bounty 1 --commitm
 expect "dave's deposit forfeit" 'balance: 90, nonce: 1' account --account dave
 
 attestations 4 5 erin 1
+stablecoin 6
+
+step "a configuration change waits out the admin delay"
+item "$($W propose --service "$SVC" --nonce 1 --token-services "$TOKEN_SVC" --fee-asset test \
+	--commit-deposit 20 --attest-deposit 10)"
+expect "the change is proposed" 'effective' proposal --proposal 0
+EFFECTIVE=$(show proposal --proposal 0 | sed -nE 's/.*effective: ([0-9]+).*/\1/p')
+item "$($W apply --id 0)"
+expect_still "applying it early changes nothing" 'commit_deposit: 10,' config --config
+wait_slot "$EFFECTIVE"
+item "$($W apply --id 0)"
+expect "applied after the delay" 'commit_deposit: 20,' config --config
+expect "and gone" '^none$' proposal --proposal 0
+
+step "an upgrade waits out the admin delay, then replaces the code"
+# Another build of the same service: a different admin delay makes a different blob.
+UPGRADE=$TMP/upgrade
+WITNESS_ADMIN_DELAY=$((WITNESS_ADMIN_DELAY + 1)) cargo jam-build --out-dir "$UPGRADE" -p witness-service >/dev/null
+item "$($W propose --service "$SVC" --nonce 2 --upgrade "$UPGRADE/witness-service.jam")"
+expect "the upgrade is proposed" 'Upgrade' proposal --proposal 1
+"$JAMT" provide "$SVC" "$UPGRADE/witness-service.jam" >/dev/null
+wait_slot "$(show proposal --proposal 1 | sed -nE 's/.*effective: ([0-9]+).*/\1/p')"
+item "$($W apply --id 1)"
+expect "the upgrade applied" '^none$' proposal --proposal 1
+NEW_CODE=$($W hash --check "$UPGRADE/witness-service.jam")
+if [ "${JAM_RPC:-}" = sim ]; then
+	grep -q "upgraded to code ${NEW_CODE#0x}" "$LOG" || fail "the service's code didn't change"
+else
+	# Work items name the code they expect, as of the finalized block (see jam-submit.py), so
+	# wait for the upgrade to be final before sending more.
+	final_code() {
+		python3 -c "import sys; sys.path.insert(0, 'scripts'); from jamrpc import Rpc, unb64, url
+r = Rpc(url()); print('0x' + unb64(r.call('serviceData', r.call('finalizedBlock')['header_hash'], $SVC))[1:33].hex())"
+	}
+	for _ in $(seq 1 40); do [ "$(final_code)" = "$NEW_CODE" ] && break; sleep $POLL; done
+	[ "$(final_code)" = "$NEW_CODE" ] || fail "the service's code is $(final_code), not $NEW_CODE"
+fi
+echo "ok: the service runs the new code"
+item "$($W mint --to erin --amount 5)"
+expect "and still works, with its state" 'balance: 205,' account --account erin
 
 printf '\nall end-to-end checks passed\n'

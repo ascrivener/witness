@@ -11,6 +11,8 @@ members = [
 	"checks/sorted-words",
 	"tools/witness-cli",
 	"tools/witness-sim",
+	"tools/mock-token",
+	"tools/mock-token-service",
 ]
 # The service only makes sense as a PVM blob; build it (and check blobs) with `cargo jam-build`.
 # Check crates are default members so `cargo test` runs their host tests.
@@ -24,6 +26,7 @@ default-members = [
 	"checks/sorted-words",
 	"tools/witness-cli",
 	"tools/witness-sim",
+	"tools/mock-token",
 ]
 
 [workspace.package]
@@ -36,6 +39,7 @@ authors = ["Adam Scrivener <adam@oneoff.world>"]
 witness-types = { path = "types", default-features = false }
 witness-check = { path = "check" }
 witness-rules = { path = "rules" }
+mock-token = { path = "tools/mock-token" }
 
 codec = { package = "jam-codec", version = "0.1.1", default-features = false, features = ["derive"] }
 blake2b_simd = { version = "1.0.5", default-features = false }

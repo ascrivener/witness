@@ -3,6 +3,7 @@
 //!
 //! - [`refine`] verifies an [`Op`]: signatures, limits, and the bounty's check via
 //!   [`RefineEnv::run_check`].
+//! - [`on_transfer`] credits a deposit from a token service.
 //! - [`accumulate`] applies a [`Verified`] to a read-only [`State`] and returns the [`Effects`]:
 //!   storage writes. Nothing is written unless the whole operation is valid, so the service can
 //!   check it can afford the storage first and then apply everything, rather than failing halfway
@@ -18,12 +19,16 @@ mod tests;
 use alloc::{collections::BTreeMap, vec::Vec};
 use codec::{Decode, Encode};
 use witness_types::{
-	ATTEST_DEPOSIT, Account, AccountId, Attestation, AttestationClaim, AttestationId, BlobAt, BlobHash,
-	BlobRef, Bounty, BountyId, BountyStatus, COMMIT_DEPOSIT, CheckBlob, CheckMode, Claim, CommitRecord,
-	Gas, Hash, MAX_BLOBS, MAX_BLOBS_LEN, MAX_CHECK_GAS, MAX_CHECK_LEN, MAX_CLAIM_WINDOW, MAX_MINT,
-	MAX_PARAMS_LEN, MAX_WITNESS_LEN, MIN_CLAIM_WINDOW, MIN_COMMIT_AGE, Op, Points, REVEAL_GRACE,
-	Rejection, Signature, Slot, StorageKey, TrustedRef, Verified, blake2b256, blobs_in, merkle,
+	ADMIN_DELAY, Account, AccountId, AdminAction, Amount, Asset, Attestation, AttestationClaim,
+	AttestationId, BUILD_ADMIN, BlobAt, BlobHash, BlobRef, Bounty, BountyId, BountyStatus, CheckBlob,
+	CheckMode, Claim, CommitRecord, Config, DepositMemo, Gas, Hash, MAX_BLOBS, MAX_BLOBS_LEN, MAX_CHECK_GAS,
+	MAX_CHECK_LEN, MAX_CLAIM_WINDOW, MAX_MINT, MAX_PARAMS_LEN, MAX_WITNESS_LEN, MEMO_LEN, MEMO_VERSION,
+	MIN_CLAIM_WINDOW, MIN_COMMIT_AGE, Op, Proposal, REVEAL_GRACE, Rejection, Signature, Slot, StorageKey,
+	TEST_ASSET, TrustedRef, Verified, WithdrawalMemo, blake2b256, blobs_in, merkle,
 };
+
+/// Whether this build has the test faucet (`Mint`, crediting [`TEST_ASSET`]).
+pub const FAUCET: bool = cfg!(any(test, feature = "faucet"));
 
 /// What refine needs from the host.
 pub trait RefineEnv {
@@ -45,6 +50,12 @@ pub trait State {
 pub struct Effects {
 	/// Encoded [`StorageKey`] to new value, or `None` to remove.
 	pub writes: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
+	/// Transfers to send, with no native balance: (destination service, memo).
+	pub transfers: Vec<(u32, [u8; MEMO_LEN])>,
+	/// A preimage to solicit: (hash, length).
+	pub solicit: Option<(Hash, u32)>,
+	/// Replace the service's code with the preimage hashing to this.
+	pub upgrade: Option<Hash>,
 }
 
 pub type Result<T> = core::result::Result<T, &'static str>;
@@ -380,6 +391,31 @@ pub fn refine(env: &impl RefineEnv, service_id: u32, op: Op) -> Verified {
 			}
 		},
 		Op::Release { bounty_id, commitment } => Ok(Verified::Release { bounty_id, commitment }),
+		Op::Withdraw { account, nonce, asset, amount, to, signature } => {
+			let message = witness_types::withdraw_message(service_id, &account, nonce, &asset, amount, &to);
+			if verify_signature(&account, &message, &signature) {
+				Ok(Verified::Withdraw { account, nonce, asset, amount, to })
+			} else {
+				Err(Rejection::BadSignature)
+			}
+		},
+		Op::Propose { admin, nonce, action, signature } => {
+			let message = witness_types::propose_message(service_id, &admin, nonce, &action);
+			if verify_signature(&admin, &message, &signature) {
+				Ok(Verified::Propose { admin, nonce, action })
+			} else {
+				Err(Rejection::BadSignature)
+			}
+		},
+		Op::Apply { id } => Ok(Verified::Apply { id }),
+		Op::Cancel { admin, nonce, id, signature } => {
+			let message = witness_types::cancel_message(service_id, &admin, nonce, id);
+			if verify_signature(&admin, &message, &signature) {
+				Ok(Verified::Cancel { admin, nonce, id })
+			} else {
+				Err(Rejection::BadSignature)
+			}
+		},
 		Op::Attest {
 			attester,
 			nonce,
@@ -428,22 +464,77 @@ impl<S: State> Tx<'_, S> {
 		self.get(&StorageKey::Account(*id)).unwrap_or_default()
 	}
 
-	fn credit(&mut self, id: &AccountId, amount: Points) {
-		let mut acc = self.account(id);
-		acc.balance = acc.balance.saturating_add(amount);
-		self.set(&StorageKey::Account(*id), &acc);
+	fn balance(&self, id: &AccountId, asset: Asset) -> Amount {
+		self.get(&StorageKey::Balance(*id, asset)).unwrap_or(0)
 	}
 
-	/// Check and bump `id`'s nonce, and take `amount` from its balance.
-	fn charge(&mut self, id: &AccountId, nonce: u64, amount: Points) -> Result<()> {
+	fn set_balance(&mut self, id: &AccountId, asset: Asset, amount: Amount) {
+		let key = StorageKey::Balance(*id, asset);
+		if amount == 0 { self.remove(&key) } else { self.set(&key, &amount) }
+	}
+
+	fn credit(&mut self, id: &AccountId, asset: Asset, amount: Amount) -> Result<()> {
+		let balance = self.balance(id, asset).checked_add(amount).ok_or("balance overflow")?;
+		self.set_balance(id, asset, balance);
+		Ok(())
+	}
+
+	fn debit(&mut self, id: &AccountId, asset: Asset, amount: Amount) -> Result<()> {
+		let balance = self.balance(id, asset).checked_sub(amount).ok_or("insufficient balance")?;
+		self.set_balance(id, asset, balance);
+		Ok(())
+	}
+
+	/// Check and bump `id`'s nonce.
+	fn use_nonce(&mut self, id: &AccountId, nonce: u64) -> Result<()> {
 		let mut acc = self.account(id);
 		if nonce != acc.nonce {
 			return Err("bad nonce");
 		}
-		acc.balance = acc.balance.checked_sub(amount).ok_or("insufficient points")?;
 		acc.nonce += 1;
 		self.set(&StorageKey::Account(*id), &acc);
 		Ok(())
+	}
+
+	/// Check and bump `id`'s nonce, and take `amount` of `asset` from it.
+	fn charge(&mut self, id: &AccountId, nonce: u64, asset: Asset, amount: Amount) -> Result<()> {
+		self.use_nonce(id, nonce)?;
+		self.debit(id, asset, amount)
+	}
+
+	fn config(&self) -> Option<Config> {
+		self.get(&StorageKey::Config)
+	}
+
+	/// The fee asset and the deposits paid in it.
+	fn fees(&self) -> Result<(Asset, Config)> {
+		let config = self.config().ok_or("witness is not configured")?;
+		Ok((config.fee_asset.ok_or("no fee asset configured")?, config))
+	}
+
+	/// Whether bounties may pay in `asset`.
+	fn accepted(&self, asset: Asset) -> bool {
+		(FAUCET && asset == TEST_ASSET) || self.config().is_some_and(|c| c.token_services.contains(&asset.service))
+	}
+
+	fn admin(&self) -> AccountId {
+		self.get(&StorageKey::Admin).unwrap_or(BUILD_ADMIN)
+	}
+
+	/// Check `who` is the admin, and use its nonce.
+	fn as_admin(&mut self, who: &AccountId, nonce: u64) -> Result<()> {
+		if *who != self.admin() {
+			return Err("not the admin");
+		}
+		self.use_nonce(who, nonce)
+	}
+
+	fn act(&mut self, action: AdminAction) {
+		match action {
+			AdminAction::Configure(config) => self.set(&StorageKey::Config, &config),
+			AdminAction::SetAdmin(admin) => self.set(&StorageKey::Admin, &admin),
+			AdminAction::Upgrade { code_hash, .. } => self.fx.upgrade = Some(code_hash),
+		}
 	}
 
 	fn bounty(&self, id: BountyId) -> Result<Bounty> {
@@ -470,10 +561,13 @@ pub fn accumulate(state: &impl State, verified: Verified, now: Slot) -> Result<E
 	match verified {
 		Verified::Rejected(_) => return Err("rejected in refine"),
 		Verified::Mint { to, amount } => {
+			if !FAUCET {
+				return Err("no faucet");
+			}
 			if amount > MAX_MINT {
 				return Err("mint too large");
 			}
-			tx.credit(&to, amount);
+			tx.credit(&to, TEST_ASSET, amount)?;
 		},
 		Verified::CreateBounty { maker, nonce, terms } => {
 			if terms.check_gas > MAX_CHECK_GAS ||
@@ -511,7 +605,10 @@ pub fn accumulate(state: &impl State, verified: Verified, now: Slot) -> Result<E
 			if terms.expiry <= now.saturating_add(MIN_COMMIT_AGE) {
 				return Err("expiry too soon");
 			}
-			tx.charge(&maker, nonce, terms.reward)?;
+			if !tx.accepted(terms.asset) {
+				return Err("asset not accepted");
+			}
+			tx.charge(&maker, nonce, terms.asset, terms.reward)?;
 
 			let id: BountyId = tx.get(&StorageKey::NextBountyId).unwrap_or(0);
 			tx.set(&StorageKey::NextBountyId, &(id + 1));
@@ -526,8 +623,10 @@ pub fn accumulate(state: &impl State, verified: Verified, now: Slot) -> Result<E
 			if tx.get::<CommitRecord>(&key).is_some() {
 				return Err("already committed");
 			}
-			tx.charge(&committer, nonce, COMMIT_DEPOSIT)?;
-			let record = CommitRecord { slot: now, committer, deposit: COMMIT_DEPOSIT };
+			let (fee_asset, config) = tx.fees()?;
+			tx.charge(&committer, nonce, fee_asset, config.commit_deposit)?;
+			let record =
+				CommitRecord { slot: now, committer, deposit_asset: fee_asset, deposit: config.commit_deposit };
 			tx.set(&key, &record);
 		},
 		Verified::Reveal {
@@ -589,7 +688,7 @@ pub fn accumulate(state: &impl State, verified: Verified, now: Slot) -> Result<E
 			};
 			tx.set(&StorageKey::Bounty(bounty_id), &bounty);
 			// Any valid reveal gets its deposit back, winning or not.
-			tx.credit(&record.committer, record.deposit);
+			tx.credit(&record.committer, record.deposit_asset, record.deposit)?;
 			tx.remove(&key);
 		},
 		Verified::Finalize { bounty_id } => {
@@ -600,7 +699,7 @@ pub fn accumulate(state: &impl State, verified: Verified, now: Slot) -> Result<E
 			if now < window_end {
 				return Err("claim window still open");
 			}
-			tx.credit(&leader.hunter, bounty.terms.reward);
+			tx.credit(&leader.hunter, bounty.terms.asset, bounty.terms.reward)?;
 			bounty.status = BountyStatus::Claimed { winner: leader, slot: now };
 			tx.set(&StorageKey::Bounty(bounty_id), &bounty);
 		},
@@ -615,8 +714,8 @@ pub fn accumulate(state: &impl State, verified: Verified, now: Slot) -> Result<E
 			if revealable(&bounty, now) {
 				return Err("reveal window still open");
 			}
-			tx.charge(&maker, nonce, 0)?;
-			tx.credit(&maker, bounty.terms.reward);
+			tx.use_nonce(&maker, nonce)?;
+			tx.credit(&maker, bounty.terms.asset, bounty.terms.reward)?;
 			bounty.status = BountyStatus::Reclaimed;
 			tx.set(&StorageKey::Bounty(bounty_id), &bounty);
 		},
@@ -641,10 +740,70 @@ pub fn accumulate(state: &impl State, verified: Verified, now: Slot) -> Result<E
 			for parent in &parents {
 				tx.attestation(parent).map_err(|_| "no such parent attestation")?;
 			}
-			tx.charge(&attester, nonce, ATTEST_DEPOSIT)?;
+			let (fee_asset, config) = tx.fees()?;
+			tx.charge(&attester, nonce, fee_asset, config.attest_deposit)?;
 			let record = Attestation { check_hash: claim.check_hash, params_hash: claim.params_hash, slot: now, attester };
 			tx.set(&StorageKey::Attestation(id), &record);
 		},
+		Verified::Withdraw { account, nonce, asset, amount, to } => {
+			// Whatever the configuration now, a balance can always go back where it came from.
+			if asset.service == TEST_ASSET.service {
+				return Err("the test asset can't be withdrawn");
+			}
+			tx.charge(&account, nonce, asset, amount)?;
+			let memo = WithdrawalMemo { version: MEMO_VERSION, asset_id: asset.id, amount, to };
+			tx.fx.transfers.push((asset.service, witness_types::memo(&memo)));
+		},
+		Verified::Propose { admin, nonce, action } => {
+			tx.as_admin(&admin, nonce)?;
+			if matches!(action, AdminAction::Configure(_)) && tx.config().is_none() {
+				// The first configuration: no funds are at stake yet.
+				tx.act(action);
+			} else {
+				if let AdminAction::Upgrade { code_hash, code_len } = &action {
+					tx.fx.solicit = Some((*code_hash, *code_len));
+				}
+				let id: u64 = tx.get(&StorageKey::NextProposalId).unwrap_or(0);
+				tx.set(&StorageKey::NextProposalId, &(id + 1));
+				tx.set(&StorageKey::Proposal(id), &Proposal { action, effective: now.saturating_add(ADMIN_DELAY) });
+			}
+		},
+		Verified::Apply { id } => {
+			let proposal: Proposal = tx.get(&StorageKey::Proposal(id)).ok_or("no such proposal")?;
+			if now < proposal.effective {
+				return Err("proposal not yet effective");
+			}
+			tx.remove(&StorageKey::Proposal(id));
+			tx.act(proposal.action);
+		},
+		Verified::Cancel { admin, nonce, id } => {
+			tx.as_admin(&admin, nonce)?;
+			tx.get::<Proposal>(&StorageKey::Proposal(id)).ok_or("no such proposal")?;
+			tx.remove(&StorageKey::Proposal(id));
+		},
+	}
+	Ok(tx.fx)
+}
+
+/// Apply a transfer of `memo` and `native` balance to the service from service `source`: a
+/// deposit, if `source` is an accepted token service and the memo is one. The native balance is
+/// recorded as the recipient's storage credit. Anything else credits nothing; its native
+/// balance, if any, stays with the service's storage.
+pub fn on_transfer(state: &impl State, source: u32, native: u64, memo: &[u8]) -> Result<Effects> {
+	let mut tx = Tx { state, fx: Effects::default() };
+	if !tx.config().is_some_and(|c| c.token_services.contains(&source)) {
+		return Err("not from an accepted token service");
+	}
+	// The memo is zero-padded after the encoding.
+	let deposit = DepositMemo::decode(&mut &memo[..]).map_err(|_| "not a deposit")?;
+	if deposit.version != MEMO_VERSION {
+		return Err("unknown memo version");
+	}
+	tx.credit(&deposit.to, Asset { service: source, id: deposit.asset_id }, deposit.amount)?;
+	if native > 0 {
+		let key = StorageKey::StorageCredit(deposit.to);
+		let credit: u64 = tx.get(&key).unwrap_or(0);
+		tx.set(&key, &credit.saturating_add(native));
 	}
 	Ok(tx.fx)
 }

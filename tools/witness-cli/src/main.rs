@@ -5,15 +5,17 @@
 //! after the payload.
 //!
 //! Accounts are derived from a seed phrase (`--maker alice`): the Ed25519 secret key is
-//! `blake2b256(seed)`. Fine for a points-only prototype, not for anything of value.
+//! `blake2b256(seed)`. Fine for tests, not for anything of value. `token-*` commands build ops
+//! for `mock-token-service`, the test token service.
 
 use codec::{Decode, Encode};
 use ed25519_dalek::{Signer, SigningKey};
 use std::{collections::HashMap, process::ExitCode};
+use mock_token::{BalanceKey, Holder, TokenOp};
 use witness_types::{
-	Account, AccountId, Attestation, AttestationClaim, AttestationId, BlobAt, BlobHash, BlobRef, Blobs,
-	Bounty, BountyTerms, CommitRecord, Hash, MIN_CLAIM_WINDOW, Op, StorageKey, TrustedRef, Verified,
-	blake2b256, merkle,
+	Account, AccountId, AdminAction, Amount, Asset, Attestation, AttestationClaim, AttestationId, BlobAt,
+	BlobHash, BlobRef, Blobs, Bounty, BountyTerms, CommitRecord, Config, Hash, MIN_CLAIM_WINDOW, Op,
+	Proposal, StorageKey, TEST_ASSET, TrustedRef, Verified, blake2b256, merkle,
 };
 
 const USAGE: &str = "\
@@ -22,8 +24,8 @@ usage: witness <command> [--flag value ...]
   account   --seed S
   hash      --check FILE          the hash of FILE, a check or a blob
   mint      --to S --amount N
-  create    --service ID --maker S --nonce N --check FILE PARAMS [--blobs BLOBS] --reward N
-            --check-gas G --expiry SLOT [--claim-window SLOTS]
+  create    --service ID --maker S --nonce N --check FILE PARAMS [--blobs BLOBS] [--asset A]
+            --reward N --check-gas G --expiry SLOT [--claim-window SLOTS]
   commit    --service ID --bounty ID --hunter S [--committer S] --nonce N --salt HEX WITNESS
   reveal    --bounty ID --check FILE PARAMS [--blobs BLOBS] [--trust REFS] --check-gas G
             --hunter S --salt HEX WITNESS --extrinsics DIR
@@ -35,10 +37,26 @@ usage: witness <command> [--flag value ...]
             [--trust REFS] [WITNESS] --check-gas G --claim-out CLAIM --extrinsics DIR
             attests the files PATHS, in order, trusting REFS, and writes the claim and the
             subjects to CLAIM, for citing the attestation later
-  key       (--account S | --bounty ID [--commitment HEX] | --attestation CLAIM | --next)
+  withdraw  --service ID --account S --nonce N --asset A --amount N --to S
+            pays out to account S (as a seed) of the asset's token service
+  propose   --service ID [--admin S] --nonce N ACTION
+            the admin (default seed: admin) proposes ACTION, applied at once if it's the first
+            configuration, else by `apply` after the delay
+  apply     --id N
+  cancel    --service ID [--admin S] --nonce N --id N
+  key       (--account S | --balance S --asset A | --bounty ID [--commitment HEX]
+            | --attestation CLAIM | --config | --proposal N | --next)
             storage key, for `jamt inspect storage <service> <key>`
-  decode    (--output HEX | --account HEX | --bounty HEX | --commitment HEX | --attestation HEX)
+  decode    (--output HEX | --account HEX | --balance HEX | --bounty HEX | --commitment HEX
+            | --attestation HEX | --config HEX | --proposal HEX)
             decode a refine output or a stored value
+
+The test token service (mock-token-service):
+  token-faucet  --to S --asset ID --amount N
+  token-send    --from S --asset ID --amount N --to-service ID --to S
+                moves tokens to a service, for its account S (witness's, say)
+  token-key     (--account S | --service-holder ID) --asset ID
+  token-decode  --balance HEX
 
 PARAMS:  --params HEX | --params-str STRING | --params-u128 N | --params-blake2b STRING (its hash)
 WITNESS: --witness HEX | --witness-str STRING | --witness-u64 N | --witness-file FILE
@@ -47,17 +65,23 @@ BLOBS:   comma-separated, in order: CLAIM:ENTRY for subject ENTRY (from 0) of an
          a path of a plain blob
 REFS:    comma-separated CLAIM:ENTRY, for entry ENTRY (from 0) of the attestation whose claim
          `attest --claim-out` wrote to CLAIM
+A:       SERVICE:ID, an asset of a token service; `test` for the faucet's (the default)
+ACTION:  a configuration: [--token-services IDS] --fee-asset A --commit-deposit N --attest-deposit N
+         | --set-admin S | --upgrade FILE (the new service blob)
 
 Seeds S are any string; hex may have a 0x prefix. A salt of other than 32 bytes is hashed to 32.
 The committer pays the commit deposit and signs; it defaults to the hunter.";
 
 fn main() -> ExitCode {
-	let mut args = std::env::args().skip(1);
+	let mut args = std::env::args().skip(1).peekable();
 	let Some(command) = args.next() else { return usage() };
 	let mut flags = HashMap::new();
 	while let Some(flag) = args.next() {
-		let (Some(name), Some(value)) = (flag.strip_prefix("--"), args.next()) else {
-			return usage();
+		let Some(name) = flag.strip_prefix("--") else { return usage() };
+		// A flag followed by another flag, or by nothing, is a switch (`--config`).
+		let value = match args.peek() {
+			Some(next) if !next.starts_with("--") => args.next().unwrap(),
+			_ => String::new(),
 		};
 		flags.insert(name.to_string(), value);
 	}
@@ -137,6 +161,38 @@ impl Flags {
 			return Ok(vec![]);
 		}
 		Ok(self.str(name)?.split(',').collect())
+	}
+	/// `--NAME` as an asset, `test` meaning the faucet's.
+	fn asset(&self, name: &str) -> Result<Asset, String> {
+		parse_asset(self.str(name)?)
+	}
+	/// `--NAME` as an asset, or the faucet's if absent.
+	fn asset_or_test(&self, name: &str) -> Result<Asset, String> {
+		if self.has(name) { self.asset(name) } else { Ok(TEST_ASSET) }
+	}
+	/// `--admin`, defaulting to the test builds' admin seed.
+	fn admin(&self) -> Result<SigningKey, String> {
+		if self.has("admin") { self.key("admin") } else { Ok(SigningKey::from_bytes(&blake2b256(b"admin"))) }
+	}
+	/// The admin action the flags describe.
+	fn action(&self) -> Result<AdminAction, String> {
+		if self.has("set-admin") {
+			Ok(AdminAction::SetAdmin(self.account("set-admin")?))
+		} else if self.has("upgrade") {
+			let code = read(self.str("upgrade")?)?;
+			Ok(AdminAction::Upgrade { code_hash: blake2b256(&code), code_len: code.len() as u32 })
+		} else if self.has("fee-asset") {
+			let token_services =
+				self.list("token-services")?.into_iter().map(|s| s.parse().map_err(|_| format!("{s} is not a service id"))).collect::<Result<_, _>>()?;
+			Ok(AdminAction::Configure(Config {
+				token_services,
+				fee_asset: Some(self.asset("fee-asset")?),
+				commit_deposit: self.num("commit-deposit")?,
+				attest_deposit: self.num("attest-deposit")?,
+			}))
+		} else {
+			Err("an action: --fee-asset A ... (a configuration), --set-admin S or --upgrade FILE".into())
+		}
 	}
 	/// The `--trust` references, as claims (with their subjects) and entries.
 	fn trust(&self) -> Result<Vec<(Cited, u32)>, String> {
@@ -223,6 +279,15 @@ fn read(path: &str) -> Result<Vec<u8>, String> {
 	std::fs::read(path).map_err(|e| format!("cannot read {path}: {e}"))
 }
 
+fn parse_asset(s: &str) -> Result<Asset, String> {
+	if s == "test" {
+		return Ok(TEST_ASSET);
+	}
+	let bad = || format!("{s} is not an asset: SERVICE:ID, or test");
+	let (service, id) = s.split_once(':').ok_or_else(bad)?;
+	Ok(Asset { service: service.parse().map_err(|_| bad())?, id: id.parse().map_err(|_| bad())? })
+}
+
 fn blob_hash(data: &[u8]) -> BlobHash {
 	BlobHash { hash: blake2b256(data), len: data.len() as u32 }
 }
@@ -254,6 +319,12 @@ fn run(command: &str, f: &Flags) -> Result<(), String> {
 				decode::<CommitRecord>(&f.hex("commitment")?)
 			} else if f.has("attestation") {
 				decode::<Attestation>(&f.hex("attestation")?)
+			} else if f.has("balance") {
+				decode::<Amount>(&f.hex("balance")?)
+			} else if f.has("config") {
+				decode::<Config>(&f.hex("config")?)
+			} else if f.has("proposal") {
+				decode::<Proposal>(&f.hex("proposal")?)
 			} else {
 				decode::<Verified>(&f.hex("output")?)
 			}?;
@@ -261,8 +332,14 @@ fn run(command: &str, f: &Flags) -> Result<(), String> {
 			return Ok(());
 		},
 		"key" => {
-			let key = if f.has("account") {
+			let key = if f.has("balance") {
+				StorageKey::Balance(f.account("balance")?, f.asset("asset")?)
+			} else if f.has("account") {
 				StorageKey::Account(f.account("account")?)
+			} else if f.has("config") {
+				StorageKey::Config
+			} else if f.has("proposal") {
+				StorageKey::Proposal(f.num("proposal")?)
 			} else if f.has("commitment") {
 				StorageKey::Commitment(f.num("bounty")?, f.hash("commitment")?)
 			} else if f.has("bounty") {
@@ -275,7 +352,57 @@ fn run(command: &str, f: &Flags) -> Result<(), String> {
 			println!("0x{}", to_hex(&key.encode()));
 			return Ok(());
 		},
+		"token-faucet" | "token-send" => {
+			let op = if command == "token-faucet" {
+				TokenOp::Faucet { to: f.account("to")?, asset: f.num("asset")?, amount: f.num("amount")? }
+			} else {
+				TokenOp::Send {
+					from: f.account("from")?,
+					asset: f.num("asset")?,
+					amount: f.num("amount")?,
+					service: f.num("to-service")?,
+					to: f.account("to")?,
+				}
+			};
+			println!("0x{}", to_hex(&op.encode()));
+			return Ok(());
+		},
+		"token-key" => {
+			let holder =
+				if f.has("account") { Holder::Account(f.account("account")?) } else { Holder::Service(f.num("service-holder")?) };
+			println!("0x{}", to_hex(&BalanceKey(holder, f.num("asset")?).encode()));
+			return Ok(());
+		},
+		"token-decode" => {
+			println!("{}", decode::<Amount>(&f.hex("balance")?)?);
+			return Ok(());
+		},
 		"mint" => Op::Mint { to: f.account("to")?, amount: f.num("amount")? },
+		"withdraw" => {
+			let service: u32 = f.num("service")?;
+			let account = f.key("account")?;
+			let (nonce, asset, amount, to) = (f.num("nonce")?, f.asset("asset")?, f.num("amount")?, f.account("to")?);
+			let account_id = account.verifying_key().to_bytes();
+			let message = witness_types::withdraw_message(service, &account_id, nonce, &asset, amount, &to);
+			Op::Withdraw { account: account_id, nonce, asset, amount, to, signature: account.sign(&message).to_bytes() }
+		},
+		"propose" => {
+			let service: u32 = f.num("service")?;
+			let admin = f.admin()?;
+			let (nonce, action) = (f.num("nonce")?, f.action()?);
+			let admin_id = admin.verifying_key().to_bytes();
+			let message = witness_types::propose_message(service, &admin_id, nonce, &action);
+			Op::Propose { admin: admin_id, nonce, action, signature: admin.sign(&message).to_bytes() }
+		},
+		"apply" => Op::Apply { id: f.num("id")? },
+		"cancel" => {
+			let service: u32 = f.num("service")?;
+			let admin = f.admin()?;
+			let (nonce, id) = (f.num("nonce")?, f.num("id")?);
+			let admin_id = admin.verifying_key().to_bytes();
+			let message = witness_types::cancel_message(service, &admin_id, nonce, id);
+			Op::Cancel { admin: admin_id, nonce, id, signature: admin.sign(&message).to_bytes() }
+		},
 		"create" => {
 			let service: u32 = f.num("service")?;
 			let maker = f.key("maker")?;
@@ -288,6 +415,7 @@ fn run(command: &str, f: &Flags) -> Result<(), String> {
 				check_len,
 				params: f.params()?,
 				blobs: f.blobs()?.into_iter().map(|(blob, _)| blob).collect(),
+				asset: f.asset_or_test("asset")?,
 				reward: f.num("reward")?,
 				check_gas: f.num("check-gas")?,
 				expiry: f.num("expiry")?,

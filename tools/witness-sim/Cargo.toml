@@ -8,6 +8,7 @@ authors.workspace = true
 
 [dependencies]
 witness-types = { workspace = true, features = ["std"] }
-witness-rules.workspace = true
+witness-rules = { workspace = true, features = ["faucet"] }
+mock-token = { workspace = true, features = ["std"] }
 codec = { workspace = true, features = ["std"] }
 polkavm = "0.37.0"

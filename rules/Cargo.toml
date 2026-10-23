@@ -13,3 +13,7 @@ ed25519-dalek.workspace = true
 
 [dev-dependencies]
 witness-types = { workspace = true, features = ["std"] }
+
+[features]
+# The test faucet: `Mint`, crediting witness_types::TEST_ASSET.
+faucet = []

@@ -2,11 +2,15 @@
 //! minutes. It takes the subset of `jamt`'s commands the scripts use, so a script points `JAMT` at
 //! it and runs unchanged:
 //!
-//!     witness-sim create-service SERVICE_BLOB BALANCE   start afresh, with the witness service
+//!     witness-sim create-service SERVICE_BLOB BALANCE   start afresh, with the witness service;
+//!                                                        or, for mock-token-service's blob, add
+//!                                                        the test token service beside it
 //!     witness-sim list                                   the services, as `jamt list` prints them
 //!     witness-sim item SERVICE PAYLOAD [EXTRINSIC...]    refine and accumulate one op (hex, or
 //!                                                        @FILE holding the hex), with its
 //!                                                        extrinsics (files)
+//!     witness-sim provide SERVICE FILE                   provide a preimage (logged; witness
+//!                                                        stores none but upgrade code)
 //!     witness-sim inspect slot                           the current slot (and pass one)
 //!     witness-sim inspect storage --raw SERVICE KEY      a storage value, hex
 //!     witness-sim inspect final service SERVICE          whether the service exists
@@ -47,14 +51,35 @@ const GROW_HEAP: u32 = 1;
 /// What `grow_heap` costs a service in PolkaJam v0.1.29 (`jam_types::gas_costs`).
 const GROW_HEAP_BASE: u64 = 275;
 const GROW_HEAP_LINEAR: u64 = 121;
-/// The service id `create-service` gives.
+/// The service ids `create-service` gives witness and the test token service.
 const SERVICE: u32 = 1;
+const TOKEN_SERVICE: u32 = 2;
 
 #[derive(Default, Encode, Decode)]
 struct State {
 	slot: u32,
 	service: bool,
 	storage: BTreeMap<Vec<u8>, Vec<u8>>,
+	token_service: bool,
+	token_storage: BTreeMap<Vec<u8>, Vec<u8>>,
+}
+
+fn write(storage: &mut BTreeMap<Vec<u8>, Vec<u8>>, writes: BTreeMap<Vec<u8>, Option<Vec<u8>>>) {
+	for (key, value) in writes {
+		match value {
+			Some(v) => storage.insert(key, v),
+			None => storage.remove(&key),
+		};
+	}
+}
+
+/// The test token service's storage, as mock_token reads it.
+struct TokenState<'a>(&'a BTreeMap<Vec<u8>, Vec<u8>>);
+
+impl mock_token::State for TokenState<'_> {
+	fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
+		self.0.get(key).cloned()
+	}
 }
 
 struct Sim {
@@ -108,15 +133,52 @@ impl Sim {
 			return;
 		}
 		match witness_rules::accumulate(&*self, verified, self.state.slot) {
-			Ok(effects) => {
-				for (key, value) in effects.writes {
-					match value {
-						Some(v) => self.state.storage.insert(key, v),
-						None => self.state.storage.remove(&key),
-					};
-				}
-			},
+			Ok(effects) => self.apply(effects),
 			Err(reason) => self.log(&format!("not applied: {reason}")),
+		}
+	}
+
+	fn apply(&mut self, effects: witness_rules::Effects) {
+		write(&mut self.state.storage, effects.writes);
+		if let Some((hash, len)) = effects.solicit {
+			self.log(&format!("solicited {} ({len} bytes)", hex(&hash)));
+		}
+		if let Some(hash) = effects.upgrade {
+			self.log(&format!("upgraded to code {}", hex(&hash)));
+		}
+		for (destination, memo) in effects.transfers {
+			self.log(&format!("transfer to service {destination}"));
+			if destination == TOKEN_SERVICE && self.state.token_service {
+				match mock_token::on_transfer(&TokenState(&self.state.token_storage), SERVICE, &memo) {
+					Ok(fx) => write(&mut self.state.token_storage, fx.writes),
+					Err(reason) => self.log(&format!("mock-token: not applied: {reason}")),
+				}
+			}
+		}
+	}
+
+	/// An item for the test token service.
+	fn token_item(&mut self, payload: &[u8]) {
+		self.state.slot += 1;
+		let applied = mock_token::TokenOp::decode(&mut &payload[..])
+			.map_err(|_| "not an op")
+			.and_then(|op| mock_token::apply(&TokenState(&self.state.token_storage), op));
+		let fx = match applied {
+			Ok(fx) => fx,
+			Err(reason) => return self.log(&format!("mock-token: not applied: {reason}")),
+		};
+		write(&mut self.state.token_storage, fx.writes);
+		for (destination, memo) in fx.transfers {
+			if destination != SERVICE {
+				continue;
+			}
+			match witness_rules::on_transfer(&*self, TOKEN_SERVICE, 0, &memo) {
+				Ok(effects) => {
+					self.log(&format!("deposit from service {TOKEN_SERVICE}"));
+					self.apply(effects);
+				},
+				Err(reason) => self.log(&format!("transfer from service {TOKEN_SERVICE}: {reason}")),
+			}
 		}
 	}
 }
@@ -235,18 +297,26 @@ fn main() -> ExitCode {
 		ExitCode::FAILURE
 	};
 	match args[..] {
-		["create-service", _blob, _balance] => {
-			let _ = std::fs::remove_dir_all(&sim.dir);
-			sim.state = State { service: true, ..State::default() };
+		["create-service", blob, _balance, ..] => {
+			let is_token = std::fs::read(blob).is_ok_and(|b| b.windows(10).any(|w| w == b"mock-token"));
+			if is_token {
+				sim.state.token_service = true;
+			} else {
+				let _ = std::fs::remove_dir_all(&sim.dir);
+				sim.state = State { service: true, ..State::default() };
+			}
 		},
 		["list"] => {
 			println!("00000000\tjam-bootstrap-service\tsim");
 			if sim.state.service {
 				println!("{SERVICE:08x}\twitness-service\tsim");
 			}
+			if sim.state.token_service {
+				println!("{TOKEN_SERVICE:08x}\tmock-token-service\tsim");
+			}
 			return ExitCode::SUCCESS;
 		},
-		["item", _service, payload, ref files @ ..] => {
+		["item", service, payload, ref files @ ..] => {
 			let payload = match payload.strip_prefix('@') {
 				Some(file) => std::fs::read_to_string(file).unwrap_or_default(),
 				None => payload.to_string(),
@@ -255,15 +325,24 @@ fn main() -> ExitCode {
 			let Ok(extrinsics) = files.iter().map(std::fs::read).collect::<Result<Vec<_>, _>>() else {
 				return fail("cannot read an extrinsic");
 			};
-			sim.item(&payload, extrinsics);
+			if service.parse() == Ok(TOKEN_SERVICE) {
+				sim.token_item(&payload);
+			} else {
+				sim.item(&payload, extrinsics);
+			}
 			println!("Item submitted at slot {}", sim.state.slot);
+		},
+		["provide", _service, file] => {
+			let Ok(data) = std::fs::read(file) else { return fail("cannot read the preimage") };
+			sim.log(&format!("provided {}", hex(&witness_types::blake2b256(&data))));
 		},
 		["inspect", "slot"] => {
 			sim.state.slot += 1;
 			println!("{}", sim.state.slot);
 		},
-		["inspect", "storage", "--raw", _service, key] => {
-			let value = from_hex(key).and_then(|k| sim.state.storage.get(&k).cloned());
+		["inspect", "storage", "--raw", service, key] => {
+			let storage = if service.parse() == Ok(TOKEN_SERVICE) { &sim.state.token_storage } else { &sim.state.storage };
+			let value = from_hex(key).and_then(|k| storage.get(&k).cloned());
 			let Some(value) = value else { return fail("no such key") };
 			println!("0x{}", hex(&value));
 			return ExitCode::SUCCESS;
