@@ -17,63 +17,89 @@ Two kinds of money stay apart:
   ledger per account and per asset, and moved in and out by memo messages with the token service
   that issues the asset.
 - **Witness's storage: its own native balance.** It only backs the records witness stores, which
-  JAM charges per item and per byte. Users never see it. A sponsor funds it for now; a per-record
-  fee, converted on chain, can come once JAM has an exchange (or a trusted operator to convert).
+  JAM charges per item and per byte. Users never see it. A sponsor funds it for now (see Storage).
 
 ## Assets
 
 An asset is `(service, id)`: a token service and an asset in it. A multi-asset service names
-many assets under one service id; a single-asset service uses id 0. The services witness accepts
-assets from are fixed at deployment (see Configuration): witness trusts each entirely for what it
-says it deposited, so the list is short and doesn't change under anyone's feet.
+many assets under one service id; a single-asset service uses id 0. Witness accepts assets only
+from the token services its configuration lists, and trusts each entirely for what it says it
+deposited, so the list is short and changes only under the timelock (see Administration).
 
 ## Messages
 
-Memos are SCALE-encoded, starting with a version byte, and fit in 128 bytes.
+Memos are SCALE-encoded, start with a version byte, and fit in 128 bytes.
 
 **Deposit** (token service to witness): `{ asset_id: u32, amount: u128, to: AccountId }`. Witness
-credits `amount` of `(sender, asset_id)` to `to`, if the sender is an accepted service. A deposit
-from any other service, or that doesn't decode, is ignored (its native balance, if any, stays
-with witness's storage).
+credits `amount` of `(sender, asset_id)` to `to`, if the sender is an accepted token service. The
+transfer's native balance, if any, is credited to `to` as storage credit (see Storage). A deposit
+from any other service, or that doesn't decode, credits nothing; its native balance stays with
+witness's storage.
 
 **Withdrawal** (witness to token service): `{ asset_id: u32, amount: u128, to: [u8; 32] }`, where
 `to` is the payee's account in the token service. Witness sends it from accumulate, with no native
-balance, when it applies a signed `Withdraw { account, nonce, asset, amount, to, signature }`
+balance, when it applies a signed `Withdraw { account, nonce, asset, amount, to, signature }`,
 after debiting the account. The token service pays `to` out of what witness holds with it.
 
-The token service holds witness's total in each asset as one of its own accounts: deposits move
-the user's funds to witness's account there, withdrawals move them back out. So the token
-service's ledger always shows what witness owes its users, and witness's ledger who it owes.
+The token service holds witness's total in each asset as one of its own accounts: deposits move a
+user's funds to witness's account there, withdrawals move them back out. So the token service's
+ledger shows what witness owes its users, and witness's ledger whom it owes.
 
 ## Ledger
 
-- `Account(id)` keeps the account's nonce. `Balance(id, asset)` keeps a balance, deleted at zero.
-- A bounty names its asset: its reward is escrowed in it, and commitments on it lock
-  `COMMIT_DEPOSIT` of it, refunded on a valid reveal as now. Commit deposits and rewards scale
-  differently across assets (a cent is not a satoshi), so the deposit becomes a term of the
-  bounty, at least a per-asset minimum the deployment sets.
-- `Attest` records no money, so attestations stay shared by every asset's bounties. Its deposit
-  (spam protection for the sponsored storage) is paid in one fee asset the deployment names.
+- `Account(id)` keeps the account's nonce; `Balance(id, asset)` a balance, deleted at zero.
+- A bounty names its asset: its reward is escrowed in it and paid out in it.
+- Spam deposits are fixed amounts of one **fee asset** (a stablecoin, say), set in the
+  configuration: `commit_deposit`, locked per commitment and refunded on a valid reveal as now,
+  and `attest_deposit`, per attestation, kept. They exist because each commitment and
+  attestation is a record in storage the sponsor pays for; attestations are permanent, and anyone
+  can attest anything under a check of their own. A hunter on a bounty paid in another asset
+  holds a little of the fee asset as well.
+- Attestations record no money, so they stay shared by every asset's bounties.
 - `Mint` stays for testnets only, behind a build feature, crediting a test asset.
 
-## Configuration
+## Storage
 
-The accepted token services, the fee asset and the per-asset minimum deposits are constants in
-the service build, set by environment variables when it's built. Each deployment's code then
-commits to its configuration: anyone can check it from the code hash, nobody can change it after,
-and there's no admin key or first-come configuration op to front-run. Witness's source stays
-generic: a deployment is a build of it with its own list.
+JAM charges witness's native balance for each record (`deposit_per_item` plus `deposit_per_byte`,
+with overheads). A sponsor keeps that balance funded, by plain transfers to witness, until there
+is an on-chain exchange (or a trusted operator) to convert fees into it.
+
+Records can also be paid for by whoever creates them: native balance a deposit transfer carries
+becomes the recipient's **storage credit**, and when an account's ops store records, accumulate
+debits its credit by what JAM charges for them, refunding it when they're removed. An account with
+no credit falls back to the sponsor. So once wallets can buy and hide a few cents of the storage
+token (JAMKB, as proposed), people pay for their own state and the sponsor becomes optional,
+without a redesign. Credit isn't withdrawable at first: it only ever backs storage.
+
+## Administration
+
+An admin can change the configuration and upgrade the service's code, and hand the role on; both
+are timelocked so nobody's funds change rules under them without notice.
+
+- The first admin's key is compiled into the build, so nobody can claim the role by being first.
+- `Propose { action, nonce, signature }`, signed by the admin, records an action to take effect
+  after `ADMIN_DELAY` (about 7 days of slots); `Apply { id }`, by anyone, applies it after that;
+  `Cancel`, by the admin, drops it. Actions: `Configure(Config)`, `SetAdmin(Admin)`, and
+  `Upgrade { code_hash, code_len }`.
+- `Upgrade` solicits the new code as a preimage when proposed; once it's provided and the delay
+  has passed, `Apply` calls JAM's `upgrade`. The service keeps its id, state and balances.
+- `Admin` is a key or a service (a governance service, eventually, whose transfers carry its
+  proposals). While a person holds the role, users trust them with the rules, and so with their
+  balances; the delay lets anyone who disagrees withdraw first.
+
+`Config` holds the accepted token services, the fee asset and the two deposits.
 
 ## Testing
 
-A minimal mock token service (`tools/mock-token`, a JAM service): accounts per asset, a faucet for
-tests, a signed transfer to another service with a deposit memo, and paying out a withdrawal memo
-from an accepted caller. The e2e script deposits into witness, posts and wins a bounty paid in the
-mock stablecoin, and withdraws the reward; witness-sim emulates the token service.
+A minimal mock token service (`tools/mock-token`, a JAM service): balances per account and asset,
+a faucet for tests, a signed transfer to another service with a deposit memo, and paying out a
+withdrawal memo from a service holding a balance with it. witness-sim emulates it. The e2e script
+deposits into witness, posts and wins a bounty paid in the mock stablecoin, withdraws the reward,
+and changes the configuration under the timelock.
 
 ## Open
 
-- Whether a token service on JAM will speak this memo format, or need a thin adapter service in
-  front of it (likely for Asset Hub, whose form on JAM isn't settled).
+- Whether token services on JAM will speak this memo format, or need a thin adapter in front of
+  them (likely for Asset Hub, whose form on JAM isn't settled).
 - Withdrawals are fire-and-forget: witness debits, then sends. A token service that fails to pay
   out is a bug in the token service, which witness already trusts entirely.
