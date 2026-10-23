@@ -3,7 +3,8 @@
 
     jam-submit.py SERVICE PAYLOAD [EXTRINSIC...]
 
-PAYLOAD is hex (an optional 0x prefix); each EXTRINSIC is a file. Like `jamt item`, which can't
+PAYLOAD is hex (an optional 0x prefix), or @FILE for a file holding the hex (an op too big for one
+command-line argument, which Linux caps at 128 KiB); each EXTRINSIC is a file. Like `jamt item`, which can't
 attach extrinsics: the package is anchored at the finalized block, its lookup anchor is that
 block's parent, and the item gets the chain's full refine and accumulate gas. It's submitted with
 `submitWorkPackage` to the node at $JAM_RPC (default ws://localhost:19800) on core $JAM_CORE
@@ -91,6 +92,8 @@ def work_package(authorizer, context, items):
 
 
 def main(service, payload, files):
+    if payload.startswith("@"):
+        payload = open(payload[1:]).read().strip()
     payload = bytes.fromhex(payload.removeprefix("0x"))
     extrinsics = [open(f, "rb").read() for f in files]
     rpc = Rpc(url())
