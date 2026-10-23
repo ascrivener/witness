@@ -4,8 +4,9 @@
 //!
 //!     witness-sim create-service SERVICE_BLOB BALANCE   start afresh, with the witness service
 //!     witness-sim list                                   the services, as `jamt list` prints them
-//!     witness-sim item SERVICE PAYLOAD [EXTRINSIC...]    refine and accumulate one op, with
-//!                                                        its extrinsics (files)
+//!     witness-sim item SERVICE PAYLOAD [EXTRINSIC...]    refine and accumulate one op (hex, or
+//!                                                        @FILE holding the hex), with its
+//!                                                        extrinsics (files)
 //!     witness-sim inspect slot                           the current slot (and pass one)
 //!     witness-sim inspect storage --raw SERVICE KEY      a storage value, hex
 //!     witness-sim inspect final service SERVICE          whether the service exists
@@ -242,7 +243,11 @@ fn main() -> ExitCode {
 			return ExitCode::SUCCESS;
 		},
 		["item", _service, payload, ref files @ ..] => {
-			let Some(payload) = from_hex(payload) else { return fail("payload is not hex") };
+			let payload = match payload.strip_prefix('@') {
+				Some(file) => std::fs::read_to_string(file).unwrap_or_default(),
+				None => payload.to_string(),
+			};
+			let Some(payload) = from_hex(payload.trim()) else { return fail("payload is not hex") };
 			let Ok(extrinsics) = files.iter().map(std::fs::read).collect::<Result<Vec<_>, _>>() else {
 				return fail("cannot read an extrinsic");
 			};

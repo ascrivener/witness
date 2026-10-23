@@ -10,8 +10,8 @@
 # rules, with checks in PolkaVM, natively, in seconds. No PolkaJam needed. The testnet stays the
 # judge of what fits a refine and of the node's behavior.
 #
-# Reveals and attestations carry their blobs as extrinsics, which `jamt item` can't send, so
-# until witness has its own submitter (docs/design/extrinsics.md, step 2) only WITNESS_SIM=1 runs.
+# Reveals and attestations carry their blobs as extrinsics, which `jamt item` can't send, so on a
+# testnet every item goes through scripts/jam-submit.py instead.
 #
 # --quick (about 6 minutes, a third of it starting the testnet) then mints, creates two bounties,
 # commits, and reveals a wrong and a right witness on each. Then it attests a batch of two word
@@ -110,7 +110,7 @@ expect_still() {
 
 # One item per slot: the testnet silently drops some packages submitted together in one slot.
 # Any more arguments are extrinsic files.
-item() { "$JAMT" item "$SVC" "$@" >/dev/null; wait_slot $(( $(slot) + 1 )); }
+item() { submit "$SVC" "$@" >/dev/null; wait_slot $(( $(slot) + 1 )); }
 # An item with the extrinsics the CLI just wrote.
 itemx() { item "$1" "$X"/*; }
 
@@ -119,11 +119,12 @@ commitment_of() { $W commit "$@" 2>&1 >/dev/null | awk '{print $2}'; }
 
 window_end() { show bounty --bounty "$1" | sed -nE 's/.*window_end: ([0-9]+).*/\1/p'; }
 
-[ -n "${WITNESS_SIM:-}" ] || fail "jamt item can't send extrinsics yet; run with WITNESS_SIM=1 (see the top of this script)"
+submit() { python3 scripts/jam-submit.py "$@"; }
 if [ -n "${WITNESS_SIM:-}" ]; then
 	step "using witness-sim (state: $TMP/sim)"
 	cargo build -q -p witness-sim
 	JAMT=$PWD/target/debug/witness-sim POLL=0 JAM_RPC=sim
+	submit() { "$JAMT" item "$@"; }
 	export WITNESS_SIM_DIR=$TMP/sim
 	LOG=$WITNESS_SIM_DIR/log
 elif [ -z "${JAM_RPC:-}" ]; then

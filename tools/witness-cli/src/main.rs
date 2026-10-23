@@ -1,7 +1,8 @@
-//! Builds witness work-item payloads and prints them as hex, for `jamt item <service> 0x...`.
+//! Builds witness work-item payloads and prints them as hex, for
+//! `scripts/jam-submit.py <service> 0x...` (or `jamt item`, for ops without extrinsics).
 //! Reveals and attestations also write their work item's extrinsics, the blobs they name, as
-//! files (`--extrinsics DIR`: `DIR/0`, `DIR/1`, ...), which `jamt item` can't send yet; witness-sim
-//! takes them after the payload.
+//! files (`--extrinsics DIR`: `DIR/0`, `DIR/1`, ...), which jam-submit.py and witness-sim take
+//! after the payload.
 //!
 //! Accounts are derived from a seed phrase (`--maker alice`): the Ed25519 secret key is
 //! `blake2b256(seed)`. Fine for a points-only prototype, not for anything of value.
