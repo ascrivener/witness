@@ -1,6 +1,6 @@
 # Blobs as extrinsics, state as records
 
-Status: step 1 implemented (types, rules, service, witness-sim, CLI).
+Status: steps 1 and 2 implemented (types, rules, service, witness-sim, CLI; the submitter).
 
 ## Why
 
@@ -85,8 +85,9 @@ from points to native tokens.
 ## Tooling
 
 `jamt item` can't attach extrinsics. Work packages with extrinsics go through the node's
-`submitWorkPackage` RPC, so witness gets its own submitter, which builds the package (refine
-context, authorizer) as `jamt` does. witness-sim supplies extrinsics directly.
+`submitWorkPackage` RPC, so witness has its own submitter, `scripts/jam-submit.py`, which builds
+the package (refine context, authorizer) as `jamt` does: for the same item it encodes the same
+bytes. witness-sim supplies extrinsics directly.
 
 ## Plan
 

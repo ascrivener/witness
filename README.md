@@ -175,10 +175,10 @@ of what fits and of the node's behavior. Use it while iterating:
 WITNESS_SIM=1 scripts/e2e.sh          # the full run, in about 7 seconds
 ```
 
-CI (`.github/workflows/ci.yml`) runs the unit tests and builds the blobs. Reveals and
-attestations carry extrinsics, which `jamt item` can't send, so until witness has its own
-submitter (step 2 of [docs/design/extrinsics.md](docs/design/extrinsics.md)) the script runs only
-with `WITNESS_SIM=1`. Against a testnet it needs a PolkaJam release, so run it locally. It starts its own testnet, deploys, and checks the
+CI (`.github/workflows/ci.yml`) runs the unit tests and builds the blobs. Against a testnet the
+end-to-end script needs a PolkaJam release, so run it locally. It submits every item with
+`scripts/jam-submit.py`, since `jamt item` can't attach the extrinsics reveals and attestations
+carry. It starts its own testnet, deploys, and checks the
 chain state at each step. It has two modes:
 
 - **`--quick`** (about 4 minutes): two bounties, from create to a reveal, one of them on a check
@@ -256,29 +256,30 @@ types (`Vec`, `BTreeMap`) work. Checks get no other host calls, so no logging or
 ## Using it by hand
 
 `scripts/e2e.sh` is the worked example. In short, with `W=./target/debug/witness`, `SVC` the
-id `jamt create-service out/witness-service.jam 10000000000` produced, and `JAMT` a submitter
-that takes extrinsic files after the payload (witness-sim does; `jamt` doesn't yet):
+id `jamt create-service out/witness-service.jam 10000000000` produced, and
+`SUBMIT="python3 scripts/jam-submit.py"`, which takes extrinsic files after the payload
+(`jamt item` can't attach extrinsics; `witness-sim item` takes them the same way):
 
 ```bash
-$JAMT item $SVC $($W mint --to alice --amount 1000)
-$JAMT item $SVC $($W create --service $SVC --maker alice --nonce 0 --check out/blake2b-preimage-check.jam --params-blake2b "open sesame" --reward 500 --check-gas 10000000 --expiry $(( $($JAMT inspect slot) + 100 )))
-$JAMT item $SVC $($W mint --to bob --amount 100)
-$JAMT item $SVC $($W commit --service $SVC --bounty 0 --hunter bob --nonce 0 --salt 0x0b0b --witness-str "open sesame")
+$SUBMIT $SVC $($W mint --to alice --amount 1000)
+$SUBMIT $SVC $($W create --service $SVC --maker alice --nonce 0 --check out/blake2b-preimage-check.jam --params-blake2b "open sesame" --reward 500 --check-gas 10000000 --expiry $(( $(jamt inspect slot) + 100 )))
+$SUBMIT $SVC $($W mint --to bob --amount 100)
+$SUBMIT $SVC $($W commit --service $SVC --bounty 0 --hunter bob --nonce 0 --salt 0x0b0b --witness-str "open sesame")
 # a reveal writes its extrinsics (the check, the blobs) to a directory, to send with it
-$JAMT item $SVC $($W reveal --bounty 0 --check out/blake2b-preimage-check.jam --params-blake2b "open sesame" --check-gas 10000000 --hunter bob --salt 0x0b0b --witness-str "open sesame" --extrinsics x) x/*
+$SUBMIT $SVC $($W reveal --bounty 0 --check out/blake2b-preimage-check.jam --params-blake2b "open sesame" --check-gas 10000000 --hunter bob --salt 0x0b0b --witness-str "open sesame" --extrinsics x) x/*
 # a bounty with extra blobs names them, in order, on create and on every reveal
 printf 'open\nsesame\n' > words.txt
-$JAMT item $SVC $($W create --service $SVC --maker alice --nonce 1 --check out/dictionary-check.jam --params 0x00 --blobs words.txt --reward 100 --check-gas 10000000 --expiry $(( $($JAMT inspect slot) + 100 )))
+$SUBMIT $SVC $($W create --service $SVC --maker alice --nonce 1 --check out/dictionary-check.jam --params 0x00 --blobs words.txt --reward 100 --check-gas 10000000 --expiry $(( $(jamt inspect slot) + 100 )))
 # attest a list of blobs, then cite its subjects in a bounty; the claim file keeps the subjects,
 # which citing them needs
 printf '%-16s' apple banana cherry > volume1.bin
 printf '%-16s' grape lemon > volume2.bin
-$JAMT item $SVC $($W mint --to pat --amount 100)
-$JAMT item $SVC $($W attest --service $SVC --attester pat --nonce 0 --check out/sorted-words-check.jam --subjects volume1.bin,volume2.bin --check-gas 10000000 --claim-out batch.claim --extrinsics x) x/*
+$SUBMIT $SVC $($W mint --to pat --amount 100)
+$SUBMIT $SVC $($W attest --service $SVC --attester pat --nonce 0 --check out/sorted-words-check.jam --subjects volume1.bin,volume2.bin --check-gas 10000000 --claim-out batch.claim --extrinsics x) x/*
 # a later attestation trusts subjects of earlier ones: --trust batch.claim:1 (entry 1, volume 2)
-$JAMT item $SVC $($W create --service $SVC --maker alice --nonce 2 --check out/sorted-words-check.jam --params 0x00 --blobs batch.claim:0,batch.claim:1 --reward 100 --check-gas 10000000 --expiry $(( $($JAMT inspect slot) + 100 )))
+$SUBMIT $SVC $($W create --service $SVC --maker alice --nonce 2 --check out/sorted-words-check.jam --params 0x00 --blobs batch.claim:0,batch.claim:1 --reward 100 --check-gas 10000000 --expiry $(( $(jamt inspect slot) + 100 )))
 # after the claim window (30 slots by default)
-$JAMT item $SVC $($W finalize --bounty 0)
+$SUBMIT $SVC $($W finalize --bounty 0)
 ```
 
 Wait a block (about 6 s) after deploying before sending items.
@@ -303,8 +304,6 @@ or did not apply it.
 - The limits (`MAX_CHECK_LEN`, `MAX_CHECK_PAGES`, `MAX_CHECK_GAS`, `MAX_BLOBS_LEN`) are constants.
 - Closed bounties stay in storage as a record. Only their commitments are cleaned up.
 - Attestations are never released.
-- Ops with extrinsics can't be sent with `jamt item`; witness needs its own work-package
-  submitter (docs/design/extrinsics.md, step 2).
 - A check only trusts its own attestations. Building on another checker's attested layers would
   need the check to learn which checker made each one.
 - Attestations form linear chains, and a check receives a subject's whole chain, so a refine must
