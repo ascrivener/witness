@@ -1,7 +1,10 @@
 use super::*;
 use alloc::{collections::BTreeMap, vec};
 use ed25519_dalek::{Signer, SigningKey};
-use witness_types::{Blobs, BountyTerms, CHECK_INTERFACE_VERSION, CheckFailure, check_args, commitment, parents_root};
+use witness_types::{
+	Blobs, BountyTerms, CHECK_INTERFACE_VERSION, CheckFailure, DepositMemo, MEMO_VERSION, check_args, commitment,
+	parents_root,
+};
 
 const SERVICE: u32 = 7;
 const BLOB: &[u8] = b"check blob";
@@ -282,8 +285,7 @@ impl Chain {
 
 	/// Token service `service` deposits `amount` of its asset `asset_id` for `seed`.
 	fn deposit(&mut self, service: u32, asset_id: u32, seed: u8, amount: Amount) -> Result<()> {
-		let memo = DepositMemo { version: MEMO_VERSION, asset_id, amount, to: id(seed) };
-		self.transfer(service, &witness_types::memo(&memo))
+		self.transfer(service, &deposit_memo(asset_id, amount, seed))
 	}
 
 	fn balance(&self, seed: u8, asset: Asset) -> Amount {
@@ -1169,6 +1171,11 @@ fn reveals_name_their_plain_blobs() {
 	c.reveal(1, BOB, b"onetwo").unwrap();
 }
 
+/// A deposit memo: `amount` of asset `asset_id` for `seed`, refundable to account [0x55; 32].
+fn deposit_memo(asset_id: u32, amount: Amount, seed: u8) -> [u8; MEMO_LEN] {
+	TokenMemo::Deposit(DepositMemo { asset_id, amount, to: id(seed), refund_to: [0x55; 32] }).memo()
+}
+
 #[test]
 fn deposits_come_only_from_accepted_token_services() {
 	let mut c = setup();
@@ -1179,17 +1186,30 @@ fn deposits_come_only_from_accepted_token_services() {
 	assert_eq!(c.balance(BOB, Asset { service: TOKENS, id: 8 }), 0, "asset by asset");
 	assert_eq!(c.deposit(OTHER_TOKENS, 7, BOB, 1), Err("not from an accepted token service"));
 	assert_eq!(c.transfer(TOKENS, &[0; MEMO_LEN]), Err("unknown memo version"));
-	assert_eq!(c.transfer(TOKENS, &[1, 2]), Err("not a deposit"));
+	assert_eq!(c.transfer(TOKENS, &[MEMO_VERSION, 9]), Err("not a token memo"));
+	let withdrawal = TokenMemo::Withdrawal(WithdrawalMemo { asset_id: 7, amount: 1, to: id(BOB) });
+	assert_eq!(c.transfer(TOKENS, &withdrawal.memo()), Err("not a deposit"));
 	assert_eq!(c.balance(BOB, usd), 300);
 	// Native balance sent along is recorded as the recipient's storage credit.
-	let memo = DepositMemo { version: MEMO_VERSION, asset_id: 7, amount: 1, to: id(CAROL) };
-	c.transfer_with(TOKENS, 500, &witness_types::memo(&memo)).unwrap();
-	c.transfer_with(TOKENS, 25, &witness_types::memo(&memo)).unwrap();
+	let memo = deposit_memo(7, 1, CAROL);
+	c.transfer_with(TOKENS, 500, &memo).unwrap();
+	c.transfer_with(TOKENS, 25, &memo).unwrap();
 	assert_eq!(c.get_typed::<u64>(&StorageKey::StorageCredit(id(CAROL))), Some(525));
 	assert_eq!(c.get_typed::<u64>(&StorageKey::StorageCredit(id(BOB))), None);
 	// Before witness is configured, nothing is accepted.
 	let mut fresh = Chain::default();
 	assert_eq!(fresh.deposit(TOKENS, 7, BOB, 1), Err("not from an accepted token service"));
+}
+
+#[test]
+fn deposits_witness_cant_credit_are_refunded() {
+	// The refund pays the deposit back to the sender's account with the token service.
+	let refunded = TokenMemo::Withdrawal(WithdrawalMemo { asset_id: 7, amount: 40, to: [0x55; 32] }).memo();
+	assert_eq!(refund(&deposit_memo(7, 40, BOB)), Some(refunded));
+	// Only deposits: refunding a refund could bounce between two services forever.
+	assert_eq!(refund(&refunded), None);
+	assert_eq!(refund(&[0; MEMO_LEN]), None);
+	assert_eq!(refund(&[MEMO_VERSION, 9]), None);
 }
 
 #[test]
@@ -1205,8 +1225,8 @@ fn withdrawals_send_a_memo_back() {
 	};
 	c.submit(withdraw(usd, 120, 0)).unwrap();
 	assert_eq!(c.balance(BOB, usd), 180);
-	let memo = WithdrawalMemo { version: MEMO_VERSION, asset_id: 7, amount: 120, to: [0x99; 32] };
-	assert_eq!(c.sent, vec![(TOKENS, witness_types::memo(&memo))]);
+	let memo = TokenMemo::Withdrawal(WithdrawalMemo { asset_id: 7, amount: 120, to: [0x99; 32] });
+	assert_eq!(c.sent, vec![(TOKENS, memo.memo())]);
 	assert_eq!(c.submit(withdraw(usd, 181, 1)), Err("insufficient balance"));
 	assert_eq!(c.submit(withdraw(usd, 1, 0)), Err("bad nonce"), "no replay");
 	assert_eq!(c.submit(withdraw(TEST_ASSET, 1, 1)), Err("the test asset can't be withdrawn"));

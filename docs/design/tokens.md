@@ -28,19 +28,29 @@ deposited, so the list is short and changes only under the timelock (see Adminis
 
 ## Messages
 
-Memos are SCALE-encoded, start with a version byte, and fit in 128 bytes.
+Memos are SCALE-encoded, fit in 128 bytes, and start with a version byte (now 2) and then the
+kind of memo: `TokenMemo::Deposit` or `TokenMemo::Withdrawal`. The kind keeps one from being read
+as the other, which matters for refunds (below).
 
-**Deposit** (token service to witness): `{ asset_id: u32, amount: u128, to: AccountId }`. Witness
-credits `amount` of `(sender, asset_id)` to `to`, if the sender is an accepted token service. The
-transfer's native balance, if any, is credited to `to` as storage credit (see Storage). A deposit
-from any other service, or that doesn't decode, credits nothing; its native balance stays with
-witness's storage.
+**Deposit** (token service to witness): `{ asset_id: u32, amount: u128, to: AccountId,
+refund_to: [u8; 32] }`. Witness credits `amount` of `(sender, asset_id)` to `to`, if the sender is
+an accepted token service. The transfer's native balance, if any, is credited to `to` as storage
+credit (see Storage).
+
+**Refund.** A deposit witness can't credit goes back: from a service it doesn't accept (or before
+it's configured at all), or one it can't store. Witness sends the sender a withdrawal paying
+`amount` of `asset_id` to `refund_to`, the depositor's account with the token service, with the
+deposit's native balance. Only a deposit is ever refunded, never a withdrawal, so two services
+can't bounce a refund between them. A transfer that isn't a deposit credits nothing, and its native
+balance stays with witness's storage.
 
 A deposit must carry at least `DEPOSIT_GAS` (3×10⁵; crediting one used about 37,000 on PolkaJam): a transfer's gas limit is all the receiver
 gets to process it, and a deposit witness can't process is lost after the token service has
 moved the funds. So witness is deployed with that as its `min_memo_gas`, and JAM refuses
-transfers to it that carry less. Likewise witness gives a withdrawal the token service's own
-`min_memo_gas`, which the token service must set to cover paying it out.
+transfers to it that carry less. Likewise witness gives a withdrawal (or refund) the token
+service's own `min_memo_gas`, which the token service must set to cover paying it out. A refund
+comes out of the deposit's gas, after witness has tried to credit it, so a token service whose
+deposits should be refundable asks for at most about 2×10⁵.
 
 **Withdrawal** (witness to token service): `{ asset_id: u32, amount: u128, to: [u8; 32] }`, where
 `to` is the payee's account in the token service. Witness sends it from accumulate, with no native
@@ -102,8 +112,9 @@ are timelocked so nobody's funds change rules under them without notice.
 A minimal mock token service (`tools/mock-token`, a JAM service): balances per account and asset,
 a faucet for tests, a signed transfer to another service with a deposit memo, and paying out a
 withdrawal memo from a service holding a balance with it. witness-sim emulates it. The e2e script
-deposits into witness, posts and wins a bounty paid in the mock stablecoin, withdraws the reward,
-and changes the configuration under the timelock.
+sends a deposit before witness is configured and sees it refunded, deposits into witness, posts
+and wins a bounty paid in the mock stablecoin, withdraws the reward, and changes the configuration
+under the timelock.
 
 ## Open
 

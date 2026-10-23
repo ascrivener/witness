@@ -21,10 +21,10 @@ use codec::{Decode, Encode};
 use witness_types::{
 	ADMIN_DELAY, Account, AccountId, AdminAction, Amount, Asset, Attestation, AttestationClaim,
 	AttestationId, BUILD_ADMIN, BlobAt, BlobHash, BlobRef, Bounty, BountyId, BountyStatus, CheckBlob,
-	CheckMode, Claim, CommitRecord, Config, DepositMemo, Gas, Hash, MAX_BLOBS, MAX_BLOBS_LEN, MAX_CHECK_GAS,
-	MAX_CHECK_LEN, MAX_CLAIM_WINDOW, MAX_MINT, MAX_PARAMS_LEN, MAX_WITNESS_LEN, MEMO_LEN, MEMO_VERSION,
+	CheckMode, Claim, CommitRecord, Config, Gas, Hash, MAX_BLOBS, MAX_BLOBS_LEN, MAX_CHECK_GAS,
+	MAX_CHECK_LEN, MAX_CLAIM_WINDOW, MAX_MINT, MAX_PARAMS_LEN, MAX_WITNESS_LEN, MEMO_LEN,
 	MIN_CLAIM_WINDOW, MIN_COMMIT_AGE, Op, Proposal, REVEAL_GRACE, Rejection, Signature, Slot, StorageKey,
-	TEST_ASSET, TrustedRef, Verified, WithdrawalMemo, blake2b256, blobs_in, merkle,
+	TEST_ASSET, TokenMemo, TrustedRef, Verified, WithdrawalMemo, blake2b256, blobs_in, merkle,
 };
 
 /// Whether this build has the test faucet (`Mint`, crediting [`TEST_ASSET`]).
@@ -751,8 +751,8 @@ pub fn accumulate(state: &impl State, verified: Verified, now: Slot) -> Result<E
 				return Err("the test asset can't be withdrawn");
 			}
 			tx.charge(&account, nonce, asset, amount)?;
-			let memo = WithdrawalMemo { version: MEMO_VERSION, asset_id: asset.id, amount, to };
-			tx.fx.transfers.push((asset.service, witness_types::memo(&memo)));
+			let memo = TokenMemo::Withdrawal(WithdrawalMemo { asset_id: asset.id, amount, to });
+			tx.fx.transfers.push((asset.service, memo.memo()));
 		},
 		Verified::Propose { admin, nonce, action } => {
 			tx.as_admin(&admin, nonce)?;
@@ -787,18 +787,15 @@ pub fn accumulate(state: &impl State, verified: Verified, now: Slot) -> Result<E
 
 /// Apply a transfer of `memo` and `native` balance to the service from service `source`: a
 /// deposit, if `source` is an accepted token service and the memo is one. The native balance is
-/// recorded as the recipient's storage credit. Anything else credits nothing; its native
-/// balance, if any, stays with the service's storage.
+/// recorded as the recipient's storage credit. Anything else credits nothing: a deposit is then
+/// sent back (see [`refund`]), and any other transfer's native balance stays with the service's
+/// storage.
 pub fn on_transfer(state: &impl State, source: u32, native: u64, memo: &[u8]) -> Result<Effects> {
 	let mut tx = Tx { state, fx: Effects::default() };
 	if !tx.config().is_some_and(|c| c.token_services.contains(&source)) {
 		return Err("not from an accepted token service");
 	}
-	// The memo is zero-padded after the encoding.
-	let deposit = DepositMemo::decode(&mut &memo[..]).map_err(|_| "not a deposit")?;
-	if deposit.version != MEMO_VERSION {
-		return Err("unknown memo version");
-	}
+	let TokenMemo::Deposit(deposit) = TokenMemo::parse(memo)? else { return Err("not a deposit") };
 	tx.credit(&deposit.to, Asset { service: source, id: deposit.asset_id }, deposit.amount)?;
 	if native > 0 {
 		let key = StorageKey::StorageCredit(deposit.to);
@@ -806,4 +803,12 @@ pub fn on_transfer(state: &impl State, source: u32, native: u64, memo: &[u8]) ->
 		tx.set(&key, &credit.saturating_add(native));
 	}
 	Ok(tx.fx)
+}
+
+/// What to send back to the token service that sent `memo`, when witness couldn't credit it: a
+/// withdrawal paying the deposit to its `refund_to`, out of what witness now holds there. Only a
+/// deposit is refunded, so a withdrawal can never come back as one.
+pub fn refund(memo: &[u8]) -> Option<[u8; MEMO_LEN]> {
+	let TokenMemo::Deposit(d) = TokenMemo::parse(memo).ok()? else { return None };
+	Some(TokenMemo::Withdrawal(WithdrawalMemo { asset_id: d.asset_id, amount: d.amount, to: d.refund_to }).memo())
 }

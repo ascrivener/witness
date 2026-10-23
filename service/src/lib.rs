@@ -19,7 +19,7 @@ use jam_types::{
 	Slot, TransferRecord, WorkItemRecord, WorkOutput, WorkPackageHash, WorkPayload,
 };
 use witness_rules::Effects;
-use witness_types::{Gas, Op, Rejection, Verified};
+use witness_types::{Gas, MEMO_LEN, Op, Rejection, Verified};
 
 pub struct Service;
 jam_pvm_common::declare_service!(Service);
@@ -82,8 +82,8 @@ impl jam_pvm_common::Service for Service {
 	}
 }
 
-/// A deposit, if it's from an accepted token service; its native balance stays with the service
-/// either way.
+/// A deposit, if it's from an accepted token service. A deposit witness can't credit goes back,
+/// native balance and all; any other transfer's native balance stays with the service.
 fn on_transfer(t: TransferRecord) {
 	let start = accumulate::gas();
 	match witness_rules::on_transfer(&Host, t.source, t.amount, &t.memo.0).and_then(apply) {
@@ -91,8 +91,31 @@ fn on_transfer(t: TransferRecord) {
 			accumulate::checkpoint();
 			info!(target = "witness", "deposit from service {} used {} gas", t.source, start - accumulate::gas());
 		},
-		Err(reason) => info!(target = "witness", "transfer of {} from service {}: {reason}", t.amount, t.source),
+		Err(reason) => {
+			info!(target = "witness", "transfer of {} from service {}: {reason}", t.amount, t.source);
+			if let Some(memo) = witness_rules::refund(&t.memo.0) {
+				match refund(t.source, t.amount, memo) {
+					Ok(()) => {
+						info!(target = "witness", "refunded the deposit to service {}", t.source);
+					},
+					Err(reason) => {
+						info!(target = "witness", "deposit not refunded: {reason}");
+					},
+				}
+			}
+		},
 	}
+}
+
+/// Send `memo` and `native` balance back to service `source`, with the gas it asks for.
+fn refund(source: ServiceId, native: Balance, memo: [u8; MEMO_LEN]) -> Result<(), &'static str> {
+	let gas = accumulate::service_info(source).ok_or("no such service")?.min_memo_gas;
+	if accumulate::gas() < gas.saturating_add(TRANSFER_OVERHEAD) {
+		return Err("not enough gas left to send it");
+	}
+	accumulate::transfer(source, native, gas, &Memo(memo)).map_err(|_| "transfer failed")?;
+	accumulate::checkpoint();
+	Ok(())
 }
 
 fn on_work_item(record: WorkItemRecord, now: Slot) {

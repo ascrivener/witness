@@ -5,7 +5,8 @@
 //! The rules here run natively (in witness-sim) and in `mock-token-service`, the JAM service:
 //! - [`TokenOp::Faucet`] credits an account with any amount of any asset.
 //! - [`TokenOp::Send`] moves an account's tokens to a service, sending it a deposit memo for an
-//!   account there. The service then holds them here, as the token service's ledger shows.
+//!   account there, refundable to the sender. The service then holds them here, as the token
+//!   service's ledger shows.
 //! - A withdrawal memo from a service pays out of what that service holds to an account.
 
 #![cfg_attr(not(any(test, feature = "std")), no_std)]
@@ -14,7 +15,7 @@ extern crate alloc;
 
 use alloc::{collections::BTreeMap, vec::Vec};
 use codec::{Decode, Encode};
-use witness_types::{Amount, DepositMemo, MEMO_LEN, MEMO_VERSION, WithdrawalMemo};
+use witness_types::{Amount, DepositMemo, MEMO_LEN, TokenMemo};
 
 /// Who holds tokens: an account (any 32 bytes; the mock checks no signatures) or a service.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
@@ -87,8 +88,8 @@ pub fn apply(state: &impl State, op: TokenOp) -> Result<Effects> {
 		},
 		TokenOp::Send { from, asset, amount, service, to } => {
 			tx.move_tokens(Holder::Account(from), Holder::Service(service), asset, amount)?;
-			let memo = DepositMemo { version: MEMO_VERSION, asset_id: asset, amount, to };
-			tx.fx.transfers.push((service, witness_types::memo(&memo)));
+			let memo = TokenMemo::Deposit(DepositMemo { asset_id: asset, amount, to, refund_to: from });
+			tx.fx.transfers.push((service, memo.memo()));
 		},
 	}
 	Ok(tx.fx)
@@ -97,10 +98,7 @@ pub fn apply(state: &impl State, op: TokenOp) -> Result<Effects> {
 /// Apply a transfer from service `source`: a withdrawal, paid out of what `source` holds.
 pub fn on_transfer(state: &impl State, source: u32, memo: &[u8]) -> Result<Effects> {
 	let mut tx = Tx { state, fx: Effects::default() };
-	let w = WithdrawalMemo::decode(&mut &memo[..]).map_err(|_| "not a withdrawal")?;
-	if w.version != MEMO_VERSION {
-		return Err("unknown memo version");
-	}
+	let TokenMemo::Withdrawal(w) = TokenMemo::parse(memo)? else { return Err("not a withdrawal") };
 	tx.move_tokens(Holder::Service(source), Holder::Account(w.to), w.asset_id, w.amount)?;
 	Ok(tx.fx)
 }
@@ -109,6 +107,7 @@ pub fn on_transfer(state: &impl State, source: u32, memo: &[u8]) -> Result<Effec
 mod tests {
 	use super::*;
 	use alloc::vec;
+	use witness_types::WithdrawalMemo;
 
 	#[derive(Default)]
 	struct Chain(BTreeMap<Vec<u8>, Vec<u8>>);
@@ -143,17 +142,18 @@ mod tests {
 		c.apply(fx);
 		let fx = apply(&c, TokenOp::Send { from: alice, asset: 7, amount: 60, service: 3, to: [9; 32] }).unwrap();
 		let sent = c.apply(fx);
-		let memo = DepositMemo { version: MEMO_VERSION, asset_id: 7, amount: 60, to: [9; 32] };
-		assert_eq!(sent, vec![(3, witness_types::memo(&memo))]);
+		let memo = TokenMemo::Deposit(DepositMemo { asset_id: 7, amount: 60, to: [9; 32], refund_to: alice });
+		assert_eq!(sent, vec![(3, memo.memo())]);
 		assert_eq!((c.balance(Holder::Account(alice), 7), c.balance(Holder::Service(3), 7)), (40, 60));
 		let send_more = TokenOp::Send { from: alice, asset: 7, amount: 41, service: 3, to: [9; 32] };
 		assert_eq!(apply(&c, send_more), Err("insufficient balance"));
 
-		let withdrawal = |amount| witness_types::memo(&WithdrawalMemo { version: MEMO_VERSION, asset_id: 7, amount, to: bob });
+		let withdrawal = |amount| TokenMemo::Withdrawal(WithdrawalMemo { asset_id: 7, amount, to: bob }).memo();
 		let fx = on_transfer(&c, 3, &withdrawal(25)).unwrap();
 		c.apply(fx);
 		assert_eq!((c.balance(Holder::Service(3), 7), c.balance(Holder::Account(bob), 7)), (35, 25));
 		assert_eq!(on_transfer(&c, 3, &withdrawal(36)), Err("insufficient balance"));
 		assert_eq!(on_transfer(&c, 4, &withdrawal(1)), Err("insufficient balance"), "only what it holds");
+		assert_eq!(on_transfer(&c, 3, &memo.memo()), Err("not a withdrawal"), "a deposit isn't one");
 	}
 }

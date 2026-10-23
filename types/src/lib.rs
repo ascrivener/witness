@@ -181,33 +181,59 @@ pub struct Proposal {
 }
 
 /// The version byte memos start with.
-pub const MEMO_VERSION: u8 = 1;
+pub const MEMO_VERSION: u8 = 2;
+
+/// What a memo between witness and a token service says, after its version byte. The two kinds
+/// can't be mistaken for each other: witness refunds a deposit it can't credit with a
+/// withdrawal, and a withdrawal read as a deposit could bounce between two services forever.
+#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
+pub enum TokenMemo {
+	Deposit(DepositMemo),
+	Withdrawal(WithdrawalMemo),
+}
+
+impl TokenMemo {
+	/// As a transfer memo: the version byte, the encoding, then zeros.
+	pub fn memo(&self) -> [u8; MEMO_LEN] {
+		memo(&(MEMO_VERSION, self))
+	}
+
+	/// Read a transfer memo.
+	pub fn parse(memo: &[u8]) -> Result<Self, &'static str> {
+		match memo.split_first() {
+			Some((&MEMO_VERSION, rest)) => TokenMemo::decode(&mut &rest[..]).map_err(|_| "not a token memo"),
+			_ => Err("unknown memo version"),
+		}
+	}
+}
 
 /// A deposit transfer's memo, from a token service: credit `amount` of its asset `asset_id` to
-/// witness account `to`.
+/// witness account `to`. If witness can't, it pays it back to `refund_to`, the sender's account
+/// with the token service.
 #[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
 pub struct DepositMemo {
-	pub version: u8,
 	pub asset_id: u32,
 	pub amount: Amount,
 	pub to: AccountId,
+	pub refund_to: [u8; 32],
 }
 
 /// A withdrawal transfer's memo, to a token service: pay `amount` of its asset `asset_id` to its
 /// account `to`, out of witness's.
 #[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
 pub struct WithdrawalMemo {
-	pub version: u8,
 	pub asset_id: u32,
 	pub amount: Amount,
 	pub to: [u8; 32],
 }
 
-/// Gas a deposit transfer must carry: what witness's accumulate needs to credit it. A transfer's
-/// gas limit is all the receiver gets to process it, and a deposit it can't process is lost
-/// after the token service has already moved the funds. So witness is deployed with this as its
-/// `min_memo_gas`, and JAM refuses any transfer to it carrying less.
-/// Crediting one used about 37,000 gas on PolkaJam v0.1.29; this leaves room to spare.
+/// Gas a deposit transfer must carry: what witness's accumulate needs to credit it, or to refund
+/// it. A transfer's gas limit is all the receiver gets to process it, and a deposit it can't
+/// process is lost after the token service has already moved the funds. So witness is deployed
+/// with this as its `min_memo_gas`, and JAM refuses any transfer to it carrying less.
+/// Crediting one used about 37,000 gas on PolkaJam v0.1.29. A refund is a transfer back carrying
+/// the token service's own `min_memo_gas`, so a token service whose deposits witness should be
+/// able to refund asks for at most about 200,000 (what this leaves after trying, and sending).
 pub const DEPOSIT_GAS: Gas = 300_000;
 
 /// The length of a JAM transfer memo.
