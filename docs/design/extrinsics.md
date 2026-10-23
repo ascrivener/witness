@@ -22,9 +22,10 @@ keeps only records.
 
 **Attestations commit to a Merkle root.** A claim's `subjects: Preimage` (a bundle's hash and
 length) becomes `subjects_root: Hash` and `subject_count: u32`: the root of a binary Merkle tree
-over the subjects. Leaves are `blake2b(0x00 ++ subject)`, inner nodes `blake2b(0x01 ++ left ++
-right)` (so a leaf can't pass as a node); an odd node at the end of a level is carried up as it
-is. The count fixes the tree's shape, so an index means one thing.
+over the subjects. Leaves are `blake2b(0x00 ++ blake2b(subject))`, inner nodes `blake2b(0x01 ++
+left ++ right)` (so a leaf can't pass as a node); an odd node at the end of a level is carried up
+as it is. The count fixes the tree's shape, so an index means one thing. A leaf comes from its
+subject's hash, which the check is given anyway, so refine hashes each subject once.
 
 **Ops supply blobs as extrinsics.** An extrinsic is a SCALE `Vec<Vec<u8>>` of blobs, so 128
 extrinsics hold any number. An op names a blob by `BlobAt { extrinsic: u8, index: u32 }`.
@@ -35,8 +36,19 @@ extrinsics hold any number. An op names a blob by `BlobAt { extrinsic: u8, index
   cited claim, its bytes in the package, and its Merkle path. Refine checks the path against the
   claim's root, so it hashes only the subjects it uses. An FTA batch cites the attestations of
   about 270 batches, and those bundles are far bigger than the subjects it trusts.
-- The check blob and a bounty's plain blobs are named the same way, and refine checks each
-  against the hash the bounty records (`check_hash`, a plain blob's hash).
+- A bounty's plain blobs are named the same way, and refine checks each against the hash the
+  bounty records. The check blob travels as an extrinsic of its own, whole: the work package
+  commits to each extrinsic's Blake2b-256 hash, so refine compares that with `check_hash` instead
+  of hashing the blob. Hashing costs about 61 gas a byte in PVM (`blake2b_simd` and RustCrypto's
+  `blake2` alike), and a Lean check is 416 KB: 3×10⁷ gas an op saved.
+
+**The check's gas comes out of refine's.** A check runs in an inner PVM whose gas is charged to
+refine as it goes, and invoking it with more than refine has left fails refine outright (out of
+gas, so the op is lost rather than rejected). So the service lends the check at most what refine
+can spare, keeping a reserve for its own work after the check; a check needing more runs out of
+gas and is rejected. With the testnet's 10⁹ refine gas and a check limit of 9.5×10⁸, refine's
+own work before the check (decoding, the signature, reading and hashing subjects: about 5×10⁷
+for a Lean batch trusting 100 nodes) left too little before this.
 
 **State is records.** Accumulate keeps attestations (`id → { slot, attester }`), bounties
 (their terms name blobs by hash), commitments and accounts. The `Pin` op goes: nothing needs

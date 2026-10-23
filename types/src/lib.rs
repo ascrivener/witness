@@ -132,15 +132,19 @@ pub fn blobs_in(mut data: &[u8]) -> Option<Vec<&[u8]>> {
 	input.is_empty().then_some(blobs)
 }
 
-/// A Merkle tree over an attestation's subjects. Leaves are `blake2b(0x00 ++ subject)` and inner
-/// nodes `blake2b(0x01 ++ left ++ right)`, so a leaf can't pass for a node. At each level, an odd
+/// A Merkle tree over an attestation's subjects. Leaves are `blake2b(0x00 ++ blake2b(subject))`
+/// and inner nodes `blake2b(0x01 ++ left ++ right)`, so a leaf can't pass for a node. A leaf comes
+/// from its subject's hash, which a check is given anyway, so each subject is hashed once. At each level, an odd
 /// node at the end is carried up as it is. The number of subjects fixes the shape.
 pub mod merkle {
 	use super::{Hash, blake2b256};
 	use alloc::vec::Vec;
 
-	pub fn leaf(subject: &[u8]) -> Hash {
-		blake2b256(&[&[0u8][..], subject].concat())
+	/// The leaf of the subject hashing to `subject_hash`.
+	pub fn leaf(subject_hash: &Hash) -> Hash {
+		let mut data = [0u8; 33];
+		data[1..].copy_from_slice(subject_hash);
+		blake2b256(&data)
 	}
 
 	fn node(left: &Hash, right: &Hash) -> Hash {
@@ -298,8 +302,9 @@ pub enum Op {
 		check_hash: Hash,
 		params: Vec<u8>,
 		blobs: Vec<BlobRef>,
-		/// The check blob.
-		check: BlobAt,
+		/// The extrinsic holding the check blob, on its own: JAM commits to each extrinsic's
+		/// Blake2b-256 hash, so refine needn't hash the blob itself.
+		check: u8,
 		/// The bounty's plain blobs, in order.
 		plain: Vec<BlobAt>,
 		/// The attestations `trusted` cites, each once: all by the bounty's check, with one set of
@@ -328,7 +333,8 @@ pub enum Op {
 		attester: AccountId,
 		nonce: u64,
 		check_hash: Hash,
-		check: BlobAt,
+		/// The extrinsic holding the check blob, on its own, as for `Reveal`.
+		check: u8,
 		params: Vec<u8>,
 		subjects: u8,
 		/// The parent attestations, each once.
@@ -549,12 +555,12 @@ pub fn check_args(mode: CheckMode, blobs: &[CheckBlob], params: &[u8], witness: 
 
 #[cfg(test)]
 mod tests {
-	use super::merkle;
+	use super::{blake2b256, merkle};
 
 	#[test]
 	fn merkle_paths_prove_exactly_their_leaf() {
 		for count in 1..=17u32 {
-			let leaves: alloc::vec::Vec<_> = (0..count).map(|i| merkle::leaf(&i.to_le_bytes())).collect();
+			let leaves: alloc::vec::Vec<_> = (0..count).map(|i| merkle::leaf(&blake2b256(&i.to_le_bytes()))).collect();
 			let root = merkle::root(&leaves);
 			for i in 0..count {
 				let path = merkle::path(&leaves, i as usize);
@@ -568,6 +574,6 @@ mod tests {
 			}
 		}
 		// A leaf can't pass for an inner node: its hash is domain-separated.
-		assert_ne!(merkle::leaf(&[]), merkle::root(&[]));
+		assert_ne!(merkle::leaf(&[0; 32]), merkle::root(&[]));
 	}
 }

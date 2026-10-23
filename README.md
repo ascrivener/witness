@@ -20,7 +20,9 @@ Prototype: rewards are points from a faucet (`Mint`), not tokens.
 | `Attest` | read the check, the subjects and the trusted subjects it cites from the extrinsics, and compute the subjects' Merkle root; verify the attester's signature over the claim; run the check in attest mode with the attester's witness | the parents were recorded and this wasn't yet; debit `ATTEST_DEPOSIT`; record the attestation |
 
 Blobs travel with the ops that use them: a work item's payload is the op, and its extrinsics
-(each a SCALE `Vec<Vec<u8>>` of blobs) hold the blobs it names, as `BlobAt { extrinsic, index }`.
+hold the blobs it names: the check blob as an extrinsic of its own (the work package commits to
+its hash), and the rest in extrinsics that are each a SCALE `Vec<Vec<u8>>` of blobs, named as
+`BlobAt { extrinsic, index }`.
 So state holds only records: bounties, commitments, accounts and attestations. See
 [docs/design/extrinsics.md](docs/design/extrinsics.md).
 

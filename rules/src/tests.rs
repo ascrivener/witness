@@ -31,10 +31,14 @@ fn plain(i: usize) -> BlobRef {
 }
 
 /// Where no extrinsic has a blob.
-const NOWHERE: BlobAt = BlobAt { extrinsic: 0, index: 999 };
+const NOWHERE: BlobAt = BlobAt { extrinsic: LIBRARY, index: 999 };
+/// The extrinsics holding the check blobs, whole, and the extra blobs.
+const CHECK_AT: u8 = 0;
+const OTHER_CHECK_AT: u8 = 1;
+const LIBRARY: u8 = 2;
 
-/// The work item's extrinsics. Extrinsic 0, the library, holds the check blobs and the extra
-/// blobs; tests add more (lists of subjects, or raw bytes). Every op in a test sees them all.
+/// The work item's extrinsics: the two check blobs, each whole, then the library of extra blobs;
+/// tests add more (lists of subjects, or raw bytes). Every op in a test sees them all.
 ///
 /// The mock check:
 /// - in reveal mode, accepts witness `b"x"`; a witness equal to its blobs' data concatenated;
@@ -47,8 +51,8 @@ struct Env {
 
 impl Default for Env {
 	fn default() -> Self {
-		let library: Blobs = [BLOB, OTHER_BLOB].into_iter().chain(EXTRA).map(<[u8]>::to_vec).collect();
-		Env { extrinsics: vec![library.encode()] }
+		let library: Blobs = EXTRA.into_iter().map(<[u8]>::to_vec).collect();
+		Env { extrinsics: vec![BLOB.to_vec(), OTHER_BLOB.to_vec(), library.encode()] }
 	}
 }
 
@@ -75,9 +79,14 @@ impl Env {
 			.unwrap_or(NOWHERE)
 	}
 
+	/// The extrinsic holding the check blob hashing to `hash`, whole.
+	fn check_at(&self, hash: &Hash) -> u8 {
+		(0..LIBRARY).find(|&e| blake2b256(&self.extrinsics[e as usize]) == *hash).expect("a check blob")
+	}
+
 	/// The list extrinsic holding `claim`'s subjects.
 	fn list_of(&self, claim: &AttestationClaim) -> u8 {
-		(1..self.extrinsics.len() as u8)
+		(LIBRARY + 1..self.extrinsics.len() as u8)
 			.find(|&e| {
 				let subjects = self.blobs(e);
 				subjects.len() as u32 == claim.subject_count && merkle::root(&leaves(&subjects)) == claim.subjects_root
@@ -121,7 +130,7 @@ impl Env {
 }
 
 fn leaves(subjects: &[Vec<u8>]) -> Vec<Hash> {
-	subjects.iter().map(|s| merkle::leaf(s)).collect()
+	subjects.iter().map(|s| merkle::leaf(&blake2b256(s))).collect()
 }
 
 /// Split `args` (see `check_args`) into the mode, the blobs (trusted, data) and the witness.
@@ -147,6 +156,9 @@ fn parse_args(args: &[u8]) -> (u8, Vec<(bool, Vec<u8>)>, Vec<u8>) {
 impl RefineEnv for Env {
 	fn extrinsic(&self, index: usize) -> Option<Vec<u8>> {
 		self.extrinsics.get(index).cloned()
+	}
+	fn extrinsic_hash(&self, index: usize) -> Option<Hash> {
+		self.extrinsics.get(index).map(|x| blake2b256(x))
 	}
 	fn run_check(&self, blob: &[u8], args: &[u8], _gas: Gas) -> core::result::Result<(), Rejection> {
 		assert!(blob == BLOB || blob == OTHER_BLOB);
@@ -201,7 +213,7 @@ fn bare_reveal(env: &Env, blobs: Vec<BlobRef>) -> Op {
 		bounty_id: 0,
 		check_hash: check(),
 		params: vec![],
-		check: env.find(&check()),
+		check: CHECK_AT,
 		plain: env.plain_at(&blobs),
 		blobs,
 		claims: vec![],
@@ -317,7 +329,7 @@ impl Chain {
 			bounty_id: b,
 			check_hash: terms.check_hash,
 			params: terms.params,
-			check: self.env.find(&terms.check_hash),
+			check: self.env.check_at(&terms.check_hash),
 			plain: self.env.plain_at(&terms.blobs),
 			blobs: terms.blobs,
 			claims,
@@ -367,7 +379,7 @@ impl Chain {
 			attester: id(attester),
 			nonce,
 			check_hash,
-			check: self.env.find(&check_hash),
+			check: self.env.check_at(&check_hash),
 			params: params.to_vec(),
 			subjects,
 			claims,
@@ -565,13 +577,14 @@ fn the_check_must_be_in_the_extrinsics() {
 		*check = at;
 		refine(&env, SERVICE, op)
 	};
-	assert!(matches!(with_check(env.find(&check())), Verified::Reveal { .. }));
-	assert_eq!(with_check(BlobAt { extrinsic: 9, index: 0 }), bad_blob, "no such extrinsic");
-	assert_eq!(with_check(NOWHERE), bad_blob, "no such blob");
-	assert_eq!(with_check(env.find(&other_check())), bad_blob, "another blob");
+	assert!(matches!(with_check(CHECK_AT), Verified::Reveal { .. }));
+	assert_eq!(with_check(9), bad_blob, "no such extrinsic");
+	assert_eq!(with_check(OTHER_CHECK_AT), bad_blob, "another blob");
+	assert_eq!(with_check(LIBRARY), bad_blob, "the check among other blobs");
 	let mut broken = Env::default();
-	broken.extrinsics[0] = vec![4, 2, 3];
-	assert_eq!(refine(&broken, SERVICE, bare_reveal(&env, vec![])), Verified::Rejected(Rejection::BadExtrinsic));
+	broken.extrinsics[LIBRARY as usize] = vec![4, 2, 3];
+	let op = bare_reveal(&env, vec![plain(0)]);
+	assert_eq!(refine(&broken, SERVICE, op), Verified::Rejected(Rejection::BadExtrinsic));
 }
 
 #[test]
@@ -737,7 +750,7 @@ fn reveal_must_name_the_bounty_blobs() {
 			bounty_id: 1,
 			check_hash: check(),
 			params: terms.params.clone(),
-			check: c.env.find(&check()),
+			check: CHECK_AT,
 			plain: c.env.plain_at(&blobs),
 			blobs,
 			claims: vec![],
@@ -808,7 +821,7 @@ fn attesting_a_batch() {
 	let list = c.list(&[GOOD1]);
 	let (mut op, _) = c.attest_op(CAROL, check(), b"batch", list, &[]);
 	let Op::Attest { check: at, .. } = &mut op else { unreachable!() };
-	*at = c.env.find(&other_check());
+	*at = OTHER_CHECK_AT;
 	assert_eq!(c.refine(op), rejected(Rejection::BadBlob));
 
 	// The witness reaches the check.

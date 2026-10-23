@@ -29,9 +29,18 @@ polkavm_derive::min_stack_size!(256 * 1024);
 
 struct Host;
 
-impl witness_rules::RefineEnv for Host {
+/// Refine's host: the work item being refined is item `item` of its package.
+struct RefineHost {
+	item: usize,
+}
+
+impl witness_rules::RefineEnv for RefineHost {
 	fn extrinsic(&self, index: usize) -> Option<Vec<u8>> {
 		refine::extrinsic(index)
+	}
+	fn extrinsic_hash(&self, index: usize) -> Option<Hash> {
+		let package = refine::work_package();
+		Some(package.items.get(self.item)?.extrinsics.get(index)?.hash.0)
 	}
 	fn run_check(&self, blob: &[u8], args: &[u8], gas: Gas) -> Result<(), Rejection> {
 		check_vm::run_check(blob, args, gas)
@@ -47,13 +56,13 @@ impl witness_rules::State for Host {
 impl jam_pvm_common::Service for Service {
 	fn refine(
 		_core_index: CoreIndex,
-		_item_index: usize,
+		item_index: usize,
 		service_id: ServiceId,
 		payload: WorkPayload,
 		_package_hash: WorkPackageHash,
 	) -> WorkOutput {
 		let verified = match Op::decode(&mut &payload[..]) {
-			Ok(op) => witness_rules::refine(&Host, service_id, op),
+			Ok(op) => witness_rules::refine(&RefineHost { item: item_index }, service_id, op),
 			Err(_) => Verified::Rejected(Rejection::BadPayload),
 		};
 		info!(target = "witness", "refine: {:?}", verified);
@@ -81,9 +90,12 @@ fn on_work_item(record: WorkItemRecord, now: Slot) {
 }
 
 fn on_work_item_inner(record: WorkItemRecord, now: Slot) {
-	let Ok(output) = record.result else {
-		info!(target = "witness", "refine failed for item in {}", record.package);
-		return;
+	let output = match record.result {
+		Ok(output) => output,
+		Err(e) => {
+			info!(target = "witness", "refine failed for item in {}: {:?}", record.package, e);
+			return;
+		},
 	};
 	let Ok(verified) = Verified::decode(&mut &output[..]) else { return };
 	if let Verified::Rejected(rejection) = &verified {

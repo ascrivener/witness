@@ -195,7 +195,7 @@ fn cite(subjects: &[(Cited, u32)], extrinsic: u8, blobs: &mut Blobs) -> Result<(
 			ids.len() - 1
 		});
 		let subject = list.get(*entry as usize).ok_or_else(|| format!("the claim has no subject {entry}"))?;
-		let leaves: Vec<Hash> = list.iter().map(|s| merkle::leaf(s)).collect();
+		let leaves: Vec<Hash> = list.iter().map(|s| merkle::leaf(&blake2b256(s))).collect();
 		let blob = BlobAt { extrinsic, index: blobs.len() as u32 };
 		blobs.push(subject.clone());
 		trusted.push(TrustedRef { claim: i as u16, entry: *entry, blob, path: merkle::path(&leaves, *entry as usize) });
@@ -203,12 +203,14 @@ fn cite(subjects: &[(Cited, u32)], extrinsic: u8, blobs: &mut Blobs) -> Result<(
 	Ok((claims, trusted))
 }
 
-/// Write `extrinsics` to `dir`, as files `0`, `1`, ..., replacing what was there.
-fn write_extrinsics(dir: &str, extrinsics: &[Blobs]) -> Result<(), String> {
+/// Write an op's extrinsics to `dir`, as files `0`, `1`, ..., replacing what was there: the check
+/// blob, whole, then `lists` of blobs.
+fn write_extrinsics(dir: &str, check: &[u8], lists: &[Blobs]) -> Result<(), String> {
 	let _ = std::fs::remove_dir_all(dir);
 	std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {dir}: {e}"))?;
-	for (i, blobs) in extrinsics.iter().enumerate() {
-		write(&format!("{dir}/{i}"), &blobs.encode())?;
+	write(&format!("{dir}/0"), check)?;
+	for (i, blobs) in lists.iter().enumerate() {
+		write(&format!("{dir}/{}", i + 1), &blobs.encode())?;
 	}
 	Ok(())
 }
@@ -315,7 +317,7 @@ fn run(command: &str, f: &Flags) -> Result<(), String> {
 			Op::Commit { bounty_id, committer: committer_id, nonce, commitment, signature }
 		},
 		"reveal" => {
-			// Extrinsic 0 is the check; 1 the plain blobs, then the trusted subjects.
+			// Extrinsic 0 is the check, whole; 1 the plain blobs, then the trusted subjects.
 			let (check_hash, _, check) = f.check()?;
 			let blobs = f.blobs()?;
 			let mut given = Blobs::new();
@@ -332,13 +334,13 @@ fn run(command: &str, f: &Flags) -> Result<(), String> {
 			}
 			subjects.extend(f.trust()?);
 			let (claims, trusted) = cite(&subjects, 1, &mut given)?;
-			write_extrinsics(f.extrinsics()?, &[vec![check], given])?;
+			write_extrinsics(f.extrinsics()?, &check, &[given])?;
 			Op::Reveal {
 				bounty_id: f.num("bounty")?,
 				check_hash,
 				params: f.params()?,
 				blobs: blobs.into_iter().map(|(blob, _)| blob).collect(),
-				check: BlobAt { extrinsic: 0, index: 0 },
+				check: 0,
 				plain,
 				claims,
 				trusted,
@@ -361,7 +363,7 @@ fn run(command: &str, f: &Flags) -> Result<(), String> {
 		},
 		"release" => Op::Release { bounty_id: f.num("bounty")?, commitment: f.hash("commitment")? },
 		"attest" => {
-			// Extrinsic 0 is the check; 1 the subjects; 2 the trusted subjects.
+			// Extrinsic 0 is the check, whole; 1 the subjects; 2 the trusted subjects.
 			let service: u32 = f.num("service")?;
 			let attester = f.key("attester")?;
 			let nonce = f.num("nonce")?;
@@ -372,7 +374,7 @@ fn run(command: &str, f: &Flags) -> Result<(), String> {
 			let mut given = Blobs::new();
 			let (claims, trusted) = cite(&f.trust()?, 2, &mut given)?;
 			let parents: Vec<AttestationId> = claims.iter().map(AttestationClaim::id).collect();
-			let leaves: Vec<Hash> = subjects.iter().map(|s| merkle::leaf(s)).collect();
+			let leaves: Vec<Hash> = subjects.iter().map(|s| merkle::leaf(&blake2b256(s))).collect();
 			let claim = AttestationClaim {
 				check_hash,
 				params_hash: blake2b256(&params),
@@ -383,7 +385,7 @@ fn run(command: &str, f: &Flags) -> Result<(), String> {
 			let has_witness = ["witness", "witness-str", "witness-u64", "witness-file"].iter().any(|w| f.has(w));
 			let witness = if has_witness { f.witness()? } else { vec![] };
 			write(f.str("claim-out")?, &(claim.clone(), subjects.clone()).encode())?;
-			write_extrinsics(f.extrinsics()?, &[vec![check], subjects, given])?;
+			write_extrinsics(f.extrinsics()?, &check, &[subjects, given])?;
 			eprintln!("attestation 0x{}", to_hex(&claim.id()));
 			let attester_id = attester.verifying_key().to_bytes();
 			let message = witness_types::attest_message(service, &attester_id, nonce, &claim.id());
@@ -392,7 +394,7 @@ fn run(command: &str, f: &Flags) -> Result<(), String> {
 				attester: attester_id,
 				nonce,
 				check_hash,
-				check: BlobAt { extrinsic: 0, index: 0 },
+				check: 0,
 				params,
 				subjects: 1,
 				claims,
