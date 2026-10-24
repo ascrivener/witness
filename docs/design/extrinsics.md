@@ -36,6 +36,14 @@ extrinsics hold any number. An op names a blob by `BlobAt { extrinsic: u8, index
   cited claim, its bytes in the package, and its Merkle path. Refine checks the path against the
   claim's root, so it hashes only the subjects it uses. An FTA batch cites the attestations of
   about 270 batches, and those bundles are far bigger than the subjects it trusts.
+- An op's citations (the claims it cites, and its `TrustedRef`s) travel as an extrinsic of their
+  own too, whole: SCALE `Citations { claims, trusted }`, which the op names by its index (none if
+  it cites nothing). They grow with what an op trusts, about 300 bytes a trusted subject with its
+  path, and PolkaJam refuses a work package whose own bytes (its items' payloads, extrinsics
+  aside) pass 200 KiB: a median FTA attestation's citations are about 100 KB, and its biggest
+  250 KB. In an extrinsic they cost the package nothing, so several ops fit one package. The
+  package commits to the extrinsic's hash, the signed claim's parents root binds the claims, and
+  refine checks each reference against its claim, so nothing about them needs signing.
 - A bounty's plain blobs are named the same way, and refine checks each against the hash the
   bounty records. The check blob travels as an extrinsic of its own, whole: the work package
   commits to each extrinsic's Blake2b-256 hash, so refine compares that with `check_hash` instead
@@ -80,7 +88,9 @@ carries over.
 ## Limits
 
 A package's extrinsics and payload must fit its size limit, so a batch can trust at most that
-many bytes of subjects. The profiled plan of all of Mathlib has a median of about 250 KB trusted
+many bytes of subjects. Its payloads, outside the extrinsics, must also fit in 200 KiB on PolkaJam
+v0.1.29, no chain parameter but what its nodes accept: so ops keep their payloads small (hence
+citations as an extrinsic), and `jam-submit.py` checks it. The profiled plan of all of Mathlib has a median of about 250 KB trusted
 per batch and a maximum of about 3 MB, against about 13.8 MB. Merkle paths add about
 `32 × log2(subject_count)` bytes per trusted subject: for 1,400 trusted subjects from bundles of
 a few hundred, about 400 KB.

@@ -150,6 +150,9 @@ tools/mock-token/          a test-only token service's rules: deposits into and 
 tools/mock-token-service/  that, as a JAM service
 tools/full-gas-spec/       raises a PolkaJam dev chain spec's refine limit to the full spec's
 scripts/e2e.sh             end-to-end test on a local PolkaJam testnet
+scripts/jam-submit.py      submits work packages with extrinsics, several items to one
+scripts/attest-batches.py  attests a DAG of batches in parallel: several attesters, several batches
+                           to a package
 ```
 
 ## Build and test
@@ -298,6 +301,9 @@ $SUBMIT $SVC $($W attest --service $SVC --attester pat --nonce 0 --check out/sor
 $SUBMIT $SVC $($W create --service $SVC --maker alice --nonce 2 --check out/sorted-words-check.jam --params 0x00 --blobs batch.claim:0,batch.claim:1 --reward 100 --check-gas 10000000 --expiry $(( $(jamt inspect slot) + 100 )))
 # after the claim window (30 slots by default)
 $SUBMIT $SVC $($W finalize --bounty 0)
+# a library of many batches, each trusting earlier ones: lay them out as batch-N.subjects,
+# batch-N.trust (citing batch-M.claim) and batch-N.witness, and attest them in parallel
+python3 scripts/attest-batches.py batches/ --witness $W --service $SVC --check out/sorted-words-check.jam --check-gas 10000000 --attesters pat,quinn
 # a stablecoin: the test token service ($TOKEN_SVC) mints alice some, she moves 600 into witness,
 # and later withdraws 100 back out
 $SUBMIT $TOKEN_SVC $($W token-faucet --to alice --asset 1 --amount 1000)
