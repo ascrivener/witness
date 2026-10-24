@@ -9,6 +9,12 @@
 //!     witness-sim item SERVICE PAYLOAD [EXTRINSIC...]    refine and accumulate one op (hex, or
 //!                                                        @FILE holding the hex), with its
 //!                                                        extrinsics (files)
+//!     witness-sim items SERVICE LIST                     refine many witness ops at once, in
+//!                                                        parallel, then accumulate them in
+//!                                                        order: LIST has a line an op, its
+//!                                                        payload file (hex) then its extrinsic
+//!                                                        files; prints `item N: applied` or why
+//!                                                        not, a line an op
 //!     witness-sim provide SERVICE FILE                   provide a preimage (logged; witness
 //!                                                        stores none but upgrade code)
 //!     witness-sim inspect slot                           the current slot (and pass one)
@@ -20,6 +26,10 @@
 //!
 //! State lives in `$WITNESS_SIM_DIR` (default `.witness-sim`), and the log the testnet's nodes
 //! would print (`refine: ...`, `check used N gas of L`) in its `log`.
+//!
+//! `items` is how a block of many packages lands: refine sees the state before it (witness's refine
+//! reads no state, only its item), so items refine independently, on as many threads as the
+//! machine has (`WITNESS_SIM_THREADS` overrides), and accumulate applies them in order.
 //!
 //! What's real: the service's rules (`witness-rules`), extrinsics as refine fetches them, and
 //! check blobs run in PolkaVM with the JAM
@@ -189,6 +199,79 @@ impl Sim {
 	}
 }
 
+/// One item's refine environment, apart from the others: its extrinsics, and its log lines.
+struct ItemEnv {
+	extrinsics: Vec<Vec<u8>>,
+	log: std::sync::Mutex<Vec<String>>,
+}
+
+impl witness_rules::RefineEnv for ItemEnv {
+	fn extrinsic(&self, index: usize) -> Option<Vec<u8>> {
+		self.extrinsics.get(index).cloned()
+	}
+
+	fn extrinsic_hash(&self, index: usize) -> Option<witness_types::Hash> {
+		self.extrinsics.get(index).map(|x| witness_types::blake2b256(x))
+	}
+
+	fn run_check(&self, blob: &[u8], args: &[u8], gas: Gas) -> Result<(), Rejection> {
+		let (result, used) = run_check(blob, args, gas)?;
+		self.log.lock().unwrap().push(format!("check used {used} gas of {gas}"));
+		result
+	}
+}
+
+impl Sim {
+	/// Refine `items` (payloads and extrinsics) in parallel, then accumulate them in order.
+	/// Returns, for each, whether it was applied, or why not.
+	fn items(&mut self, items: Vec<(Vec<u8>, Vec<Vec<u8>>)>) -> Vec<Result<(), String>> {
+		let threads = std::env::var("WITNESS_SIM_THREADS")
+			.ok()
+			.and_then(|t| t.parse().ok())
+			.unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()));
+		let envs: Vec<ItemEnv> = items.iter().map(|(_, x)| ItemEnv { extrinsics: x.clone(), log: Default::default() }).collect();
+		let next = std::sync::atomic::AtomicUsize::new(0);
+		let verified: Vec<std::sync::Mutex<Option<Verified>>> = items.iter().map(|_| Default::default()).collect();
+		std::thread::scope(|scope| {
+			for _ in 0..threads.min(items.len()).max(1) {
+				scope.spawn(|| loop {
+					let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+					let Some((payload, _)) = items.get(i) else { break };
+					let v = match Op::decode(&mut &payload[..]) {
+						Ok(op) => witness_rules::refine(&envs[i], SERVICE, op),
+						Err(_) => Verified::Rejected(Rejection::BadPayload),
+					};
+					*verified[i].lock().unwrap() = Some(v);
+				});
+			}
+		});
+		let mut out = Vec::new();
+		for (env, v) in envs.into_iter().zip(verified) {
+			self.state.slot += 1;
+			let verified = v.into_inner().unwrap().unwrap();
+			for line in env.log.into_inner().unwrap() {
+				self.log(&line);
+			}
+			self.log(&format!("refine: {verified:?}"));
+			if let Verified::Rejected(r) = verified {
+				out.push(Err(format!("rejected: {r:?}")));
+				continue;
+			}
+			match witness_rules::accumulate(&*self, verified, self.state.slot) {
+				Ok(effects) => {
+					self.apply(effects);
+					out.push(Ok(()));
+				},
+				Err(reason) => {
+					self.log(&format!("not applied: {reason}"));
+					out.push(Err(format!("not applied: {reason}")));
+				},
+			}
+		}
+		out
+	}
+}
+
 impl witness_rules::State for Sim {
 	fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
 		self.state.storage.get(key).cloned()
@@ -337,6 +420,25 @@ fn main() -> ExitCode {
 				sim.item(&payload, extrinsics);
 			}
 			println!("Item submitted at slot {}", sim.state.slot);
+		},
+		["items", _service, list] => {
+			let Ok(list) = std::fs::read_to_string(list) else { return fail("cannot read the list") };
+			let mut items = Vec::new();
+			for line in list.lines().filter(|l| !l.trim().is_empty()) {
+				let mut files = line.split_whitespace();
+				let payload = files.next().and_then(|f| std::fs::read_to_string(f).ok()).and_then(|h| from_hex(h.trim()));
+				let Some(payload) = payload else { return fail("cannot read a payload") };
+				let Ok(extrinsics) = files.map(std::fs::read).collect::<Result<Vec<_>, _>>() else {
+					return fail("cannot read an extrinsic");
+				};
+				items.push((payload, extrinsics));
+			}
+			for (n, result) in sim.items(items).into_iter().enumerate() {
+				match result {
+					Ok(()) => println!("item {n}: applied"),
+					Err(why) => println!("item {n}: {why}"),
+				}
+			}
 		},
 		["provide", _service, file] => {
 			let Ok(data) = std::fs::read(file) else { return fail("cannot read the preimage") };
