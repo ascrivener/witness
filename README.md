@@ -117,7 +117,8 @@ op cites them, then, when revealing, the bounty's plain blobs, or, when attestin
 attest, untrusted, with the attester's witness as `x`. At most `MAX_BLOBS` blobs and
 `MAX_BLOBS_LEN` bytes in all. `witness_check` parses the arguments back. Halting with 1 in `φ7` means true. Anything else
 (0, panic, page fault, out of gas, any host call but `grow_heap`) means false. `check_gas` is
-capped at `MAX_CHECK_GAS` and passed to `invoke` as the inner VM's limit.
+capped at `MAX_CHECK_GAS` (5×10⁹, the full spec's refine gas), and refine lends the inner VM at
+most what it can spare of it, keeping a reserve for its own work after.
 
 A check may call `grow_heap` (host call 1). Refine maps the pages it asks for, after the check's
 read-write data and short of its stack, charges the check the gas `grow_heap` costs a service, and
