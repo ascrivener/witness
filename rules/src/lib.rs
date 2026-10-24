@@ -17,11 +17,11 @@ extern crate alloc;
 mod tests;
 
 use alloc::{collections::BTreeMap, vec::Vec};
-use codec::{Decode, Encode};
+use codec::{Decode, DecodeAll, Encode};
 use witness_types::{
 	ADMIN_DELAY, Account, AccountId, AdminAction, Amount, Asset, Attestation, AttestationClaim,
 	AttestationId, BUILD_ADMIN, BlobAt, BlobHash, BlobRef, Bounty, BountyId, BountyStatus, CheckBlob,
-	CheckMode, Claim, CommitRecord, Config, Gas, Hash, MAX_BLOBS, MAX_BLOBS_LEN, MAX_CHECK_GAS,
+	CheckMode, Citations, Claim, CommitRecord, Config, Gas, Hash, MAX_BLOBS, MAX_BLOBS_LEN, MAX_CHECK_GAS,
 	MAX_CHECK_LEN, MAX_CLAIM_WINDOW, MAX_MINT, MAX_PARAMS_LEN, MAX_WITNESS_LEN, MEMO_LEN,
 	MIN_CLAIM_WINDOW, MIN_COMMIT_AGE, Op, Proposal, REVEAL_GRACE, Rejection, Signature, Slot, StorageKey,
 	TEST_ASSET, TokenMemo, TrustedRef, Verified, WithdrawalMemo, blake2b256, blobs_in, merkle,
@@ -123,6 +123,14 @@ impl<'e, E: RefineEnv> Extrinsics<'e, E> {
 		let (data, ranges) = self.fetch(extrinsic)?;
 		Ok(ranges.iter().map(|r| data[r.clone()].to_vec()).collect())
 	}
+}
+
+/// An op's citations: none, or extrinsic `at`, whole, decoded. Its hash is the work package's to
+/// commit to, and every reference in it is checked against its claim.
+fn citations(env: &impl RefineEnv, at: Option<u8>) -> Refined<Citations> {
+	let Some(at) = at else { return Ok(Citations::default()) };
+	let data = env.extrinsic(at as usize).ok_or(Rejection::BadBlob)?;
+	Citations::decode_all(&mut &data[..]).map_err(|_| Rejection::BadExtrinsic)
 }
 
 /// The blobs a check is given, as (hash, trusted, data), in order. Their count and total length
@@ -371,16 +379,17 @@ pub fn refine(env: &impl RefineEnv, service_id: u32, op: Op) -> Verified {
 			blobs,
 			check,
 			plain,
-			claims,
-			trusted,
+			citations: at,
 			check_gas,
 			hunter,
 			salt,
 			witness,
-		} => refine_reveal(
-			env, bounty_id, check_hash, params, blobs, check, plain, claims, trusted, check_gas, hunter, salt,
-			witness,
-		),
+		} => citations(env, at).and_then(|Citations { claims, trusted }| {
+			refine_reveal(
+				env, bounty_id, check_hash, params, blobs, check, plain, claims, trusted, check_gas, hunter, salt,
+				witness,
+			)
+		}),
 		Op::Finalize { bounty_id } => Ok(Verified::Finalize { bounty_id }),
 		Op::Reclaim { bounty_id, maker, nonce, signature } => {
 			let message = witness_types::reclaim_message(service_id, bounty_id, &maker, nonce);
@@ -423,15 +432,16 @@ pub fn refine(env: &impl RefineEnv, service_id: u32, op: Op) -> Verified {
 			check,
 			params,
 			subjects,
-			claims,
-			trusted,
+			citations: at,
 			witness,
 			check_gas,
 			signature,
-		} => refine_attest(
-			env, service_id, attester, nonce, check_hash, check, params, subjects, claims, trusted, witness,
-			check_gas, signature,
-		),
+		} => citations(env, at).and_then(|Citations { claims, trusted }| {
+			refine_attest(
+				env, service_id, attester, nonce, check_hash, check, params, subjects, claims, trusted, witness,
+				check_gas, signature,
+			)
+		}),
 	};
 	verified.unwrap_or_else(Verified::Rejected)
 }

@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
-"""Submit a work package of one work item, with extrinsics, to a JAM node.
+"""Submit a work package of work items, with extrinsics, to a JAM node.
 
-    jam-submit.py SERVICE PAYLOAD [EXTRINSIC...]
+    jam-submit.py SERVICE PAYLOAD [EXTRINSIC...] [-- PAYLOAD [EXTRINSIC...]]...
 
 PAYLOAD is hex (an optional 0x prefix), or @FILE for a file holding the hex (an op too big for one
-command-line argument, which Linux caps at 128 KiB); each EXTRINSIC is a file. Like `jamt item`, which can't
-attach extrinsics: the package is anchored at the finalized block, its lookup anchor is that
-block's parent, and the item gets the chain's full refine and accumulate gas. It's submitted with
-`submitWorkPackage` to the node at $JAM_RPC (default ws://localhost:19800) on core $JAM_CORE
-(default 0), and authorized by $JAM_AUTHORIZER (default: the PolkaJam testnet's, as `jamt` uses).
-Prints the package hash.
+command-line argument, which Linux caps at 128 KiB); each EXTRINSIC is a file. Each `--` starts
+another item for SERVICE, in the same package; accumulate applies them in order. Like `jamt item`,
+which can't attach extrinsics: the package is anchored at the finalized block, its lookup anchor
+is that block's parent, and the items share the chain's full refine and accumulate gas equally.
+It's submitted with `submitWorkPackage` to the node at $JAM_RPC (default ws://localhost:19800) on
+core $JAM_CORE (default 0), and authorized by $JAM_AUTHORIZER (default: the PolkaJam testnet's, as
+`jamt` uses). Prints the package hash. Scripts can call `submit` instead, giving each item its own
+gas.
 """
 
 import hashlib
@@ -18,6 +20,12 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from jamrpc import Rpc, b64, unb64, url  # noqa: E402
+
+# The most bytes a work package's encoding (its items' payloads, but not their extrinsics) may
+# take: PolkaJam v0.1.29's nodes refuse a bigger one ("Failed to submit work-package to even a
+# single proxy/guarantor"), though it's no chain parameter. Measured on a testnet: 203,750 bytes
+# went through, 205,000 didn't.
+MAX_PACKAGE = 200 * 1024
 
 # The authorizer `jamt` v0.1.29 names on the testnet, hosted by the Bootstrap service (0).
 TESTNET_AUTHORIZER = "f8d86b97d65319a078e5840f1614c296a5254217794dcc910e72ca174e3c2e86"
@@ -91,15 +99,18 @@ def work_package(authorizer, context, items):
     )
 
 
-def main(service, payload, files):
-    if payload.startswith("@"):
-        payload = open(payload[1:]).read().strip()
-    payload = bytes.fromhex(payload.removeprefix("0x"))
-    extrinsics = [open(f, "rb").read() for f in files]
-    rpc = Rpc(url())
+def submit(rpc, service, items, core=None):
+    """Submit `items`, each (payload, extrinsics, refine gas, accumulate gas), all bytes and ints,
+    as one work package for `service` on `core` (default $JAM_CORE, else 0). Returns its hash."""
     params = next(iter(rpc.call("parameters").values()))
+    extrinsics = [x for _, xs, _, _ in items for x in xs]
     if len(extrinsics) > params["max_extrinsics"]:
         sys.exit(f"jam-submit: {len(extrinsics)} extrinsics, at most {params['max_extrinsics']}")
+    if len(items) > params["max_work_items"]:
+        sys.exit(f"jam-submit: {len(items)} items, at most {params['max_work_items']}")
+    for name, i, limit in (("refine", 2, "max_refine_gas"), ("accumulate", 3, "max_accumulate_gas")):
+        if sum(item[i] for item in items) > params[limit]:
+            sys.exit(f"jam-submit: the items' {name} gas is over the package's {params[limit]}")
     final = rpc.call("finalizedBlock")
     lookup = rpc.call("parent", final["header_hash"])
     context = (
@@ -115,19 +126,44 @@ def main(service, payload, files):
     if info is None:
         sys.exit(f"jam-submit: no service {service} at the finalized block")
     code_hash = unb64(info)[1:33]  # after the version byte
-    item = work_item(
-        int(service), code_hash, params["max_refine_gas"], params["max_accumulate_gas"], payload, extrinsics
-    )
     authorizer = bytes.fromhex(os.environ.get("JAM_AUTHORIZER", TESTNET_AUTHORIZER))
-    package = work_package(authorizer, context, [item])
+    package = work_package(
+        authorizer, context, [work_item(int(service), code_hash, r, a, p, xs) for p, xs, r, a in items]
+    )
+    if len(package) > MAX_PACKAGE:
+        sys.exit(f"jam-submit: the package is {len(package)} bytes (extrinsics aside), at most {MAX_PACKAGE}")
     size = len(package) + sum(map(len, extrinsics))
     if size > params["max_input"]:
         sys.exit(f"jam-submit: package and extrinsics are {size} bytes, at most {params['max_input']}")
-    rpc.call("submitWorkPackage", int(os.environ.get("JAM_CORE", "0")), b64(package), [b64(x) for x in extrinsics])
-    print(f"Item submitted in package 0x{blake2b(package).hex()} with anchor at #{final['slot']}")
+    core = int(os.environ.get("JAM_CORE", "0")) if core is None else core
+    rpc.call("submitWorkPackage", core, b64(package), [b64(x) for x in extrinsics])
+    return blake2b(package), final["slot"]
+
+
+def main(service, args):
+    rpc = Rpc(url())
+    params = next(iter(rpc.call("parameters").values()))
+    specs = [[]]
+    for arg in args:
+        if arg == "--":
+            specs.append([])
+        else:
+            specs[-1].append(arg)
+    if [] in specs:
+        sys.exit(__doc__)
+    items = []
+    for payload, *files in specs:
+        if payload.startswith("@"):
+            payload = open(payload[1:]).read().strip()
+        payload = bytes.fromhex(payload.removeprefix("0x"))
+        extrinsics = [open(f, "rb").read() for f in files]
+        n = len(specs)
+        items.append((payload, extrinsics, params["max_refine_gas"] // n, params["max_accumulate_gas"] // n))
+    package, anchor = submit(rpc, service, items)
+    print(f"{len(items)} item{'s' * (len(items) > 1)} submitted in package 0x{package.hex()} with anchor at #{anchor}")
 
 
 if __name__ == "__main__":
     if len(sys.argv) < 3:
         sys.exit(__doc__)
-    main(sys.argv[1], sys.argv[2], sys.argv[3:])
+    main(sys.argv[1], sys.argv[2:])
