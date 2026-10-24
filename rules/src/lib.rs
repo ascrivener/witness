@@ -24,7 +24,7 @@ use witness_types::{
 	CheckMode, Citations, Claim, CommitRecord, Config, Gas, Hash, MAX_BLOBS, MAX_BLOBS_LEN, MAX_CHECK_GAS,
 	MAX_CHECK_LEN, MAX_CLAIM_WINDOW, MAX_MINT, MAX_PARAMS_LEN, MAX_WITNESS_LEN, MEMO_LEN,
 	MIN_CLAIM_WINDOW, MIN_COMMIT_AGE, Op, Proposal, REVEAL_GRACE, Rejection, Signature, Slot, StorageKey,
-	TEST_ASSET, TokenMemo, TrustedRef, Verified, WithdrawalMemo, blake2b256, blobs_in, merkle,
+	TEST_ASSET, TokenMemo, TrustedRef, Verified, Witness, WithdrawalMemo, blake2b256, blobs_in, merkle,
 };
 
 /// Whether this build has the test faucet (`Mint`, crediting [`TEST_ASSET`]).
@@ -307,16 +307,18 @@ fn refine_attest(
 	subjects: u8,
 	claims: Vec<AttestationClaim>,
 	trusted: Vec<TrustedRef>,
-	witness: Vec<u8>,
+	witness: Witness,
 	check_gas: Gas,
 	signature: Signature,
 ) -> Refined<Verified> {
 	if check_gas > MAX_CHECK_GAS {
 		return Err(Rejection::CheckGasTooHigh);
 	}
-	if witness.len() > MAX_WITNESS_LEN as usize {
-		return Err(Rejection::WitnessTooLong);
-	}
+	let witness = match witness {
+		Witness::Inline(w) if w.len() > MAX_WITNESS_LEN as usize => return Err(Rejection::WitnessTooLong),
+		Witness::Inline(w) => w,
+		Witness::Extrinsic(at) => env.extrinsic(at as usize).ok_or(Rejection::BadBlob)?,
+	};
 	if params.len() > MAX_PARAMS_LEN as usize {
 		return Err(Rejection::ParamsTooLong);
 	}

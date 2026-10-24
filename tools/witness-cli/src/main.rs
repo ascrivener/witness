@@ -16,8 +16,11 @@ use witness_types::{
 	Citations,
 	Account, AccountId, AdminAction, Amount, Asset, Attestation, AttestationClaim, AttestationId, BlobAt,
 	BlobHash, BlobRef, Blobs, Bounty, BountyTerms, CommitRecord, Config, Hash, MIN_CLAIM_WINDOW, Op,
-	Proposal, StorageKey, TEST_ASSET, TrustedRef, Verified, blake2b256, merkle,
+	Proposal, StorageKey, TEST_ASSET, TrustedRef, Verified, Witness, blake2b256, merkle,
 };
+
+/// The longest witness `attest` puts in the op itself; a longer one is an extrinsic.
+const INLINE_WITNESS: usize = 1024;
 
 const USAGE: &str = "\
 usage: witness <command> [--flag value ...]
@@ -499,7 +502,7 @@ fn run(command: &str, f: &Flags) -> Result<(), String> {
 		"release" => Op::Release { bounty_id: f.num("bounty")?, commitment: f.hash("commitment")? },
 		"attest" => {
 			// Extrinsic 0 is the check, whole; 1 the subjects; 2 the trusted subjects; 3 the
-			// citations, if any.
+			// citations, if any; then the witness, if it's long.
 			let service: u32 = f.num("service")?;
 			let attester = f.key("attester")?;
 			let nonce = f.num("nonce")?;
@@ -521,7 +524,17 @@ fn run(command: &str, f: &Flags) -> Result<(), String> {
 			let has_witness = ["witness", "witness-str", "witness-u64", "witness-file"].iter().any(|w| f.has(w));
 			let witness = if has_witness { f.witness()? } else { vec![] };
 			write(f.str("claim-out")?, &(claim.clone(), subjects.clone()).encode())?;
-			let citations = write_extrinsics(f.extrinsics()?, &check, &[subjects, given], Citations { claims, trusted })?;
+			let dir = f.extrinsics()?;
+			let citations = write_extrinsics(dir, &check, &[subjects, given], Citations { claims, trusted })?;
+			// A witness of more than a few bytes goes in an extrinsic of its own, next: a work
+			// package's payloads have little room.
+			let witness = if witness.len() > INLINE_WITNESS {
+				let at = citations.map_or(3, |c| c + 1);
+				write(&format!("{dir}/{at}"), &witness)?;
+				Witness::Extrinsic(at)
+			} else {
+				Witness::Inline(witness)
+			};
 			eprintln!("attestation 0x{}", to_hex(&claim.id()));
 			let attester_id = attester.verifying_key().to_bytes();
 			let message = witness_types::attest_message(service, &attester_id, nonce, &claim.id());

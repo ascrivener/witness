@@ -409,6 +409,16 @@ pub struct TrustedRef {
 	pub path: Vec<Hash>,
 }
 
+/// An attestation's witness: in the op, up to [`MAX_WITNESS_LEN`] bytes, or an extrinsic of its
+/// own, whole, as long as the work package's input allows. A work package's own bytes (its items'
+/// payloads) are few, so a long witness goes in an extrinsic. Nothing about it is signed or
+/// claimed: the check is what judges it.
+#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
+pub enum Witness {
+	Inline(Vec<u8>),
+	Extrinsic(u8),
+}
+
 /// What a reveal or an attestation cites: the attestations it rests on, each once, and the
 /// subjects of theirs it trusts. It travels as an extrinsic of its own rather than in the op:
 /// with a Merkle path a subject it can run to hundreds of kilobytes, and a work package's own
@@ -513,7 +523,7 @@ pub enum Op {
 		citations: Option<u8>,
 		/// The attester's evidence, passed to the check (a batch's proofs, say). Not part of the
 		/// claim: the attestation is about the subjects, however they were shown.
-		witness: Vec<u8>,
+		witness: Witness,
 		check_gas: Gas,
 		signature: Signature,
 	},
