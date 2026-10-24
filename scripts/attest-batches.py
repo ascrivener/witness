@@ -279,6 +279,10 @@ class Attester:
         attesters = self.a.attesters.split(",")
         cores = max(1, self.chain.params.get("core_count", 1))
         start, rounds, failed = time.time(), 0, 0
+        # A resumed run: what an earlier one attested (each has the claim it wrote).
+        self.attested = {n for n in range(self.total) if self.is_attested(n)}
+        if self.attested:
+            print(f"resuming: {len(self.attested)} of {self.total} attested already", flush=True)
         while len(self.attested) < self.total:
             rounds += 1
             pending = [n for n in range(self.total) if n not in self.attested]
