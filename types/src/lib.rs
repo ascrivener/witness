@@ -57,11 +57,12 @@ pub type Gas = u64;
 /// See [`AttestationClaim::id`].
 pub type AttestationId = Hash;
 
-/// Most gas a bounty may give its check. Must leave refine enough headroom for the rest of a
-/// Reveal (lookup, hashing, setting up the inner PVM) within one work-item's refine gas: the full
-/// spec allows 5×10⁹. On a network with less (PolkaJam's "tiny" parameters allow 10⁹), a check
-/// given more than refine can spend just runs out of gas.
-pub const MAX_CHECK_GAS: Gas = 4_500_000_000;
+/// Most gas a bounty or attestation may give its check: the full spec's refine gas, 5×10⁹. Refine
+/// lends a check at most what it can spare, keeping a reserve for its own work after (see the
+/// service's `check_vm`), so a check never gets more than refine has left, whatever this allows,
+/// and one that needs more just runs out of gas (as on a network with less: PolkaJam's "tiny"
+/// parameters allow 10⁹). So this is no headroom, only a bound.
+pub const MAX_CHECK_GAS: Gas = 5_000_000_000;
 /// Largest check blob a bounty may name.
 pub const MAX_CHECK_LEN: u32 = 1 << 20;
 /// Largest check parameters a bounty may carry.
