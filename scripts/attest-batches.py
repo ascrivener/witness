@@ -28,8 +28,8 @@ lands, while the validators audit it: on one machine, a round sent straight afte
 them too busy to refine it in time. Both are off by default.
 
 On a testnet (JAM_RPC, default ws://localhost:19800) it submits through jam-submit.py, next to
-this script; with --sim, through witness-sim, one item after another, which applies them the same
-way. Prints a line a round; the gas and bytes each item was given go to WORK/estimates.
+this script; with --sim, through witness-sim, a round at once (`witness-sim items`), which refines
+its items in parallel and accumulates them in order, as a block lands many packages. Prints a line a round; the gas and bytes each item was given go to WORK/estimates.
 """
 
 import argparse
@@ -105,6 +105,24 @@ class Chain:
 
     def slot(self):
         return 0 if self.sim else self.rpc.call("bestBlock")["slot"]
+
+    def submit_round(self, packages):
+        """witness-sim: refine every package's (payload, extrinsics, ...) items at once, then
+        accumulate them in order. Whether each item was applied, in order."""
+        with tempfile.TemporaryDirectory() as tmp:
+            lines = []
+            for p, items in enumerate(packages):
+                for i, (payload, extrinsics, _, _) in enumerate(items):
+                    files = []
+                    for j, x in enumerate(extrinsics):
+                        files.append(f"{tmp}/{p}-{i}-{j}")
+                        open(files[-1], "wb").write(x)
+                    op = f"{tmp}/{p}-{i}.op"
+                    open(op, "w").write(payload.hex())
+                    lines.append(" ".join([op, *files]))
+            open(f"{tmp}/list", "w").write("\n".join(lines) + "\n")
+            out = run(self.sim, "items", self.a.service, f"{tmp}/list")
+        return [line.endswith(": applied") for line in out.splitlines()]
 
     def submit(self, items, core):
         """Submit (payload, extrinsics, refine gas, accumulate gas) items as one package."""
@@ -228,7 +246,7 @@ class Attester:
         # Build in parallel, but a batch only once those it trusts in this package are built: an
         # op cites their claims, which building writes.
         base, built = self.nonce(who), {}
-        with ThreadPoolExecutor(BUILDERS) as pool:
+        with ThreadPoolExecutor(os.cpu_count() if self.chain.sim else BUILDERS) as pool:
             def build(i, n):
                 for m in self.deps[n] & built.keys():
                     built[m].result()
@@ -261,13 +279,24 @@ class Attester:
         attesters = self.a.attesters.split(",")
         cores = max(1, self.chain.params.get("core_count", 1))
         start, rounds, failed = time.time(), 0, 0
+        # A resumed run: what an earlier one attested (each has the claim it wrote).
+        self.attested = {n for n in range(self.total) if self.is_attested(n)}
+        if self.attested:
+            print(f"resuming: {len(self.attested)} of {self.total} attested already", flush=True)
         while len(self.attested) < self.total:
             rounds += 1
             pending = [n for n in range(self.total) if n not in self.attested]
             taken, refused, sent = set(), set(), []
+            packages = []
             for i, who in enumerate(attesters):
                 items = self.package(who, pending, taken | refused)
                 if not items:
+                    continue
+                if self.chain.sim:
+                    # Submitted with the round's other packages, below.
+                    packages.append(items)
+                    taken.update(n for n, _ in items)
+                    sent.append([n for n, _ in items])
                     continue
                 try:
                     self.chain.submit([item for _, item in items], i % cores)
@@ -286,6 +315,19 @@ class Attester:
                 time.sleep(POLL)
                 continue
             failed = 0
+            if self.chain.sim:
+                applied = self.chain.submit_round([[item for _, item in items] for items in packages])
+                numbers = [n for items in packages for n, _ in items]
+                landed = {n for n, ok in zip(numbers, applied) if ok}
+                self.attested |= landed
+                for n in taken - landed:
+                    self.tries[n] += 1
+                    if self.tries[n] > GIVE_UP_AFTER:
+                        sys.exit(f"attest-batches.py: batch {n} wasn't attested after {self.tries[n]} tries")
+                print(f"round {rounds}: {len(landed)} of {len(taken)} batches attested in {len(sent)} packages "
+                      f"({', '.join(str(len(s)) for s in sent)} items); {len(self.attested)} of {self.total} attested, "
+                      f"{time.time() - start:.0f} s", flush=True)
+                continue
             # Wait for the round to land: everything sent attested, or the deadline.
             waiting = set(taken)
             deadline = self.chain.slot() + LAND_SLOTS
