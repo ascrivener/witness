@@ -216,12 +216,29 @@ class Attester:
 
     def package(self, who, pending, taken):
         """Choose batches for who's next package, from pending in order, and build them."""
+        with ThreadPoolExecutor(os.cpu_count() if self.chain.sim else BUILDERS) as pool:
+            return self.assemble(who, self.choose(pending, taken), pool)
+
+    def round(self, attesters, pending, taken):
+        """witness-sim: every attester's package for a round, chosen in turn and built at once."""
+        chosen = []
+        for who in attesters:
+            chosen.append(self.choose(pending, taken))
+            taken = taken | set(chosen[-1])
+        with ThreadPoolExecutor(os.cpu_count()) as pool, ThreadPoolExecutor(len(attesters)) as packages:
+            done = [packages.submit(self.assemble, who, c, pool) for who, c in zip(attesters, chosen)]
+            return [d.result() for d in done]
+
+    def choose(self, pending, taken):
+        """Batches for a package, from pending in order: as many as fit, by estimate."""
         p = self.chain.params
         room = {"refine": self.a.package_gas or p["max_refine_gas"], "accumulate": p["max_accumulate_gas"],
                 "input": int(0.95 * p["max_input"]), "package": MAX_PACKAGE, "items": p["max_work_items"]}
-        chosen = []
+        chosen, mine = [], set()
         for n in pending:
-            if n in taken or not self.deps[n] <= self.attested | set(chosen):
+            if not room["items"]:
+                break
+            if n in taken or not all(m in self.attested or m in mine for m in self.deps[n]):
                 continue
             alone = self.tries[n] > ALONE_AFTER
             if alone and chosen:
@@ -234,6 +251,7 @@ class Attester:
             if chosen and not (fits and room["items"]):
                 continue
             chosen.append(n)
+            mine.add(n)
             room["refine"] -= refine
             room["accumulate"] -= accumulate
             room["input"] -= size
@@ -241,19 +259,23 @@ class Attester:
             room["items"] -= 1
             if alone:
                 break
+        return chosen
+
+    def assemble(self, who, chosen, pool):
+        """Build who's package of the batches chosen, in pool: the longest prefix that fits."""
         if not chosen:
             return []
+        p = self.chain.params
         # Build in parallel, but a batch only once those it trusts in this package are built: an
         # op cites their claims, which building writes.
         base, built = self.nonce(who), {}
-        with ThreadPoolExecutor(os.cpu_count() if self.chain.sim else BUILDERS) as pool:
-            def build(i, n):
-                for m in self.deps[n] & built.keys():
-                    built[m].result()
-                return self.build(n, who, base + i)
-            for i, n in enumerate(chosen):
-                built[n] = pool.submit(build, i, n)
-            ops = [built[n].result() for n in chosen]
+        def build(i, n):
+            for m in self.deps[n] & built.keys():
+                built[m].result()
+            return self.build(n, who, base + i)
+        for i, n in enumerate(chosen):
+            built[n] = pool.submit(build, i, n)
+        ops = [built[n].result() for n in chosen]
         # Keep the longest prefix that fits as built: dropping from the end keeps nonces in order.
         refine_limit = self.a.package_gas or p["max_refine_gas"]
         items, refine, accumulate, size, package, count = [], 0, 0, 0, 512, 0
@@ -288,8 +310,10 @@ class Attester:
             pending = [n for n in range(self.total) if n not in self.attested]
             taken, refused, sent = set(), set(), []
             packages = []
+            if self.chain.sim:
+                built = self.round(attesters, pending, taken | refused)
             for i, who in enumerate(attesters):
-                items = self.package(who, pending, taken | refused)
+                items = built[i] if self.chain.sim else self.package(who, pending, taken | refused)
                 if not items:
                     continue
                 if self.chain.sim:
