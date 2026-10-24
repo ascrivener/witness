@@ -46,6 +46,141 @@ use witness_types::{
 	program::{Access, Heap, PAGE_SIZE, StandardProgram, initialize},
 };
 
+/// Run check `blob` on `args` in windows of `window` gas, printing for each window the pages it
+/// read and wrote: what pausing the check at that window's end, and resuming it elsewhere, would
+/// carry. Pages are mapped only when touched: read-only at first, writable on the first write.
+fn profile_pages(blob: &[u8], args: &[u8], window: Gas) -> Result<(), Rejection> {
+	use std::collections::{BTreeMap as Map, BTreeSet as Set};
+	fn bad<E>(_: E) -> Rejection {
+		Rejection::BadCheckBlob
+	}
+	let program = StandardProgram::parse_jam_blob(blob).ok_or(Rejection::BadCheckBlob)?;
+	let layout = initialize(&program, args).ok_or(Rejection::BadCheckBlob)?;
+	let mut config = Config::from_env().map_err(bad)?;
+	config.set_allow_dynamic_paging(true);
+	if config.default_cost_model().is_none() {
+		config.set_default_cost_model(Some(CostModelKind::Full(CacheModel::L2Hit)));
+	}
+	let engine = Engine::new(&config).map_err(bad)?;
+	let mut module_config = ModuleConfig::new();
+	module_config.set_page_size(PAGE_SIZE as u32);
+	module_config.set_gas_metering(Some(GasMeteringKind::Sync));
+	module_config.set_dynamic_paging(true);
+	let mut parts = ProgramParts::empty(InstructionSetKind::JamV1);
+	parts.code_and_jump_table = ArcBytes::from(layout.code.to_vec());
+	let program_blob = ProgramBlob::from_parts(parts).map_err(bad)?;
+	let module = Module::from_blob(&engine, &module_config, program_blob).map_err(bad)?;
+	let mut vm = module.instantiate().map_err(bad)?;
+	// Every page's contents, kept here between windows; and which pages may be mapped.
+	let page_len = PAGE_SIZE as usize;
+	let mut contents: Map<u64, Vec<u8>> = Map::new();
+	let mut valid: Set<u64> = Set::new();
+	for region in &layout.regions {
+		for i in 0..region.pages {
+			let page = region.first_page + i;
+			valid.insert(page);
+			let start = (i as usize * page_len).min(region.data.len());
+			let end = ((i as usize + 1) * page_len).min(region.data.len());
+			if start < end {
+				let mut data = region.data[start..end].to_vec();
+				data.resize(page_len, 0);
+				contents.insert(page, data);
+			}
+		}
+	}
+	for (reg, value) in Reg::ALL.into_iter().zip(layout.registers) {
+		vm.set_reg(reg, value);
+	}
+	vm.set_next_program_counter(ProgramCounter(0));
+	let mut heap = Heap::new(&layout, MAX_CHECK_PAGES as u64);
+	let (mut read, mut written): (Set<u64>, Set<u64>) = (Set::new(), Set::new());
+	let (mut ever_read, mut ever_written): (Set<u64>, Set<u64>) = (Set::new(), Set::new());
+	let (mut windows, mut used) = (0u64, 0u64);
+	// Pages an earlier window wrote, and the window that last wrote each: a window that reads one
+	// has to be given it. Those last written in the first window, while the check loads what it's
+	// given, could be rebuilt each step instead; the rest are the check's own state.
+	let mut carried: Set<u64> = Set::new();
+	let mut last_write: Map<u64, u64> = Map::new();
+	let report = |n: u64, read: &Set<u64>, written: &Set<u64>, carried: &Set<u64>, last_write: &Map<u64, u64>| {
+		let given: Vec<u64> = read.intersection(carried).copied().collect();
+		let early = given.iter().filter(|p| last_write.get(p) == Some(&1)).count();
+		println!(
+			"window {n}: {} pages read, {} carried ({} MiB): {early} last written in window 1 ({} MiB), {} since ({} MiB); {} written",
+			read.len(),
+			given.len(),
+			given.len() * 4 / 1024,
+			early * 4 / 1024,
+			given.len() - early,
+			(given.len() - early) * 4 / 1024,
+			written.len()
+		);
+	};
+	vm.set_gas(window as i64);
+	let outcome = loop {
+		match vm.run().map_err(bad)? {
+			InterruptKind::Segfault(fault) => {
+				let page = u64::from(fault.page_address) / PAGE_SIZE;
+				if fault.is_write_protected {
+					written.insert(page);
+					ever_written.insert(page);
+					vm.unprotect_memory(fault.page_address, PAGE_SIZE as u32).map_err(bad)?;
+					continue;
+				}
+				if !valid.contains(&page) {
+					break "page fault";
+				}
+				read.insert(page);
+				ever_read.insert(page);
+				vm.zero_memory_with_memory_protection(fault.page_address, PAGE_SIZE as u32, MemoryProtection::ReadWrite)
+					.map_err(bad)?;
+				if let Some(data) = contents.get(&page) {
+					vm.write_memory(fault.page_address, data).map_err(bad)?;
+				}
+				vm.protect_memory(fault.page_address, PAGE_SIZE as u32).map_err(bad)?;
+			},
+			InterruptKind::NotEnoughGas => {
+				// A pause: keep what this window wrote, unmap everything, and go on.
+				windows += 1;
+				used += window;
+				report(windows, &read, &written, &carried, &last_write);
+				carried.extend(written.iter().copied());
+				for &page in &written {
+					last_write.insert(page, windows);
+				}
+				for &page in &written {
+					contents.insert(page, vm.read_memory((page * PAGE_SIZE) as u32, PAGE_SIZE as u32).map_err(bad)?);
+				}
+				for &page in &read {
+					vm.free_pages((page * PAGE_SIZE) as u32, PAGE_SIZE as u32).map_err(bad)?;
+				}
+				read.clear();
+				written.clear();
+				vm.set_gas(window as i64);
+			},
+			InterruptKind::Ecalli(GROW_HEAP) => {
+				if let Some((first, count)) = heap.grow(vm.reg(Reg::A0)) {
+					valid.extend(first..first + count);
+				}
+				vm.set_reg(Reg::A0, heap.end_page);
+			},
+			InterruptKind::Finished => break if vm.reg(Reg::A0) == 1 { "true" } else { "false" },
+			InterruptKind::Trap => break "panic",
+			InterruptKind::Ecalli(_) => break "host call",
+			InterruptKind::Step => continue,
+		}
+	};
+	used += window - vm.gas().max(0) as u64;
+	report(windows + 1, &read, &written, &carried, &last_write);
+	println!(
+		"{outcome} after {used} gas in {} windows; {} distinct pages read, {} written ({} MiB)",
+		windows + 1,
+		ever_read.len(),
+		ever_written.len(),
+		ever_written.len() * 4 / 1024
+	);
+	Ok(())
+}
+
 /// The one host call a check may make: grow its heap.
 const GROW_HEAP: u32 = 1;
 /// What `grow_heap` costs a service in PolkaJam v0.1.29 (`jam_types::gas_costs`).
@@ -362,6 +497,15 @@ fn main() -> ExitCode {
 					println!("{result:?}: used {used} gas of {gas}");
 					ExitCode::SUCCESS
 				},
+				Err(rejection) => fail(&format!("{rejection:?}")),
+			};
+		},
+		["pages", blob, args, window] => {
+			let (Ok(blob), Ok(args), Ok(window)) = (std::fs::read(blob), std::fs::read(args), window.parse::<Gas>()) else {
+				return fail("pages BLOB ARGS WINDOW: cannot read BLOB or ARGS, or WINDOW is not a number");
+			};
+			return match profile_pages(&blob, &args, window) {
+				Ok(()) => ExitCode::SUCCESS,
 				Err(rejection) => fail(&format!("{rejection:?}")),
 			};
 		},
