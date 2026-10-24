@@ -13,6 +13,7 @@
 # Reveals and attestations carry their blobs as extrinsics, which `jamt item` can't send, so on a
 # testnet every item goes through scripts/jam-submit.py instead.
 #
+# Both first send witness a deposit before it's configured, which comes back to its sender.
 # --quick (about 6 minutes, a third of it starting the testnet) then mints, creates two bounties,
 # commits, and reveals a wrong and a right witness on each. Then it attests a batch of two word
 # volumes and a third on one of them, refuses a bad one, and reveals on a bounty that cites two
@@ -254,9 +255,17 @@ step "deploying"
 # witness_types::DEPOSIT_GAS: what witness needs to credit a deposit.
 SVC=$(deploy out/witness-service.jam 300000)
 echo "service $SVC"
-TOKEN_SVC=$(deploy out/mock-token-service.jam 300000)
+# The token service's memo gas covers paying out a withdrawal, and stays under what a deposit's
+# DEPOSIT_GAS leaves witness for sending one back as a refund.
+TOKEN_SVC=$(deploy out/mock-token-service.jam 100000)
 echo "test token service $TOKEN_SVC"
 wait_slot $(( $(slot) + 3 ))
+# Unconfigured, witness accepts no token service, so a deposit goes back to its sender.
+step "a deposit witness can't credit is refunded"
+token_item "$($W token-faucet --to alice --asset 2 --amount 50)"
+token_item "$($W token-send --from alice --asset 2 --amount 50 --to-service "$SVC" --to alice)"
+expect "the token service paid alice back" '^50$' token --account alice --asset 2
+expect "witness holds none of it" '^none$' token --service-holder "$SVC" --asset 2
 # The first configuration applies at once. Spam deposits are in the faucet's test asset.
 item "$($W propose --service "$SVC" --nonce 0 --token-services "$TOKEN_SVC" --fee-asset test \
 	--commit-deposit 10 --attest-deposit 10)"

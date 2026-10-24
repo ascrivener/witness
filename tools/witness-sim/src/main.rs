@@ -177,7 +177,13 @@ impl Sim {
 					self.log(&format!("deposit from service {TOKEN_SERVICE}"));
 					self.apply(effects);
 				},
-				Err(reason) => self.log(&format!("transfer from service {TOKEN_SERVICE}: {reason}")),
+				Err(reason) => {
+					self.log(&format!("transfer from service {TOKEN_SERVICE}: {reason}"));
+					if let Some(refund) = witness_rules::refund(&memo) {
+						self.log(&format!("refunded the deposit to service {TOKEN_SERVICE}"));
+						self.apply(witness_rules::Effects { transfers: vec![(TOKEN_SERVICE, refund)], ..Default::default() });
+					}
+				},
 			}
 		}
 	}
