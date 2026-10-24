@@ -478,7 +478,7 @@ impl Chain {
 			params: params.to_vec(),
 			subjects,
 			citations: (!citations.claims.is_empty()).then(|| self.env.add_citations(&citations)),
-			witness: b"proof".to_vec(),
+			witness: Witness::Inline(b"proof".to_vec()),
 			check_gas: 1000,
 			signature: key(attester).sign(&msg).to_bytes(),
 		};
@@ -932,11 +932,24 @@ fn attesting_a_batch() {
 	// The witness reaches the check.
 	let (mut op, _) = c.attest_op(CAROL, check(), b"batch", list, &[]);
 	let Op::Attest { witness, .. } = &mut op else { unreachable!() };
-	*witness = b"no".to_vec();
+	*witness = Witness::Inline(b"no".to_vec());
 	assert_eq!(c.refine(op.clone()), check_says_no);
-	// It isn't part of the claim, so changing it leaves the signature valid.
+	// As an extrinsic too, whole; one that isn't there is refused, and in the op, it's limited.
+	let no = c.env.add(b"no".to_vec());
 	let Op::Attest { witness, .. } = &mut op else { unreachable!() };
-	*witness = b"other proof".to_vec();
+	*witness = Witness::Extrinsic(no);
+	assert_eq!(c.refine(op.clone()), check_says_no);
+	let Op::Attest { witness, .. } = &mut op else { unreachable!() };
+	*witness = Witness::Extrinsic(u8::MAX);
+	assert_eq!(c.refine(op.clone()), rejected(Rejection::BadBlob));
+	let Op::Attest { witness, .. } = &mut op else { unreachable!() };
+	*witness = Witness::Inline(vec![0; MAX_WITNESS_LEN as usize + 1]);
+	assert_eq!(c.refine(op.clone()), rejected(Rejection::WitnessTooLong));
+	// It isn't part of the claim, so changing it leaves the signature valid; and an extrinsic
+	// can be longer than the op allows.
+	let long = c.env.add(vec![7; MAX_WITNESS_LEN as usize + 1]);
+	let Op::Attest { witness, .. } = &mut op else { unreachable!() };
+	*witness = Witness::Extrinsic(long);
 	c.submit(op).unwrap();
 
 	// The signature covers the claim, so it can't be replayed for other subjects.
