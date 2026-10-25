@@ -14,6 +14,7 @@ members = [
 	"tools/witness-sim",
 	"tools/mock-token",
 	"tools/mock-token-service",
+	"tools/evm-report",
 ]
 # The service only makes sense as a PVM blob; build it (and check blobs) with `cargo jam-build`.
 # Check crates are default members so `cargo test` runs their host tests.
@@ -29,6 +30,7 @@ default-members = [
 	"tools/witness-cli",
 	"tools/witness-sim",
 	"tools/mock-token",
+	"tools/evm-report",
 ]
 
 [workspace.package]

@@ -13,10 +13,14 @@
 //! anything the report didn't prove fails the check, so the replay sees only proven state. This
 //! is the stateless execution zkEVM provers do, without the zero knowledge.
 //!
-//! Transactions aren't signed: a report may send from any account it proves, so it shows that
-//! *someone* could break the invariant, which is what a bounty pays for. Gas costs nothing (gas
-//! price zero, base fee off) and nonces aren't checked, but value transfers need proven balance.
-//! `BLOCKHASH` is not supported in this version: it fails the check.
+//! Transactions aren't signed, and they come only from [`HUNTERS`] fresh accounts, [`hunter`]
+//! addresses derived from the next block's `prevrandao`, each starting with [`Params::capital`]
+//! wei and nothing else. Nobody could know those addresses before block N's successor, so no
+//! contract in block N's state can single them out: a report shows that *anyone* could break the
+//! invariant, which is what a bounty pays for, and can't act as a protocol's owner or admin. A
+//! hunter gets tokens the way an attacker would, by trading or borrowing them on chain. Gas costs
+//! nothing (gas price zero, base fee off) and nonces aren't checked. `BLOCKHASH` is not supported
+//! in this version: it fails the check.
 //!
 //! [`Report::stop_after`] lets a measurement stop the check after a phase. Stopping early always
 //! returns false, so it can't make a report win; it only shows what each phase costs in gas.
@@ -42,8 +46,23 @@ use revm::{
 /// Where the invariant's code runs. A report can't prove an account here.
 pub const INVARIANT: Address = address!("00000000000000000000000000000000696e7631");
 
-/// Gas the invariant gets each time it runs.
-pub const INVARIANT_GAS: u64 = 30_000_000;
+/// Who calls the invariant: an empty account, since EIP-3607 forbids sending from one with code.
+pub const INVARIANT_CALLER: Address = address!("00000000000000000000000000000000696e7630");
+
+/// How many hunter accounts a report may send from.
+pub const HUNTERS: u8 = 4;
+
+/// Hunter `i`'s address, for a block whose `prevrandao` is given.
+pub fn hunter(prevrandao: B256, i: u8) -> Address {
+	let mut preimage = [0u8; 58];
+	preimage[..25].copy_from_slice(b"witness evm-bounty hunter");
+	preimage[25..57].copy_from_slice(prevrandao.as_slice());
+	preimage[57] = i;
+	Address::from_word(keccak256(preimage))
+}
+
+/// Gas the invariant gets each time it runs: the most a transaction may have since Osaka (EIP-7825).
+pub const INVARIANT_GAS: u64 = 1 << 24;
 
 /// The bounty's terms.
 #[derive(Clone, Debug, PartialEq, Eq, RlpEncodable, RlpDecodable)]
@@ -59,6 +78,8 @@ pub struct Params {
 	pub basefee: u64,
 	pub coinbase: Address,
 	pub prevrandao: B256,
+	/// Wei each hunter starts with.
+	pub capital: U256,
 	/// Runtime code, run at [`INVARIANT`] with empty calldata before and after the transactions.
 	pub invariant: Bytes,
 }
@@ -99,10 +120,10 @@ pub struct AccountWitness {
 	pub slots: Vec<Slot>,
 }
 
-/// A transaction to replay. Unsigned: `caller` is any account the report proves.
+/// A transaction to replay, unsigned, from hunter number `hunter` (less than [`HUNTERS`]).
 #[derive(Clone, Debug, PartialEq, Eq, RlpEncodable, RlpDecodable)]
 pub struct Tx {
-	pub caller: Address,
+	pub hunter: u8,
 	/// Deploy `data` as init code instead of calling `to`.
 	pub create: bool,
 	pub to: Address,
@@ -143,7 +164,8 @@ pub enum Outcome {
 	Holds,
 	/// Stopped after this phase, as the report asked.
 	Stopped(Phase),
-	/// Params or report don't decode, or name the invariant's address, or repeat an account or slot.
+	/// Params or report don't decode, prove an account the check makes up (the invariant's, its
+	/// caller's or a hunter's), repeat an account or slot, or send from no hunter.
 	Malformed,
 	/// A proof doesn't verify, or code doesn't match its hash.
 	BadProof,
@@ -172,6 +194,8 @@ struct ProvenDb {
 	/// `None` for an account proven absent.
 	accounts: BTreeMap<Address, Option<AccountInfo>>,
 	storage: BTreeMap<(Address, U256), U256>,
+	/// The accounts the check makes up, whose storage is all zero.
+	made_up: Vec<Address>,
 }
 
 impl Database for ProvenDb {
@@ -189,8 +213,7 @@ impl Database for ProvenDb {
 	fn storage(&mut self, address: Address, index: U256) -> Result<U256, Unproven> {
 		match self.storage.get(&(address, index)) {
 			Some(value) => Ok(*value),
-			// The invariant's account is fresh: all its storage is zero.
-			None if address == INVARIANT => Ok(U256::ZERO),
+			None if self.made_up.contains(&address) => Ok(U256::ZERO),
 			None => Err(Unproven),
 		}
 	}
@@ -207,7 +230,7 @@ fn key(hashed: B256) -> Nibbles {
 /// Verify `witness` against `state_root` and add what it proves to `db`.
 fn prove(db: &mut ProvenDb, state_root: B256, witness: &AccountWitness) -> Result<(), Outcome> {
 	let AccountWitness { address, exists, account, proof, code, slots } = witness;
-	if *address == INVARIANT || db.accounts.contains_key(address) {
+	if db.accounts.contains_key(address) {
 		return Err(Outcome::Malformed);
 	}
 	if !exists && *account != TrieAccount::empty() {
@@ -238,7 +261,7 @@ fn prove(db: &mut ProvenDb, state_root: B256, witness: &AccountWitness) -> Resul
 
 fn invariant_call() -> TxEnv {
 	TxEnv {
-		caller: INVARIANT,
+		caller: INVARIANT_CALLER,
 		kind: TxKind::Call(INVARIANT),
 		gas_limit: INVARIANT_GAS,
 		..TxEnv::default()
@@ -257,35 +280,64 @@ fn holds(result: &ExecutionResult) -> Option<bool> {
 
 /// Run the whole check on encoded params and report.
 pub fn run(params: &[u8], report: &[u8]) -> Outcome {
-	match run_phases(params, report) {
-		Ok(outcome) | Err(outcome) => outcome,
+	run_measured(params, report).0
+}
+
+/// [`run`], also returning the EVM gas the report's transactions used, for host tools.
+pub fn run_measured(params: &[u8], report: &[u8]) -> (Outcome, u64) {
+	let mut evm_gas = 0;
+	match run_phases(params, report, &mut evm_gas) {
+		Ok(outcome) | Err(outcome) => (outcome, evm_gas),
 	}
 }
 
-fn run_phases(mut params: &[u8], mut report: &[u8]) -> Result<Outcome, Outcome> {
+fn run_phases(mut params: &[u8], mut report: &[u8], evm_gas: &mut u64) -> Result<Outcome, Outcome> {
 	let params = Params::decode(&mut params).map_err(|_| Outcome::Malformed)?;
 	let report = Report::decode(&mut report).map_err(|_| Outcome::Malformed)?;
-	let stop = |phase: Phase| if report.stop_after == phase as u8 { Err(Outcome::Stopped(phase)) } else { Ok(()) };
-	stop(Phase::Decode)?;
+	stop(report.stop_after, Phase::Decode)?;
 
-	let spec = SpecId::try_from_u8(params.spec).ok_or(Outcome::Malformed)?;
+	// Made-up accounts go in first, so a report that proves one is malformed.
 	let mut db = ProvenDb::default();
+	for (address, info) in made_up(&params) {
+		db.made_up.push(address);
+		db.accounts.insert(address, Some(info));
+	}
 	for witness in &report.accounts {
 		prove(&mut db, params.state_root, witness)?;
 	}
-	let invariant = Bytecode::new_raw(params.invariant.clone());
-	db.accounts.insert(
-		INVARIANT,
-		Some(AccountInfo {
-			balance: U256::ZERO,
-			nonce: 1,
-			code_hash: invariant.hash_slow(),
-			account_id: None,
-			code: Some(invariant),
-		}),
-	);
-	stop(Phase::Proofs)?;
+	stop(report.stop_after, Phase::Proofs)?;
 
+	replay(&params, db, report.txs, report.stop_after, evm_gas)
+}
+
+fn stop(stop_after: u8, phase: Phase) -> Result<(), Outcome> {
+	if stop_after == phase as u8 { Err(Outcome::Stopped(phase)) } else { Ok(()) }
+}
+
+/// The accounts the check makes up rather than proves, all with zero storage: the invariant's,
+/// holding its code, its caller, and the hunters, each holding [`Params::capital`].
+pub fn made_up(params: &Params) -> Vec<(Address, AccountInfo)> {
+	let code = Bytecode::new_raw(params.invariant.clone());
+	let invariant = AccountInfo { balance: U256::ZERO, nonce: 1, code_hash: code.hash_slow(), account_id: None, code: Some(code) };
+	let mut accounts = alloc::vec![(INVARIANT, invariant), (INVARIANT_CALLER, AccountInfo::default())];
+	for i in 0..HUNTERS {
+		accounts.push((hunter(params.prevrandao, i), AccountInfo { balance: params.capital, ..AccountInfo::default() }));
+	}
+	accounts
+}
+
+/// Run the invariant, the transactions and the invariant again on `db`, from phase
+/// [`Phase::Proofs`] on, adding the transactions' EVM gas to `evm_gas`. The check runs it on proven
+/// state; host tools run it on whatever state they have, to see what a report has to prove. `db`
+/// must answer for the accounts [`made_up`] makes up as it says.
+pub fn replay<DB: Database>(
+	params: &Params,
+	db: DB,
+	txs: Vec<Tx>,
+	stop_after: u8,
+	evm_gas: &mut u64,
+) -> Result<Outcome, Outcome> {
+	let spec = SpecId::try_from_u8(params.spec).ok_or(Outcome::Malformed)?;
 	let mut evm = Context::mainnet()
 		.with_db(db)
 		.modify_cfg_chained(|cfg| {
@@ -310,12 +362,15 @@ fn run_phases(mut params: &[u8], mut report: &[u8]) -> Result<Outcome, Outcome> 
 	if holds(&before.result) != Some(true) {
 		return Err(Outcome::BadInvariant);
 	}
-	stop(Phase::InvariantBefore)?;
+	stop(stop_after, Phase::InvariantBefore)?;
 
-	for tx in report.txs {
+	for tx in txs {
+		if tx.hunter >= HUNTERS {
+			return Err(Outcome::Malformed);
+		}
 		let kind = if tx.create { TxKind::Create } else { TxKind::Call(tx.to) };
 		let env = TxEnv {
-			caller: tx.caller,
+			caller: hunter(params.prevrandao, tx.hunter),
 			kind,
 			value: tx.value,
 			data: tx.data,
@@ -325,9 +380,9 @@ fn run_phases(mut params: &[u8], mut report: &[u8]) -> Result<Outcome, Outcome> 
 		};
 		// A reverted transaction is fine; an invalid one, or one that read unproven state, isn't.
 		// Each runs on the journal its predecessors left, as `transact_many` does.
-		evm.transact_one(env).map_err(|_| Outcome::TxFailed)?;
+		*evm_gas += evm.transact_one(env).map_err(|_| Outcome::TxFailed)?.tx_gas_used();
 	}
-	stop(Phase::Transactions)?;
+	stop(stop_after, Phase::Transactions)?;
 
 	let after = evm.transact_one(invariant_call()).map_err(|_| Outcome::BadInvariant)?;
 	match holds(&after) {
