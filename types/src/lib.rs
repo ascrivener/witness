@@ -409,10 +409,10 @@ pub struct TrustedRef {
 	pub path: Vec<Hash>,
 }
 
-/// An attestation's witness: in the op, up to [`MAX_WITNESS_LEN`] bytes, or an extrinsic of its
-/// own, whole, as long as the work package's input allows. A work package's own bytes (its items'
-/// payloads) are few, so a long witness goes in an extrinsic. Nothing about it is signed or
-/// claimed: the check is what judges it.
+/// A reveal's or an attestation's witness: in the op, up to [`MAX_WITNESS_LEN`] bytes, or an
+/// extrinsic of its own, whole, as long as the work package's input allows. A work package's own
+/// bytes (its items' payloads) are few, so a long witness goes in an extrinsic. Either way it is
+/// the same bytes to the check and to a reveal's commitment.
 #[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
 pub enum Witness {
 	Inline(Vec<u8>),
@@ -499,7 +499,7 @@ pub enum Op {
 		check_gas: Gas,
 		hunter: AccountId,
 		salt: Hash,
-		witness: Vec<u8>,
+		witness: Witness,
 	},
 	/// Pay the winner once the claim window has closed. Anyone may send it.
 	Finalize { bounty_id: BountyId },

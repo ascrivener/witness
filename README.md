@@ -341,9 +341,9 @@ or did not apply it.
 - The latest Gray Paper (0.8.0 on `main`) replaces `machine(code, pc)` with `compile` (which can
   load a preimage by hash directly) followed by `machine(handle, pc)`. SDK 0.1.29 still exposes
   `machine(code, pc)`, so the service follows the SDK. Revisit when the SDK moves.
-- A reveal's witness comes from the work-item payload, so it's limited to `MAX_WITNESS_LEN`
-  (64 KiB). An attestation's can be an extrinsic instead (`Witness::Extrinsic`), limited only by
-  the package's input; the CLI puts any over 1 KiB there.
+- A reveal's or attestation's witness in the work-item payload is limited to `MAX_WITNESS_LEN`
+  (64 KiB). It can be an extrinsic instead (`Witness::Extrinsic`), limited only by the package's
+  input; the CLI puts any over 1 KiB there.
 - The limits (`MAX_CHECK_LEN`, `MAX_CHECK_PAGES`, `MAX_CHECK_GAS`, `MAX_BLOBS_LEN`) are constants.
 - Closed bounties stay in storage as a record. Only their commitments are cleaned up.
 - Attestations are never released.
