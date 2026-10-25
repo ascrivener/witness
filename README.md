@@ -144,13 +144,18 @@ checks/blake2b-preimage/   sample: x is a Blake2b-256 preimage of H (params: H)
 checks/dictionary/         sample: x is dictionary words hashing to D leading zero bits (blob: the
                            dictionary; params: D)
 checks/sorted-words/       sample that attests: as dictionary, over attested sorted word volumes
+checks/evm-bounty/         spike: settled bug bounties, replaying a report's Ethereum transactions in
+                           revm against Merkle-proven state (docs/design/settled-bug-bounties.md)
 tools/witness-cli/         builds work-item payloads as hex, and reads state (`witness`)
 tools/witness-sim/         runs ops natively in place of a testnet, checks in PolkaVM
 tools/mock-token/          a test-only token service's rules: deposits into and withdrawals from
                            witness, as a real one would send and take them
 tools/mock-token-service/  that, as a JAM service
+tools/evm-report/          builds the evm-bounty check's test cases: toy contracts in synthetic state
+                           with mainnet-deep proofs
 tools/full-gas-spec/       raises a PolkaJam dev chain spec's refine limit to the full spec's
 scripts/e2e.sh             end-to-end test on a local PolkaJam testnet
+scripts/evm-bounty-gas.sh  measures the evm-bounty check's gas, phase by phase, on evm-report's cases
 scripts/jam-submit.py      submits work packages with extrinsics, several items to one
 scripts/attest-batches.py  attests a DAG of batches in parallel: several attesters, several batches
                            to a package

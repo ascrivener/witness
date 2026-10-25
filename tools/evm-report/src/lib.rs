@@ -565,6 +565,22 @@ mod tests {
 	}
 
 	#[test]
+	fn only_hunters_send() {
+		let mut case = pair_exploit();
+		case.report.txs[0].hunter = evm_bounty_check::HUNTERS;
+		assert_eq!(run(&case), Outcome::Malformed);
+	}
+
+	#[test]
+	fn a_report_cannot_prove_a_hunter() {
+		let mut case = pair_exploit();
+		let mut fake = case.report.accounts[0].clone();
+		fake.address = hunter();
+		case.report.accounts.push(fake);
+		assert_eq!(run(&case), Outcome::Malformed);
+	}
+
+	#[test]
 	fn a_route_holds() {
 		let case = route(4);
 		assert_eq!(case.expected, Outcome::Holds);
