@@ -1,0 +1,20 @@
+[package]
+name = "evm-invariant-check"
+description = "Witness check for settled bug bounties: replay transactions in revm against state proven by Merkle-Patricia proofs, then evaluate an invariant"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+# A check has one entry point at pc 0, which is the authorizer layout.
+[package.metadata.jam]
+type = "authorizer"
+
+[dependencies]
+witness-check = { workspace = true, features = ["alloc"] }
+polkavm-derive.workspace = true
+revm = { version = "43.0.3", default-features = false }
+alloy-trie = { version = "0.9.8", default-features = false }
+
+[dev-dependencies]
+witness-types = { workspace = true, features = ["std"] }
