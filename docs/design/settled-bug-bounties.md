@@ -222,8 +222,12 @@ a service in itself: probably the business's main product, more than the check.
 1. ~~Make reports extrinsics; get the blob under the limit.~~ Done.
 2. Adversarial hardening of the check (items 3–5 above), with a review by someone outside.
 3. Bounty terms for disclosure: patch window, minimum commit-to-reveal delay.
-4. A witness-sim demo of about a dozen cases, including measurements on real mainnet state
-   (needs an RPC, and an archive node for older blocks), and real-size contract code.
+4. A witness-sim demo, **started**: `scripts/evm-bounty-demo.sh` runs a bounty from posting to
+   payout. A protocol escrows 5000 on its pair; a fair swap and an exploit on forged state are
+   refused; the real exploit (a 32 KB report, carried as an extrinsic, 1.0×10⁷ gas to check)
+   opens the claim window and is paid at finalize. Still to do: about a dozen cases, including
+   measurements on real mainnet state (needs an RPC, and an archive node for older blocks), and
+   real-size contract code.
 5. State roots from a light client.
 6. Invariant tooling: templates for common DeFi invariants, and a local harness (Foundry) to test
    them against the same replay.

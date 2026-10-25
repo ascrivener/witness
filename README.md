@@ -156,6 +156,7 @@ tools/evm-report/          builds the evm-bounty check's test cases: toy contrac
 tools/full-gas-spec/       raises a PolkaJam dev chain spec's refine limit to the full spec's
 scripts/e2e.sh             end-to-end test on a local PolkaJam testnet
 scripts/evm-bounty-gas.sh  measures the evm-bounty check's gas, phase by phase, on evm-report's cases
+scripts/evm-bounty-demo.sh a settled bug bounty in witness-sim: posted, three reports revealed, paid
 scripts/jam-submit.py      submits work packages with extrinsics, several items to one
 scripts/attest-batches.py  attests a DAG of batches in parallel: several attesters, several batches
                            to a package

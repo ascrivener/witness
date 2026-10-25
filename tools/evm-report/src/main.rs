@@ -6,6 +6,11 @@
 //! as the witness) with `stop_after` = p, for p in 1..=4, and `<case>.0.args` the whole check, so
 //! `witness-sim check` measures each phase by difference. `OUT_DIR/cases.tsv` says what each
 //! report holds and how the check went natively.
+//!
+//!     evm-report demo OUT_DIR
+//!
+//! writes the demo bounty's params, as hex, to `OUT_DIR/bounty.params`, and its three reports
+//! (see `evm_report::pair_bounty`) to `fair.report`, `exploit.report` and `forged.report`.
 
 use evm_bounty_check::{Report, run_measured};
 use std::{io::Write, path::PathBuf, process::ExitCode, time::Instant};
@@ -13,9 +18,13 @@ use witness_types::{CheckMode, check_args};
 
 fn main() -> ExitCode {
 	let args: Vec<String> = std::env::args().skip(1).collect();
-	let [out] = args.as_slice() else {
-		eprintln!("usage: evm-report OUT_DIR");
-		return ExitCode::FAILURE;
+	let out = match args.as_slice() {
+		[out] => out,
+		[demo, out] if demo == "demo" => return write_demo(&PathBuf::from(out)),
+		_ => {
+			eprintln!("usage: evm-report [demo] OUT_DIR");
+			return ExitCode::FAILURE;
+		},
 	};
 	let out = PathBuf::from(out);
 	std::fs::create_dir_all(&out).expect("create OUT_DIR");
@@ -58,6 +67,17 @@ fn main() -> ExitCode {
 		);
 		writeln!(tsv, "{line}").unwrap();
 		println!("{line}");
+	}
+	ExitCode::SUCCESS
+}
+
+fn write_demo(out: &PathBuf) -> ExitCode {
+	std::fs::create_dir_all(out).expect("create OUT_DIR");
+	let (params, reports) = evm_report::pair_bounty();
+	let hex: String = alloy_rlp::encode(&params).iter().map(|b| format!("{b:02x}")).collect();
+	std::fs::write(out.join("bounty.params"), format!("0x{hex}\n")).expect("write params");
+	for (name, report) in ["fair", "exploit", "forged"].iter().zip(reports) {
+		std::fs::write(out.join(format!("{name}.report")), alloy_rlp::encode(&report)).expect("write report");
 	}
 	ExitCode::SUCCESS
 }

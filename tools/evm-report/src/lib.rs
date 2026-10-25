@@ -265,6 +265,16 @@ pub struct Case {
 
 /// Build a case: replay `txs` on `world` to find what they read, add `extra` to prove, and prove it all.
 pub fn case(name: &str, world: &World, invariant: Bytes, txs: Vec<Tx>, extra: Reads) -> Case {
+	let (params, mut reports) = bounty(world, invariant, vec![txs], extra);
+	let (report, expected) = reports.remove(0);
+	Case { name: name.into(), params, report, expected }
+}
+
+/// A bounty on `world` and reports of each list of transactions, all against one state root:
+/// replay each list to find what it reads, add `extra`, and prove all of that once. Each report
+/// carries every proof, its own and the others', which the check allows. Also what each replay
+/// found, before proving anything.
+pub fn bounty(world: &World, invariant: Bytes, reports: Vec<Vec<Tx>>, extra: Reads) -> (Params, Vec<(Report, Outcome)>) {
 	let mut params = Params {
 		state_root: B256::ZERO,
 		spec: SpecId::OSAKA as u8,
@@ -279,13 +289,20 @@ pub fn case(name: &str, world: &World, invariant: Bytes, txs: Vec<Tx>, extra: Re
 		invariant,
 	};
 	let mut recorder = Recorder { world, made_up: made_up(&params).into_iter().collect(), reads: extra };
-	let mut evm_gas = 0;
-	let expected = match replay(&params, &mut recorder, txs.clone(), 0, &mut evm_gas) {
-		Ok(outcome) | Err(outcome) => outcome,
-	};
+	let expected: Vec<Outcome> = reports
+		.iter()
+		.map(|txs| match replay(&params, &mut recorder, txs.clone(), 0, &mut 0) {
+			Ok(outcome) | Err(outcome) => outcome,
+		})
+		.collect();
 	let (root, accounts) = prove(world, &recorder.reads);
 	params.state_root = root;
-	Case { name: name.into(), params, report: Report { accounts, txs, stop_after: 0 }, expected }
+	let reports = reports
+		.into_iter()
+		.zip(expected)
+		.map(|(txs, expected)| (Report { accounts: accounts.clone(), txs, stop_after: 0 }, expected))
+		.collect();
+	(params, reports)
 }
 
 // Where things live.
@@ -424,27 +441,49 @@ fn deposit(amount: U256) -> Tx {
 }
 
 /// A swap on pair 0 the way a trader would: wrap ETH, pay it in, then take the fair amount out.
-pub fn pair_swap() -> Case {
-	let world = pairs_world(1, U256::ZERO);
+pub fn fair_swap_txs() -> Vec<Tx> {
 	let amount = U256::from(1_000 * ETHER);
-	let txs = vec![
+	vec![
 		deposit(amount),
 		tx(token(0), call("transfer(address,uint256)", &[word(pair(0)), amount]), 200_000),
 		tx(pair(0), call("swap(uint256,uint256,address)", &[U256::ZERO, amount_out(amount), word(hunter())]), 300_000),
-	];
-	case("pair-swap", &world, pair_invariant(), txs, Reads::default())
+	]
 }
 
 /// The planted bug: pay 1 wei in, take 99.8% of the other reserve out. Pair 0's product drops.
-pub fn pair_exploit() -> Case {
-	let world = pairs_world(1, U256::ZERO);
+pub fn exploit_txs() -> Vec<Tx> {
 	let reserve = U256::from(RESERVE);
-	let txs = vec![
+	vec![
 		deposit(U256::from(1)),
 		tx(token(0), call("transfer(address,uint256)", &[word(pair(0)), U256::from(1)]), 200_000),
 		tx(pair(0), call("swap(uint256,uint256,address)", &[U256::ZERO, reserve - reserve / U256::from(500), word(hunter())]), 300_000),
-	];
-	case("pair-exploit", &world, pair_invariant(), txs, Reads::default())
+	]
+}
+
+pub fn pair_swap() -> Case {
+	case("pair-swap", &pairs_world(1, U256::ZERO), pair_invariant(), fair_swap_txs(), Reads::default())
+}
+
+pub fn pair_exploit() -> Case {
+	case("pair-exploit", &pairs_world(1, U256::ZERO), pair_invariant(), exploit_txs(), Reads::default())
+}
+
+/// The demo's bounty on pair 0, and three reports against it: a fair swap (the invariant holds),
+/// the exploit (it breaks), and the exploit on forged state, pair 0's reserves claimed tiny, which
+/// no proof backs.
+pub fn pair_bounty() -> (Params, [Report; 3]) {
+	let (params, reports) = bounty(&pairs_world(1, U256::ZERO), pair_invariant(), vec![fair_swap_txs(), exploit_txs()], Reads::default());
+	let [(fair, Outcome::Holds), (exploit, Outcome::Violated)] = <[_; 2]>::try_from(reports).unwrap() else {
+		panic!("the replays didn't go as planned");
+	};
+	let mut forged = exploit.clone();
+	let pair = forged.accounts.iter_mut().find(|a| a.address == pair(0)).unwrap();
+	for slot in &mut pair.slots {
+		if slot.key == B256::from(U256::from(2)) {
+			slot.value = U256::from(1);
+		}
+	}
+	(params, [fair, exploit, forged])
 }
 
 /// Swap along `hops` pairs through the router: the footprint grows by a pair and a token a hop.
@@ -578,6 +617,15 @@ mod tests {
 		fake.address = hunter();
 		case.report.accounts.push(fake);
 		assert_eq!(run(&case), Outcome::Malformed);
+	}
+
+	#[test]
+	fn the_demo_bounty() {
+		let (params, [fair, exploit, forged]) = pair_bounty();
+		let run = |r: &Report| evm_bounty_check::run(&alloy_rlp::encode(&params), &alloy_rlp::encode(r));
+		assert_eq!(run(&fair), Outcome::Holds);
+		assert_eq!(run(&exploit), Outcome::Violated);
+		assert_eq!(run(&forged), Outcome::BadProof);
 	}
 
 	#[test]
