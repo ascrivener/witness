@@ -64,7 +64,7 @@ pub type AttestationId = Hash;
 /// parameters allow 10⁹). So this is no headroom, only a bound.
 pub const MAX_CHECK_GAS: Gas = 5_000_000_000;
 /// Largest check blob a bounty may name. A whole EVM (revm and its precompiles, for settled bug
-/// bounties) is about 1.1 MiB; each reveal carries the blob as an extrinsic.
+/// bounties in witness-evm) is about 1.1 MiB; each reveal carries the blob as an extrinsic.
 pub const MAX_CHECK_LEN: u32 = 2 << 20;
 /// Largest check parameters a bounty may carry.
 pub const MAX_PARAMS_LEN: u32 = 4096;
