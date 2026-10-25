@@ -273,7 +273,7 @@ fn bare_reveal(env: &Env, blobs: Vec<BlobRef>) -> Op {
 		check_gas: 1,
 		hunter: id(BOB),
 		salt: [0; 32],
-		witness: b"x".to_vec(),
+		witness: Witness::Inline(b"x".to_vec()),
 	}
 }
 
@@ -432,7 +432,7 @@ impl Chain {
 			check_gas: terms.check_gas,
 			hunter: id(hunter),
 			salt: [hunter; 32],
-			witness: w.to_vec(),
+			witness: Witness::Inline(w.to_vec()),
 		}
 	}
 
@@ -621,6 +621,34 @@ fn withholding_past_the_window_wins() {
 	assert_eq!(c.reveal(0, BOB, b"x"), Err("reveal window closed"));
 	c.finalize(0).unwrap();
 	assert_eq!(c.winner(0), id(MALLORY));
+}
+
+#[test]
+fn a_reveal_can_carry_its_witness_in_an_extrinsic() {
+	let mut c = setup();
+	c.commit(0, BOB, b"x").unwrap();
+	c.advance(MIN_COMMIT_AGE);
+	let mut op = c.reveal_op(0, BOB, b"x", &[]);
+	let rejected = |r| Verified::Rejected(r);
+	let set = |op: &mut Op, w: Witness| {
+		let Op::Reveal { witness, .. } = op else { unreachable!() };
+		*witness = w;
+	};
+	// Too long for the op, but not for an extrinsic: the check gets it (and says no).
+	set(&mut op, Witness::Inline(vec![0; MAX_WITNESS_LEN as usize + 1]));
+	assert_eq!(c.refine(op.clone()), rejected(Rejection::WitnessTooLong));
+	let long = c.env.add(vec![0; MAX_WITNESS_LEN as usize + 1]);
+	set(&mut op, Witness::Extrinsic(long));
+	assert_eq!(c.refine(op.clone()), rejected(Rejection::CheckFailed(CheckFailure::False)));
+	set(&mut op, Witness::Extrinsic(u8::MAX));
+	assert_eq!(c.refine(op.clone()), rejected(Rejection::BadBlob));
+	// The commitment is to the witness's bytes, however the reveal carries them.
+	let x = c.env.add(b"x".to_vec());
+	set(&mut op, Witness::Extrinsic(x));
+	c.submit(op).unwrap();
+	c.advance(MIN_CLAIM_WINDOW);
+	c.finalize(0).unwrap();
+	assert_eq!(c.winner(0), id(BOB));
 }
 
 #[test]
@@ -863,7 +891,7 @@ fn reveal_must_name_the_bounty_blobs() {
 			check_gas: terms.check_gas,
 			hunter: id(BOB),
 			salt: [BOB; 32],
-			witness: b"x".to_vec(),
+			witness: Witness::Inline(b"x".to_vec()),
 		};
 		assert_eq!(c.submit(op), Err("revealed against different terms"));
 	}

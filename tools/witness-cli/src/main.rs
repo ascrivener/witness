@@ -281,6 +281,16 @@ fn write_extrinsics(dir: &str, check: &[u8], lists: &[Blobs], citations: Citatio
 	Ok(Some(at as u8))
 }
 
+/// A witness of more than a few bytes goes in extrinsic `at` of its own, the next after the op's
+/// others: a work package's payloads have little room.
+fn extrinsic_witness(dir: &str, witness: Vec<u8>, at: u8) -> Result<Witness, String> {
+	if witness.len() <= INLINE_WITNESS {
+		return Ok(Witness::Inline(witness));
+	}
+	write(&format!("{dir}/{at}"), &witness)?;
+	Ok(Witness::Extrinsic(at))
+}
+
 fn write(path: &str, data: &[u8]) -> Result<(), String> {
 	std::fs::write(path, data).map_err(|e| format!("cannot write {path}: {e}"))
 }
@@ -456,7 +466,7 @@ fn run(command: &str, f: &Flags) -> Result<(), String> {
 		},
 		"reveal" => {
 			// Extrinsic 0 is the check, whole; 1 the plain blobs, then the trusted subjects; 2 the
-			// citations, if any.
+			// citations, if any; then the witness, if it's long.
 			let (check_hash, _, check) = f.check()?;
 			let blobs = f.blobs()?;
 			let mut given = Blobs::new();
@@ -473,7 +483,9 @@ fn run(command: &str, f: &Flags) -> Result<(), String> {
 			}
 			subjects.extend(f.trust()?);
 			let (claims, trusted) = cite(&subjects, 1, &mut given)?;
-			let citations = write_extrinsics(f.extrinsics()?, &check, &[given], Citations { claims, trusted })?;
+			let dir = f.extrinsics()?;
+			let citations = write_extrinsics(dir, &check, &[given], Citations { claims, trusted })?;
+			let witness = extrinsic_witness(dir, f.witness()?, citations.map_or(2, |c| c + 1))?;
 			Op::Reveal {
 				bounty_id: f.num("bounty")?,
 				check_hash,
@@ -485,7 +497,7 @@ fn run(command: &str, f: &Flags) -> Result<(), String> {
 				check_gas: f.num("check-gas")?,
 				hunter: f.account("hunter")?,
 				salt: f.salt()?,
-				witness: f.witness()?,
+				witness,
 			}
 		},
 		"finalize" => Op::Finalize { bounty_id: f.num("bounty")? },
@@ -526,15 +538,7 @@ fn run(command: &str, f: &Flags) -> Result<(), String> {
 			write(f.str("claim-out")?, &(claim.clone(), subjects.clone()).encode())?;
 			let dir = f.extrinsics()?;
 			let citations = write_extrinsics(dir, &check, &[subjects, given], Citations { claims, trusted })?;
-			// A witness of more than a few bytes goes in an extrinsic of its own, next: a work
-			// package's payloads have little room.
-			let witness = if witness.len() > INLINE_WITNESS {
-				let at = citations.map_or(3, |c| c + 1);
-				write(&format!("{dir}/{at}"), &witness)?;
-				Witness::Extrinsic(at)
-			} else {
-				Witness::Inline(witness)
-			};
+			let witness = extrinsic_witness(dir, witness, citations.map_or(3, |c| c + 1))?;
 			eprintln!("attestation 0x{}", to_hex(&claim.id()));
 			let attester_id = attester.verifying_key().to_bytes();
 			let message = witness_types::attest_message(service, &attester_id, nonce, &claim.id());

@@ -233,14 +233,12 @@ fn refine_reveal(
 	check_gas: Gas,
 	hunter: AccountId,
 	salt: Hash,
-	witness: Vec<u8>,
+	witness: Witness,
 ) -> Refined<Verified> {
 	if check_gas > MAX_CHECK_GAS {
 		return Err(Rejection::CheckGasTooHigh);
 	}
-	if witness.len() > MAX_WITNESS_LEN as usize {
-		return Err(Rejection::WitnessTooLong);
-	}
+	let witness = witness_bytes(env, witness)?;
 	if params.len() > MAX_PARAMS_LEN as usize {
 		return Err(Rejection::ParamsTooLong);
 	}
@@ -294,6 +292,15 @@ fn refine_reveal(
 	})
 }
 
+/// A witness's bytes, from the op or its extrinsic.
+fn witness_bytes(env: &impl RefineEnv, witness: Witness) -> Refined<Vec<u8>> {
+	match witness {
+		Witness::Inline(w) if w.len() > MAX_WITNESS_LEN as usize => Err(Rejection::WitnessTooLong),
+		Witness::Inline(w) => Ok(w),
+		Witness::Extrinsic(at) => env.extrinsic(at as usize).ok_or(Rejection::BadBlob),
+	}
+}
+
 /// Refine an attestation.
 #[allow(clippy::too_many_arguments)]
 fn refine_attest(
@@ -314,11 +321,7 @@ fn refine_attest(
 	if check_gas > MAX_CHECK_GAS {
 		return Err(Rejection::CheckGasTooHigh);
 	}
-	let witness = match witness {
-		Witness::Inline(w) if w.len() > MAX_WITNESS_LEN as usize => return Err(Rejection::WitnessTooLong),
-		Witness::Inline(w) => w,
-		Witness::Extrinsic(at) => env.extrinsic(at as usize).ok_or(Rejection::BadBlob)?,
-	};
+	let witness = witness_bytes(env, witness)?;
 	if params.len() > MAX_PARAMS_LEN as usize {
 		return Err(Rejection::ParamsTooLong);
 	}

@@ -63,8 +63,9 @@ pub type AttestationId = Hash;
 /// and one that needs more just runs out of gas (as on a network with less: PolkaJam's "tiny"
 /// parameters allow 10⁹). So this is no headroom, only a bound.
 pub const MAX_CHECK_GAS: Gas = 5_000_000_000;
-/// Largest check blob a bounty may name.
-pub const MAX_CHECK_LEN: u32 = 1 << 20;
+/// Largest check blob a bounty may name. A whole EVM (revm and its precompiles, for settled bug
+/// bounties in witness-evm) is about 1.1 MiB; each reveal carries the blob as an extrinsic.
+pub const MAX_CHECK_LEN: u32 = 2 << 20;
 /// Largest check parameters a bounty may carry.
 pub const MAX_PARAMS_LEN: u32 = 4096;
 /// Most blobs a check may be given: trusted subjects, plain blobs and subjects to attest. A check
@@ -409,10 +410,10 @@ pub struct TrustedRef {
 	pub path: Vec<Hash>,
 }
 
-/// An attestation's witness: in the op, up to [`MAX_WITNESS_LEN`] bytes, or an extrinsic of its
-/// own, whole, as long as the work package's input allows. A work package's own bytes (its items'
-/// payloads) are few, so a long witness goes in an extrinsic. Nothing about it is signed or
-/// claimed: the check is what judges it.
+/// A reveal's or an attestation's witness: in the op, up to [`MAX_WITNESS_LEN`] bytes, or an
+/// extrinsic of its own, whole, as long as the work package's input allows. A work package's own
+/// bytes (its items' payloads) are few, so a long witness goes in an extrinsic. Either way it is
+/// the same bytes to the check and to a reveal's commitment.
 #[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
 pub enum Witness {
 	Inline(Vec<u8>),
@@ -499,7 +500,7 @@ pub enum Op {
 		check_gas: Gas,
 		hunter: AccountId,
 		salt: Hash,
-		witness: Vec<u8>,
+		witness: Witness,
 	},
 	/// Pay the winner once the claim window has closed. Anyone may send it.
 	Finalize { bounty_id: BountyId },
