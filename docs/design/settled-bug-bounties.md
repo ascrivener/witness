@@ -15,8 +15,11 @@ Does verifying a report fit in one JAM refine, 5×10⁹ gas?
 
 **Answer: yes, for the reports that matter, with room to spare.** The toy exploit costs
 1.0×10⁷ gas, 0.2% of the budget. A large DeFi-shaped report (131 accounts, 449 slots, 3.1M EVM
-gas) costs 3.9×10⁸, 8%. The limits are pure EVM compute (about 30M EVM gas, one full block of
-compute-heavy work) and, before gas, the size of the report: proofs are about 3.5 KB an account.
+gas) costs 3.9×10⁸, 8%. Execution is rarely the limit: about 30M EVM gas of pure compute fits,
+more than any single transaction may use since Osaka (2²⁴, about 16.8M), and DeFi-style work,
+mostly storage reads, is about 8× cheaper to replay than that. What grows with a big exploit is
+its footprint, the accounts and slots it touches: proofs are about 3.5 KB an account, so report
+size binds before gas does.
 **Go**, with the open items in [What has to change](#what-has-to-change).
 
 ## How the check works
@@ -123,8 +126,9 @@ runs about 60–75× slower than natively.
 As a rough model, gas ≈ 1M + 90k × proof nodes + 20 × report bytes + k × EVM gas, with k
 between 20 (state-bound) and 167 (compute-bound).
 
-- **EVM compute:** at most about **30M EVM gas** of pure compute, about half a 60M-gas block.
-  Storage-bound transactions fit about 10× more EVM gas than that.
+- **EVM compute:** about **30M EVM gas** of pure compute, nearly two transactions at Osaka's
+  per-transaction cap. Storage-bound transactions replay about 8× cheaper per EVM gas, so far
+  more of them fit, until their proofs hit the input limit below.
 - **State:** about **50,000 proof nodes** fit the gas, about 1,700 accounts with 3 big-token
   slots each (30 nodes an account). But at about 350 bytes a node that is 17 MB of proofs, more than a work package's input (about 13.8 MB), so the
   input limit binds first: about **40,000 nodes** in a package.
