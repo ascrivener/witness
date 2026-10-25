@@ -143,16 +143,19 @@ toy code. Hashing code should cost about what proof bytes do (keccak), so 1 MB o
 
 ## What has to change
 
-Blocking, for a real deployment:
+Blocking, found by the spike, now fixed on this branch:
 
-1. **The check blob is 1,156,339 bytes, over `MAX_CHECK_LEN` (1 MiB).** It is almost all revm
-   and its precompiles. Optimizing the check crate for size saves only 4% and costs 25% more gas.
-   Options: drop precompiles the bounty's fork doesn't need (KZG point evaluation, BLS12-381) or
-   build them in a lighter configuration; or raise `MAX_CHECK_LEN`, since check blobs travel as
-   extrinsics and are attested once.
-2. **Reports must travel as extrinsics.** A reveal's witness is inline, at most 64 KiB
+1. **The check blob is 1,156,339 bytes, over the old `MAX_CHECK_LEN` (1 MiB).** It is almost all
+   revm and its precompiles. Optimizing the check crate for size saves only 4% and costs 25% more
+   gas. Dropping the BLS12-381, KZG and P-256 precompiles takes it to 715 KB, but revm reaches all
+   precompiles through one `Crypto` trait object, so that means patching revm-precompile (or
+   rewriting the precompiles), and any slip makes the replay disagree with Ethereum. It would
+   also lose P-256, which passkey wallets use. **Done instead:** `MAX_CHECK_LEN` is now 2 MiB.
+   A reveal carries the blob as an extrinsic, 1.1 MB of a package's 13.8 MB input.
+2. **Reports must travel as extrinsics.** A reveal's witness was inline only, at most 64 KiB
    (`MAX_WITNESS_LEN`); even the toy exploit's report is 32 KB, and realistic ones are hundreds of
-   KB to a few MB. `Attest` already takes `Witness::Extrinsic`; `Reveal` needs the same.
+   KB to a few MB. **Done:** `Reveal`'s witness is now a `Witness`, inline or an extrinsic, as
+   `Attest`'s is; the commitment is to the witness's bytes either way.
 
 Soundness, before money depends on it:
 
@@ -216,7 +219,7 @@ a service in itself: probably the business's main product, more than the check.
 
 ### Milestones
 
-1. Make reports extrinsics; get the blob under the limit.
+1. ~~Make reports extrinsics; get the blob under the limit.~~ Done.
 2. Adversarial hardening of the check (items 3–5 above), with a review by someone outside.
 3. Bounty terms for disclosure: patch window, minimum commit-to-reveal delay.
 4. A witness-sim demo of about a dozen cases, including measurements on real mainnet state
