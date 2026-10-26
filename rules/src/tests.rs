@@ -370,6 +370,7 @@ impl Chain {
 			check_gas: 1000,
 			expiry: self.now + 50,
 			claim_window: MIN_CLAIM_WINDOW,
+			disclosure_window: 0,
 		}
 	}
 
@@ -789,6 +790,76 @@ fn reclaim_rules() {
 	assert_eq!(c.reclaim(0), Err("bounty not open"));
 }
 
+/// A bounty with a disclosure window of `DISCLOSE` slots: bounty 1, after `setup`'s bounty 0.
+const DISCLOSE: Slot = 100;
+
+fn with_disclosure() -> Chain {
+	let mut c = setup();
+	let terms = BountyTerms { disclosure_window: DISCLOSE, ..c.terms() };
+	c.create(terms).unwrap();
+	c
+}
+
+#[test]
+fn a_reveal_waits_out_the_disclosure_window() {
+	let mut c = with_disclosure();
+	c.commit(1, BOB, b"x").unwrap();
+	c.advance(MIN_COMMIT_AGE);
+	assert_eq!(c.reveal(1, BOB, b"x"), Err("disclosure window still open"));
+	c.advance(DISCLOSE - MIN_COMMIT_AGE - 1);
+	assert_eq!(c.reveal(1, BOB, b"x"), Err("disclosure window still open"));
+	c.advance(1);
+	c.reveal(1, BOB, b"x").unwrap();
+	c.advance(MIN_CLAIM_WINDOW);
+	c.finalize(1).unwrap();
+	assert_eq!(c.winner(1), id(BOB));
+}
+
+#[test]
+fn whoever_learns_of_a_disclosure_still_loses_to_the_hunter() {
+	// Bob commits, then shows the maker `x` privately. If it leaks (or the maker tries it
+	// themselves), a commitment to it comes later, so its window ends later too: Bob can always
+	// reveal first, and even revealing second, his earlier commitment wins.
+	let mut c = with_disclosure();
+	c.commit(1, BOB, b"x").unwrap();
+	c.advance(1);
+	c.commit(1, MALLORY, b"x").unwrap();
+	c.advance(DISCLOSE - 1);
+	assert_eq!(c.reveal(1, MALLORY, b"x"), Err("disclosure window still open"));
+	c.advance(1);
+	c.reveal(1, MALLORY, b"x").unwrap();
+	c.advance(MIN_CLAIM_WINDOW - 1);
+	c.reveal(1, BOB, b"x").unwrap();
+	c.advance(1);
+	c.finalize(1).unwrap();
+	assert_eq!(c.winner(1), id(BOB));
+}
+
+#[test]
+fn the_reward_stays_escrowed_through_the_last_disclosure_window() {
+	// A commitment just before expiry can reveal after expiry, once its window has passed, and
+	// the maker can't reclaim in the meantime.
+	let mut c = with_disclosure();
+	let expiry = c.bounty(1).terms.expiry;
+	c.advance(expiry - c.now - 1);
+	c.commit(1, BOB, b"x").unwrap();
+	c.advance(DISCLOSE);
+	assert_eq!(c.reclaim(1), Err("reveal window still open"));
+	c.reveal(1, BOB, b"x").unwrap();
+	assert_eq!(c.reclaim(1), Err("bounty not open"));
+}
+
+#[test]
+fn a_bounty_with_a_window_is_reclaimed_after_it_and_the_grace() {
+	let mut c = with_disclosure();
+	let expiry = c.bounty(1).terms.expiry;
+	c.advance(expiry + DISCLOSE + REVEAL_GRACE - c.now - 1);
+	assert_eq!(c.reclaim(1), Err("reveal window still open"));
+	c.advance(1);
+	c.reclaim(1).unwrap();
+	assert_eq!(c.bounty(1).status, BountyStatus::Reclaimed);
+}
+
 #[test]
 fn release_rules() {
 	let mut c = setup();
@@ -816,6 +887,9 @@ fn create_rules() {
 	let mut terms = c.terms();
 	terms.expiry = c.now + MIN_COMMIT_AGE;
 	assert_eq!(c.create(terms), Err("expiry too soon"));
+	let mut terms = c.terms();
+	terms.disclosure_window = MAX_DISCLOSURE_WINDOW + 1;
+	assert_eq!(c.create(terms), Err("disclosure window too long"));
 	let mut terms = c.terms();
 	terms.reward = 501;
 	assert_eq!(c.create(terms), Err("insufficient balance"));

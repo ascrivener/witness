@@ -30,10 +30,14 @@ usage: witness <command> [--flag value ...]
   mint      --to S --amount N
   create    --service ID --maker S --nonce N --check FILE PARAMS [--blobs BLOBS] [--asset A]
             --reward N --check-gas G --expiry SLOT [--claim-window SLOTS]
+            [--disclosure-window SLOTS]
   commit    --service ID --bounty ID --hunter S [--committer S] --nonce N --salt HEX WITNESS
   reveal    --bounty ID --check FILE PARAMS [--blobs BLOBS] [--trust REFS] --check-gas G
             --hunter S --salt HEX WITNESS --extrinsics DIR
             trusts the bounty's attested blobs, in order, then REFS
+  commitment --bounty ID --hunter S --salt HEX WITNESS
+            the commitment a reveal of WITNESS would open: for a maker checking a report a
+            hunter disclosed privately against what's on chain (`key --commitment`)
   finalize  --bounty ID
   reclaim   --service ID --bounty ID --maker S --nonce N
   release   --bounty ID --commitment HEX
@@ -351,6 +355,12 @@ fn run(command: &str, f: &Flags) -> Result<(), String> {
 			println!("{decoded}");
 			return Ok(());
 		},
+		"commitment" => {
+			let commitment =
+				witness_types::commitment(f.num("bounty")?, &f.witness()?, &f.account("hunter")?, &f.salt()?);
+			println!("0x{}", to_hex(&commitment));
+			return Ok(());
+		},
 		"key" => {
 			let key = if f.has("balance") {
 				StorageKey::Balance(f.account("balance")?, f.asset("asset")?)
@@ -440,6 +450,7 @@ fn run(command: &str, f: &Flags) -> Result<(), String> {
 				check_gas: f.num("check-gas")?,
 				expiry: f.num("expiry")?,
 				claim_window,
+				disclosure_window: if f.has("disclosure-window") { f.num("disclosure-window")? } else { 0 },
 			};
 			let maker_id = maker.verifying_key().to_bytes();
 			let message = witness_types::create_message(service, &maker_id, nonce, &terms);

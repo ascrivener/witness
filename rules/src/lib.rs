@@ -23,7 +23,7 @@ use witness_types::{
 	AttestationId, BUILD_ADMIN, BlobAt, BlobHash, BlobRef, Bounty, BountyId, BountyStatus, CheckBlob,
 	CheckMode, Citations, Claim, CommitRecord, Config, Gas, Hash, MAX_BLOBS, MAX_BLOBS_LEN, MAX_CHECK_GAS,
 	MAX_CHECK_LEN, MAX_CLAIM_WINDOW, MAX_MINT, MAX_PARAMS_LEN, MAX_WITNESS_LEN, MEMO_LEN,
-	MIN_CLAIM_WINDOW, MIN_COMMIT_AGE, Op, Proposal, REVEAL_GRACE, Rejection, Signature, Slot, StorageKey,
+	MAX_DISCLOSURE_WINDOW, MIN_CLAIM_WINDOW, MIN_COMMIT_AGE, Op, Proposal, REVEAL_GRACE, Rejection, Signature, Slot, StorageKey,
 	TEST_ASSET, TokenMemo, TrustedRef, Verified, Witness, WithdrawalMemo, blake2b256, blobs_in, merkle,
 };
 
@@ -564,7 +564,9 @@ impl<S: State> Tx<'_, S> {
 /// Whether a reveal could still change `bounty`'s outcome at `now`.
 fn revealable(bounty: &Bounty, now: Slot) -> bool {
 	match &bounty.status {
-		BountyStatus::Open => now < bounty.terms.expiry.saturating_add(REVEAL_GRACE),
+		// The last commitment, made just before expiry, waits out the disclosure window first.
+		BountyStatus::Open =>
+			now < bounty.terms.expiry.saturating_add(bounty.terms.disclosure_window).saturating_add(REVEAL_GRACE),
 		BountyStatus::Revealing { window_end, .. } => now < *window_end,
 		BountyStatus::Claimed { .. } | BountyStatus::Reclaimed => false,
 	}
@@ -619,6 +621,9 @@ pub fn accumulate(state: &impl State, verified: Verified, now: Slot) -> Result<E
 			}
 			if terms.expiry <= now.saturating_add(MIN_COMMIT_AGE) {
 				return Err("expiry too soon");
+			}
+			if terms.disclosure_window > MAX_DISCLOSURE_WINDOW {
+				return Err("disclosure window too long");
 			}
 			if !tx.accepted(terms.asset) {
 				return Err("asset not accepted");
@@ -683,6 +688,11 @@ pub fn accumulate(state: &impl State, verified: Verified, now: Slot) -> Result<E
 			let record: CommitRecord = tx.get(&key).ok_or("no commitment")?;
 			if record.slot.saturating_add(MIN_COMMIT_AGE) > now {
 				return Err("commitment too recent");
+			}
+			// Everyone's commitment waits the same, so an earlier one is always revealable first:
+			// a copier who learned `x` from the private disclosure still can't get ahead.
+			if record.slot.saturating_add(bounty.terms.disclosure_window) > now {
+				return Err("disclosure window still open");
 			}
 			if record.slot >= bounty.terms.expiry {
 				return Err("committed after expiry");
