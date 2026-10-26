@@ -30,11 +30,15 @@ usage: witness <command> [--flag value ...]
   mint      --to S --amount N
   create    --service ID --maker S --nonce N --check FILE PARAMS [--blobs BLOBS] [--asset A]
             --reward N --check-gas G --expiry SLOT [--claim-window SLOTS]
-            [--disclosure-window SLOTS]
+            [--disclosure-window SLOTS] [--bind-claim]
+            --bind-claim: a reveal trusts at most one attestation the bounty doesn't cite, and
+            its witness begins with that one's id (`claim-id`), so it was committed to
   commit    --service ID --bounty ID --hunter S [--committer S] --nonce N --salt HEX WITNESS
   reveal    --bounty ID --check FILE PARAMS [--blobs BLOBS] [--trust REFS] --check-gas G
             --hunter S --salt HEX WITNESS --extrinsics DIR
             trusts the bounty's attested blobs, in order, then REFS
+  claim-id  --claim CLAIM         the id of the attestation `attest --claim-out` wrote to CLAIM: a
+            witness for a --bind-claim bounty begins with it
   commitment --bounty ID --hunter S --salt HEX WITNESS
             the commitment a reveal of WITNESS would open: for a maker checking a report a
             hunter disclosed privately against what's on chain (`key --commitment`)
@@ -355,6 +359,10 @@ fn run(command: &str, f: &Flags) -> Result<(), String> {
 			println!("{decoded}");
 			return Ok(());
 		},
+		"claim-id" => {
+			println!("0x{}", to_hex(&read_claim(f.str("claim")?)?.0.id()));
+			return Ok(());
+		},
 		"commitment" => {
 			let commitment =
 				witness_types::commitment(f.num("bounty")?, &f.witness()?, &f.account("hunter")?, &f.salt()?);
@@ -451,6 +459,7 @@ fn run(command: &str, f: &Flags) -> Result<(), String> {
 				expiry: f.num("expiry")?,
 				claim_window,
 				disclosure_window: if f.has("disclosure-window") { f.num("disclosure-window")? } else { 0 },
+				bind_claim: f.has("bind-claim"),
 			};
 			let maker_id = maker.verifying_key().to_bytes();
 			let message = witness_types::create_message(service, &maker_id, nonce, &terms);

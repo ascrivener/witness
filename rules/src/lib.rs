@@ -279,12 +279,24 @@ fn refine_reveal(
 		check_blobs.push(want.hash, false, data)?;
 	}
 	run(env, &check, CheckMode::Reveal, &check_blobs, &params, &witness, check_gas)?;
+	// The attestations the reveal cites beyond its bounty's: a bounty with `bind_claim` takes at
+	// most one, named at the witness's start.
+	let beyond: Vec<&AttestationId> = ids
+		.iter()
+		.filter(|id| !blobs.iter().any(|b| matches!(b, BlobRef::Attested { attestation, .. } if attestation == *id)))
+		.collect();
+	let binds_claim = match beyond[..] {
+		[] => true,
+		[id] => witness.get(..32) == Some(&id[..]),
+		_ => false,
+	};
 	Ok(Verified::Reveal {
 		bounty_id,
 		check_hash,
 		params_hash: blake2b256(&params),
 		blobs_hash: blake2b256(&blobs.encode()),
 		attestations: ids,
+		binds_claim,
 		check_gas,
 		commitment: witness_types::commitment(bounty_id, &witness, &hunter, &salt),
 		hunter,
@@ -655,6 +667,7 @@ pub fn accumulate(state: &impl State, verified: Verified, now: Slot) -> Result<E
 			params_hash,
 			blobs_hash,
 			attestations,
+			binds_claim,
 			check_gas,
 			commitment,
 			hunter,
@@ -673,6 +686,9 @@ pub fn accumulate(state: &impl State, verified: Verified, now: Slot) -> Result<E
 			let cites = bounty.terms.blobs.iter().any(|b| matches!(b, BlobRef::Attested { .. }));
 			if !cites && !attestations.is_empty() {
 				return Err("the bounty cites no attestation");
+			}
+			if bounty.terms.bind_claim && !binds_claim {
+				return Err("the witness doesn't bind the reveal's attestation");
 			}
 			if bounty.terms.check_hash != check_hash ||
 				bounty.terms.check_gas != check_gas ||

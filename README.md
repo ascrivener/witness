@@ -111,6 +111,34 @@ still loses. The reward stays escrowed until `expiry + disclosure_window + REVEA
 commitment made just before expiry still gets its window and the grace. With a window of 0 (the
 default) a bounty works as before.
 
+### Bound claims
+
+A reveal can win by *trusting* attested work rather than carrying it: a refutation attested in
+chunks pays out once a reveal trusts the attested empty clause (see
+[witness-sat](https://github.com/ascrivener/witness-sat)), whatever its witness. That breaks
+commit-reveal. The work goes public chunk by chunk as it's attested, and anyone who committed
+earlier, to any witness, before the work existed, can reveal trusting it and win.
+
+A bounty can set `bind_claim` (`witness create --bind-claim`). A reveal may then trust subjects of
+at most one attestation its bounty doesn't cite, and its witness must begin with that
+attestation's id (refine reports whether it does; accumulate holds the bounty to it). An
+attestation's id covers its parents' ids, so it's fixed by the whole chain of work beneath it
+and can't be known before that work exists:
+
+1. The hunter builds their attestations' claims off chain (`witness attest` only builds the op),
+   reads the id of the one their reveal will trust (`witness claim-id`), and commits to a
+   witness beginning with it, before attesting anything.
+2. They attest the work, then reveal trusting it.
+
+Nobody who committed before the hunter can have committed to that id, and anyone who commits to
+it after seeing it is later than the hunter. A reveal trusting no attestation beyond the
+bounty's carries its work in its witness, which its commitment binds already, so it needs no
+binding. The limit of one keeps a speculator from naming an attestation of their own, made in
+advance, while trusting the hunter's too. Checks for such bounties take the id as part of the
+witness (sat-check ignores the witness once the empty clause is trusted).
+
+`rules/src/tests.rs` covers the attack without the option, and with it.
+
 ### Spam
 
 Each commitment locks the configured commit deposit, and only a valid reveal gets it back. Each
