@@ -203,7 +203,9 @@ impl RefineEnv for Env {
 		} else {
 			witness == b"x" ||
 				(!blobs.is_empty() && witness == data) ||
-				(!blobs.is_empty() && witness == b"trusted" && blobs.iter().all(|(t, _)| *t))
+				// As a check paying out on trusted work does (an attested refutation): the
+				// witness is then whatever the hunter committed to, here anything ending so.
+				(!blobs.is_empty() && witness.ends_with(b"trusted") && blobs.iter().all(|(t, _)| *t))
 		};
 		if accept { Ok(()) } else { Err(Rejection::CheckFailed(CheckFailure::False)) }
 	}
@@ -371,6 +373,7 @@ impl Chain {
 			expiry: self.now + 50,
 			claim_window: MIN_CLAIM_WINDOW,
 			disclosure_window: 0,
+			bind_claim: false,
 		}
 	}
 
@@ -1290,6 +1293,92 @@ fn reveals_can_trust_more_subjects() {
 	c.advance(MIN_CLAIM_WINDOW);
 	c.finalize(1).unwrap();
 	assert_eq!(c.winner(1), id(CAROL));
+}
+
+/// Bounty 1, citing an anchor, pays out on trusted attested work; with `bind_claim`, a reveal must
+/// name the attestation it adds. Returns the chain and the anchor.
+fn with_anchor(bind_claim: bool) -> (Chain, AttestationClaim) {
+	let mut c = setup();
+	let anchor = c.attest(&[GOOD1], &[]).unwrap();
+	let mut terms = c.terms();
+	terms.blobs = vec![BlobRef::Attested { attestation: anchor.id(), entry: 0 }];
+	terms.reward = 100;
+	terms.bind_claim = bind_claim;
+	c.create(terms).unwrap(); // bounty 1
+	(c, anchor)
+}
+
+/// `claim`'s id, then `rest`: a witness binding `claim`.
+fn bound(claim: &AttestationClaim, rest: &[u8]) -> Vec<u8> {
+	[&claim.id()[..], rest].concat()
+}
+
+#[test]
+fn early_commitments_take_attested_work_unless_the_witness_binds_it() {
+	// Mallory commits before anyone has done the work, to a witness that needs none of it. Bob
+	// then attests the work, and reveals trusting it. Mallory reveals trusting Bob's attestation
+	// too, and her commitment is the earlier: she wins.
+	let (mut c, anchor) = with_anchor(false);
+	c.commit(1, MALLORY, b"trusted").unwrap();
+	c.advance(1);
+	let work = c.attest(&[GOOD2], &[(anchor.clone(), 0)]).unwrap();
+	c.commit(1, BOB, &bound(&work, b"trusted")).unwrap();
+	c.advance(MIN_COMMIT_AGE);
+	c.reveal_with(1, BOB, &bound(&work, b"trusted"), &[(work.clone(), 0)]).unwrap();
+	c.reveal_with(1, MALLORY, b"trusted", &[(work, 0)]).unwrap();
+	c.advance(MIN_CLAIM_WINDOW);
+	c.finalize(1).unwrap();
+	assert_eq!(c.winner(1), id(MALLORY));
+}
+
+#[test]
+fn a_bound_witness_names_the_work_it_was_committed_to() {
+	let (mut c, anchor) = with_anchor(true);
+	// Mallory commits early, to a witness that can't name work that doesn't exist yet, and to
+	// one naming an attestation of her own.
+	let hers = c.attest(&[GOOD1, GOOD2], &[]).unwrap();
+	c.commit(1, MALLORY, b"trusted").unwrap();
+	c.commit(1, MALLORY, &bound(&hers, b"trusted")).unwrap();
+	c.advance(1);
+	// Bob computes his attestation's id from his work, commits, then attests.
+	let list = c.list(&[GOOD2]);
+	let (_, claim) = c.attest_op(BOB, check(), b"batch", list, &[(anchor.clone(), 0)]);
+	c.commit(1, BOB, &bound(&claim, b"trusted")).unwrap();
+	let work = c.submit_attest(c.attest_op(BOB, check(), b"batch", list, &[(anchor.clone(), 0)])).unwrap();
+	assert_eq!(work, claim, "the id was known before the attestation");
+	c.advance(MIN_COMMIT_AGE);
+
+	let refused = Err("the witness doesn't bind the reveal's attestation");
+	assert_eq!(c.reveal_with(1, MALLORY, b"trusted", &[(work.clone(), 0)]), refused);
+	// Naming her own attestation, she can't add Bob's: one attestation beyond the bounty's.
+	let both = [(hers.clone(), 0), (work.clone(), 0)];
+	assert_eq!(c.reveal_with(1, MALLORY, &bound(&hers, b"trusted"), &both), refused);
+	// Refine says what it saw; accumulate holds the bounty to it.
+	let op = c.reveal_op(1, MALLORY, &bound(&work, b"trusted"), &[(work.clone(), 0)]);
+	assert!(matches!(c.refine(op), Verified::Reveal { binds_claim: true, .. }));
+	let op = c.reveal_op(1, MALLORY, &bound(&hers, b"trusted"), &both);
+	assert!(matches!(c.refine(op), Verified::Reveal { binds_claim: false, .. }));
+	// Mallory could commit to Bob's attestation now, but later than Bob: his reveal wins.
+	c.commit(1, MALLORY, &bound(&work, b"trusted")).unwrap();
+	c.advance(MIN_COMMIT_AGE);
+	c.reveal_with(1, MALLORY, &bound(&work, b"trusted"), &[(work.clone(), 0)]).unwrap();
+	c.reveal_with(1, BOB, &bound(&work, b"trusted"), &[(work, 0)]).unwrap();
+	c.advance(MIN_CLAIM_WINDOW);
+	c.finalize(1).unwrap();
+	assert_eq!(c.winner(1), id(BOB));
+}
+
+#[test]
+fn a_bound_bounty_takes_reveals_carrying_their_work() {
+	// A reveal trusting only the bounty's subjects carries its work in its witness, which its
+	// commitment binds already.
+	let (mut c, _) = with_anchor(true);
+	c.commit(1, BOB, b"good one").unwrap();
+	c.advance(MIN_COMMIT_AGE);
+	c.reveal(1, BOB, b"good one").unwrap();
+	c.advance(MIN_CLAIM_WINDOW);
+	c.finalize(1).unwrap();
+	assert_eq!(c.winner(1), id(BOB));
 }
 
 #[test]

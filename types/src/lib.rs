@@ -473,6 +473,14 @@ pub struct BountyTerms {
 	/// Slots a commitment must wait before its reveal: the maker's time to fix what the hunter
 	/// disclosed privately before it goes on chain. 0 for a bounty with nothing to disclose.
 	pub disclosure_window: Slot,
+	/// A reveal may trust subjects of at most one attestation beyond the bounty's own, and its
+	/// witness must begin with that attestation's id. For bounties a reveal wins by trusting
+	/// attested work (an attested refutation, say) rather than carrying it: without this, anyone
+	/// could commit to a witness early and reveal once the hunter's work is attested, and the
+	/// earliest commitment wins. An attestation's id covers its parents', so it can't be known
+	/// before the work it rests on exists: a hunter computes it from their own plan and commits
+	/// before attesting anything, and nobody who committed earlier can have committed to it.
+	pub bind_claim: bool,
 }
 
 /// A work-item payload: exactly one operation per work item.
@@ -602,6 +610,9 @@ pub enum Verified {
 		blobs_hash: Hash,
 		/// The attestations the reveal relied on, which accumulate must find recorded.
 		attestations: Vec<AttestationId>,
+		/// Whether the reveal relies on at most one attestation its bounty doesn't cite, and its
+		/// witness begins with that one's id: what a bounty with `bind_claim` requires.
+		binds_claim: bool,
 		check_gas: Gas,
 		commitment: Hash,
 		hunter: AccountId,

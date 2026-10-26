@@ -220,7 +220,10 @@ checker version, or on a different foundation, is a different attestation.
 - **Attesting in chunks reveals work early.** A solver who attests chunks of their proof before
   the final reveal publishes them. The commitment rules still protect them, since the earliest
   commitment wins, but only if they **commit before attesting their first chunk**. Tooling and
-  docs must say so.
+  docs must say so. And where a reveal wins by trusting the attested work rather than carrying
+  it, anyone could have committed earlier still, to a witness needing no work at all: such a
+  bounty sets `bind_claim`, so a reveal's witness must name the attestation it adds, which can't
+  be known before the work exists (see the README's "Bound claims").
 - **A check must reject trusted blobs it doesn't recognize.** The trusted flag says the blob was
   attested by *some* attestation the reveal cited. The check is responsible for confirming that
   attestation was made by a compatible checker, for example by also receiving the attestation's
