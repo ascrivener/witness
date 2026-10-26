@@ -3,16 +3,21 @@
 //! The protocol, in short:
 //! - A maker posts a bounty: a check blob `check(params, x) -> bool` (by hash), the `params` to
 //!   run it with, any extra blobs the check reads (by hash), a reward in an asset, a gas limit for
-//!   the check, an expiry slot and a claim window.
+//!   the check, an expiry slot, a claim window and a disclosure window.
 //! - A hunter commits to `blake2b(bounty_id, x, hunter, salt)`, paying the configured commit
-//!   deposit, then reveals `x` at least [`MIN_COMMIT_AGE`] slots later. Refine runs the check in
-//!   an inner PVM.
+//!   deposit, then reveals `x` at least [`MIN_COMMIT_AGE`] slots later, and no sooner than the
+//!   bounty's disclosure window after committing. Refine runs the check in an inner PVM.
+//! - The disclosure window is for bounties on bugs: the hunter commits, shows the maker `x`
+//!   privately, and the maker has the window to fix the bug before `x` goes on chain, where JAM's
+//!   data availability keeps it for weeks. A check that judges `x` against a fixed snapshot (the
+//!   state before the fix) still accepts it afterwards, so the fix can't take the reward away.
 //! - The first valid reveal opens the claim window. Every valid reveal before it closes competes,
 //!   and the one whose commitment reached the chain earliest wins. Someone who copies `x` out of a
 //!   reveal can only commit after seeing it, so they always lose to the original. Ties within a
 //!   slot go to the lower commitment hash.
-//! - `Finalize` after the window pays the winner. After `expiry + REVEAL_GRACE` a bounty no one
-//!   revealed for can be reclaimed by its maker.
+//! - `Finalize` after the window pays the winner. After `expiry + disclosure window +
+//!   REVEAL_GRACE` a bounty no one revealed for can be reclaimed by its maker: every commitment
+//!   made before expiry has had its disclosure window, and the grace, to reveal.
 //! - A valid reveal refunds its commitment's deposit; unrevealed commitments forfeit theirs, which
 //!   is what makes spamming commitments cost something.
 //!
@@ -87,9 +92,12 @@ pub const MIN_COMMIT_AGE: Slot = 1;
 /// have to keep the original reveal off chain, so it should span several guarantor rotations.
 pub const MIN_CLAIM_WINDOW: Slot = 30;
 pub const MAX_CLAIM_WINDOW: Slot = 14_400;
-/// Slots after expiry during which commitments made before expiry may still open the claim
-/// window, and before which the maker may not reclaim.
+/// Slots after expiry (and the bounty's disclosure window) during which commitments made before
+/// expiry may still open the claim window, and before which the maker may not reclaim.
 pub const REVEAL_GRACE: Slot = 20;
+/// Longest disclosure window a bounty may set: about 90 days of 6-second slots, the usual
+/// deadline for fixing a reported bug. The reward stays escrowed for that long after expiry.
+pub const MAX_DISCLOSURE_WINDOW: Slot = 1_296_000;
 /// Largest single faucet mint.
 pub const MAX_MINT: Amount = 1_000_000;
 /// Slots between an admin proposing an action and its taking effect: about 7 days of 6-second
@@ -462,6 +470,9 @@ pub struct BountyTerms {
 	pub expiry: Slot,
 	/// Slots from the first valid reveal until the bounty can be finalized.
 	pub claim_window: Slot,
+	/// Slots a commitment must wait before its reveal: the maker's time to fix what the hunter
+	/// disclosed privately before it goes on chain. 0 for a bounty with nothing to disclose.
+	pub disclosure_window: Slot,
 }
 
 /// A work-item payload: exactly one operation per work item.

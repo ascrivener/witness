@@ -18,9 +18,9 @@ Not yet deployed anywhere with real money: test builds also have a faucet (`Mint
 | `Mint` | — | test builds: credit the test asset (a faucet, at most `MAX_MINT`) |
 | `CreateBounty` | verify the maker's Ed25519 signature | check nonce, balance and limits, that the bounty's asset is accepted, and that cited attestations exist and are by the bounty's check with one set of params; escrow the reward; store the bounty |
 | `Commit` | verify the committer's signature | the bounty takes commitments; lock the configured commit deposit (in the fee asset); record the slot of `blake2b(bounty_id, x, hunter, salt)` |
-| `Reveal` | read the check blob, the plain blobs and the trusted subjects the reveal cites (the bounty's, and any more it adds) from the work item's extrinsics, checking each against the bounty's hashes or its claim's Merkle root; run the check on them (attested ones marked trusted), `params` and `x` in an inner PVM with the bounty's `check_gas` | the terms match, the cited attestations were recorded, and the commitment is older than this slot and made before expiry. The first valid reveal opens the claim window, and later ones replace the leader if their commitment is earlier. Refund the deposit |
+| `Reveal` | read the check blob, the plain blobs and the trusted subjects the reveal cites (the bounty's, and any more it adds) from the work item's extrinsics, checking each against the bounty's hashes or its claim's Merkle root; run the check on them (attested ones marked trusted), `params` and `x` in an inner PVM with the bounty's `check_gas` | the terms match, the cited attestations were recorded, and the commitment is older than this slot, by the bounty's disclosure window if it has one, and made before expiry. The first valid reveal opens the claim window, and later ones replace the leader if their commitment is earlier. Refund the deposit |
 | `Finalize` | — | once the claim window has closed, pay the leader |
-| `Reclaim` | verify the maker's signature | if no one revealed by `expiry + REVEAL_GRACE`, refund the maker |
+| `Reclaim` | verify the maker's signature | if no one revealed by `expiry + disclosure window + REVEAL_GRACE`, refund the maker |
 | `Release` | — | delete a commitment (named by bounty and hash) that can no longer be revealed; its deposit stays forfeit |
 | `Attest` | read the check, the subjects and the trusted subjects it cites from the extrinsics, and compute the subjects' Merkle root; verify the attester's signature over the claim; run the check in attest mode with the attester's witness | the parents were recorded and this wasn't yet; take the configured attest deposit (in the fee asset); record the attestation |
 | `Propose` | verify the admin's signature | record an admin action (a configuration, a new admin, or an upgrade, whose code it solicits) to take effect after `ADMIN_DELAY`; the first configuration applies at once |
@@ -90,6 +90,26 @@ guarantor rotations. `rules/src/tests.rs` covers both cases.
 Commitments are stored per bounty. A commitment hash hides which bounty it is for, so with one
 global key someone could copy a hunter's in-flight commitment onto another bounty first and block
 the real one. Keyed by bounty, the copy sits apart where no reveal can ever match it.
+
+### Disclosure windows
+
+Some witnesses shouldn't be published the moment they're found: a report of a bug in a live
+protocol (see [witness-evm](https://github.com/ascrivener/witness-evm)) reveals how to exploit it,
+and JAM's data availability keeps a work package's extrinsics fetchable for weeks. A bounty can
+set a `disclosure_window` (up to `MAX_DISCLOSURE_WINDOW`, about 90 days) for them:
+
+1. The hunter commits on chain, then shows the maker `x` (and the salt) privately. The maker can
+   check it against the commitment and run the check off chain.
+2. The maker has the window to fix the bug. No reveal of that commitment is accepted before the
+   window has passed since it was committed.
+3. The hunter reveals, and the bounty pays as any other. A check that judges `x` against a fixed
+   snapshot (the state before the fix) still accepts it, so fixing the bug can't void the report.
+
+Every commitment waits the same window, so an earlier commitment is always revealable first: if
+the disclosure leaks, or the maker tries to claim the report themselves, their later commitment
+still loses. The reward stays escrowed until `expiry + disclosure_window + REVEAL_GRACE`, so a
+commitment made just before expiry still gets its window and the grace. With a window of 0 (the
+default) a bounty works as before.
 
 ### Spam
 
