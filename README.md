@@ -81,23 +81,6 @@ Commitments are stored per bounty. A commitment hash hides which bounty it is fo
 global key someone could copy a hunter's in-flight commitment onto another bounty first and block
 the real one. Keyed by bounty, the copy sits apart where no reveal can ever match it.
 
-Attestations publish too. A proof too big for one reveal is attested in layers, and each layer's
-bundle is on chain once pinned. Any reveal may cite any recorded attestation by its check,
-including ones it didn't make, so someone who sees your lemmas attested can write the last step
-and commit before you do. Commit first: the commitment covers only the witness (the final step),
-not the attestations a reveal cites, and accumulate doesn't look at the witness until the reveal,
-so you can commit before attesting anything. A copier then commits after seeing your layers and
-loses to the earlier commitment, while your reveal still cites the same recorded attestations.
-Every layer has to fit between the commitment, which must land before `expiry`, and the reveal,
-which must land before `expiry + REVEAL_GRACE`, so a bounty that expects a layered proof needs a
-long expiry.
-
-Commit-first only protects a finished proof. If you attest some layers and can't finish, those
-lemmas are anyone's to build on, and a later commitment that completes them wins. The service
-doesn't embargo attestations, because it couldn't protect their content: a bundle is public, so a
-copier could attest the same subjects themselves. Library layers are meant to be shared anyway.
-Attest your own lemmas only once the whole proof is done.
-
 ### Spam
 
 Each commitment locks `COMMIT_DEPOSIT` points, and only a valid reveal gets them back.
