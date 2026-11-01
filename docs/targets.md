@@ -10,6 +10,17 @@ against Ethereum's state root and replays it in revm. PolkaVM contracts hold alm
 on Polkadot Hub, 8 of 544 contracts are PVM code, holding 0.5 DOT between them. Defer the
 PolkaVM check, with explicit triggers to revisit it ([below](#when-to-revisit-polkavm)).
 
+> **Update, 2026-11-01, later the same day.** This survey's numbers stand, but two later
+> findings change how to read its recommendation:
+> - **Witness-evm judges a real exploit on real state.** Hyperbridge's April exploit, replayed
+>   from a hunter account, breaks a supply invariant at 1.6% of a refine's gas. The rule that
+>   came out of it, caps on bridged supply that allow for pending messages, is in witness-evm's
+>   `docs/invariants.md`.
+> - **For small checks, settling on Ethereum with a zk proof is viable.** One exploit replay or one reveal
+>   costs cents to a few dollars to prove. JAM's edge is library-scale checking, because it
+>   executes the check rather than proving it, and that's prove-it's core. So break-it on EVM
+>   is not where JAM is needed most, and the long-run prove-it work comes first.
+
 Two caveats shape everything after this:
 
 1. **The amounts are small.** About $22M sits in Snowbridge on Ethereum and about $24M in
