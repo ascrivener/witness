@@ -200,12 +200,48 @@ def uvar(n):
         else: out.append(b); return bytes(out)
 items = [open(p, "rb").read() for p in sys.argv[2:]]
 open(sys.argv[1], "wb").write(uvar(len(items)) + b"".join(uvar(len(i)) + i for i in items))
-' "$OUT/wrong.pack" "$OUT/nodes/nodes/$GOAL_NODE" "$OUT/nodes/proofs/$WRONG_NODE"
+'  "$OUT/wrong.pack" "$OUT/nodes/nodes/$GOAL_NODE" "$OUT/nodes/proofs/$WRONG_NODE"
+# A forged proof: WRONG's proof term relabelled to claim THEOREM's statement (a proof names the
+# statement it proves by hash, right after its magic), trusting everything it imports, so only the
+# kernel's type check can tell. Packed as above, with the trusted references it needs.
+python3 -I - "$OUT" "$GOAL_NODE" "$WRONG_NODE" <<'PY'
+import json, sys
+out, goal, wrong = sys.argv[1:]
+proof = bytearray(open(f"{out}/nodes/proofs/{wrong}", "rb").read())
+assert proof[:8] == b"LEANPRF\x01" and proof[8:40].hex() == wrong
+proof[8:40] = bytes.fromhex(goal)
+open(f"{out}/forged.proof", "wb").write(proof)
+manifest = {e["hash"]: e for e in json.load(open(f"{out}/nodes/manifest.json"))}
+home = {}
+for n, b in enumerate(json.load(open(f"{out}/plan.json"))):
+    for i, h in enumerate(b.get("subjects", [])):
+        home[h] = f"{out}/w/batch-{n}.claim:{i}"
+need, todo = set(), list(manifest[wrong].get("proof_imports", [])) + list(manifest[goal]["imports"])
+while todo:
+    h = todo.pop()
+    if h not in need:
+        need.add(h)
+        todo += manifest[h]["imports"]
+open(f"{out}/forged.trust", "w").write(",".join(home[h] for h in sorted(need)))
+PY
+python3 -I -c '
+import sys
+def uvar(n):
+    out = bytearray()
+    while True:
+        b = n & 0x7F; n >>= 7
+        if n: out.append(b | 0x80)
+        else: out.append(b); return bytes(out)
+items = [open(p, "rb").read() for p in sys.argv[2:]]
+open(sys.argv[1], "wb").write(uvar(len(items)) + b"".join(uvar(len(i)) + i for i in items))
+' "$OUT/forged.pack" "$OUT/nodes/nodes/$GOAL_NODE" "$OUT/forged.proof"
 
 step "hunters commit"
 phase commit
 take carol
 item "$($W commit --service "$SVC" --bounty 0 --hunter carol --nonce $N --salt 0x0c0c --witness-file "$OUT/wrong.pack" 2>/dev/null)"
+take carol
+item "$($W commit --service "$SVC" --bounty 0 --hunter carol --nonce $N --salt 0x0c0d --witness-file "$OUT/forged.pack" 2>/dev/null)"
 take bob
 item "$($W commit --service "$SVC" --bounty 0 --hunter bob --nonce $N --salt 0x0b0b --witness-file "$OUT/w/goal.pack" 2>/dev/null)"
 take bob
@@ -215,8 +251,8 @@ expect "bob's commit deposits taken" "^$((1000000 - 20))\$" balance --balance bo
 wait_slot $(( $(slot) + 2 ))
 
 TRUST=$(cat "$OUT/w/goal.trust")
-reveal() { # BOUNTY PARAMS HUNTER SALT PACK
-	item "$($W reveal --bounty "$1" --check "$CHECK" --params "$2" --blobs "$CITE" --trust "$TRUST" \
+reveal() { # BOUNTY PARAMS HUNTER SALT PACK [TRUST]
+	item "$($W reveal --bounty "$1" --check "$CHECK" --params "$2" --blobs "$CITE" --trust "${6:-$TRUST}" \
 		--check-gas "$GAS" --hunter "$3" --salt "$4" --witness-file "$5" --extrinsics "$X")"
 }
 
@@ -227,6 +263,14 @@ WRONG_REFINE=$(last_refine) WRONG_GAS=$(last_check_gas)
 echo "refine: $WRONG_REFINE"
 grep -q 'Rejected' <<<"$WRONG_REFINE" || fail "the wrong proof wasn't rejected"
 expect "the wrong proof changed nothing" 'status: Open' bounty --bounty 0
+
+step "carol reveals a forged proof ($WRONG's proof term, relabelled as a proof of $THEOREM)"
+phase reveal-forged-proof
+reveal 0 "$GOAL_NODE" carol 0x0c0d "$OUT/forged.pack" "$(cat "$OUT/forged.trust")"
+FORGED_REFINE=$(last_refine) FORGED_GAS=$(last_check_gas)
+echo "refine: $FORGED_REFINE"
+grep -q 'Rejected' <<<"$FORGED_REFINE" || fail "the forged proof wasn't rejected"
+expect "the forged proof changed nothing" 'status: Open' bounty --bounty 0
 
 step "bob reveals his proof of $THEOREM to the bounty for $OTHER (a different statement)"
 phase reveal-other-statement
@@ -261,10 +305,11 @@ TOTAL_SECS=$(echo "$(now) - $DEMO_START" | bc)
 
 step "report"
 python3 -I - "$OUT" "$BATCHES" "$GAS" "$MAX_CHECK_GAS" "$TOTAL_SECS" "$REVEAL_SECS" "$REVEAL_GAS" "$WRONG_GAS" "$OTHER_GAS" \
-	"$WRONG_REFINE" "$OTHER_REFINE" "$THEOREM" "$OTHER" "$GOAL_NODE" "$WRONG" "$GAS_PER_MS" "$WITNESS_DIR/out/witness-service.jam" <<'EOF'
+	"$WRONG_REFINE" "$OTHER_REFINE" "$THEOREM" "$OTHER" "$GOAL_NODE" "$WRONG" "$GAS_PER_MS" "$WITNESS_DIR/out/witness-service.jam" \
+	"$FORGED_REFINE" "$FORGED_GAS" <<'EOF'
 import json, os, re, statistics, sys
 (out, batches, gas, max_gas, total, reveal_secs, reveal_gas, wrong_gas, other_gas, wrong_refine,
- other_refine, theorem, other, goal, wrong, gas_per_ms, service) = sys.argv[1:]
+ other_refine, theorem, other, goal, wrong, gas_per_ms, service, forged_refine, forged_gas) = sys.argv[1:]
 log = open(f"{out}/sim/log").read().splitlines()
 phases = [l.split("\t") for l in open(f"{out}/times.tsv").read().splitlines()]
 times = {p[0]: float(p[1]) for p in phases}
@@ -290,6 +335,7 @@ r = {
     "reveal_gas": int(reveal_gas), "reveal_trusts": len(goal_trust),
     "goal_pack_bytes": os.path.getsize(f"{out}/w/goal.pack"),
     "wrong_proof": {"proof_of": wrong, "gas": int(wrong_gas or 0), "refine": wrong_refine},
+    "forged_proof": {"proof_of": wrong, "gas": int(forged_gas or 0), "refine": forged_refine},
     "other_statement_reveal": {"gas": int(other_gas or 0), "refine": other_refine},
     "check_blob_bytes": os.path.getsize(f"{out}/lean-check.jam"), "service_blob_bytes": os.path.getsize(service),
     "export_bytes": os.path.getsize(f"{out}/export.ndjson"),
@@ -306,6 +352,7 @@ lines = [
     f"- attest gas: min {a['min']:.3g}, median {a['median']:.3g}, max {a['max']:.3g} ({pct(a['max'])} of MAX_CHECK_GAS), total {a['total']:.3g}",
     f"- reveal gas: {r['reveal_gas']:.3g} ({pct(r['reveal_gas'])} of MAX_CHECK_GAS), trusting {r['reveal_trusts']} nodes; witness {r['goal_pack_bytes']:,} B",
     f"- wrong proof ({theorem}'s statement, {wrong}'s proof): {wrong_refine} after {r['wrong_proof']['gas']:.3g} gas",
+    f"- forged proof ({wrong}'s proof term relabelled as {theorem}'s, its imports trusted): {forged_refine} after {r['forged_proof']['gas']:.3g} gas",
     f"- {theorem}'s proof revealed to a bounty for {other}: {other_refine} after {r['other_statement_reveal']['gas']:.3g} gas",
     f"- check blob {r['check_blob_bytes']:,} B, service blob {r['service_blob_bytes']:,} B; {int(gas_per_ms)/1e6:.0f}M gas per native ms here",
     "", "| phase | seconds |", "|---|---|",
