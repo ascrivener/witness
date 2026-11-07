@@ -175,7 +175,7 @@ take alice
 item "$($W create --service "$SVC" --maker alice --nonce $N --check "$CHECK" --params "$OTHER_NODE" \
 	--blobs "$CITE" --reward $REWARD --check-gas "$GAS" --expiry $(( $(slot) + 2000 )))"
 expect "bounty 1 open: prove $OTHER ($OTHER_NODE)" 'status: Open' bounty --bounty 1
-expect "alice escrowed both rewards" "balance: $((1000000 - 2 * REWARD))," account --account alice
+expect "alice escrowed both rewards" "^$((1000000 - 2 * REWARD))\$" balance --balance alice --asset test
 
 # A wrong proof: THEOREM's statement, with OTHER's proof (a real proof, of something else).
 python3 -I -c '
@@ -198,7 +198,8 @@ take bob
 item "$($W commit --service "$SVC" --bounty 0 --hunter bob --nonce $N --salt 0x0b0b --witness-file "$OUT/w/goal.pack" 2>/dev/null)"
 take bob
 item "$($W commit --service "$SVC" --bounty 1 --hunter bob --nonce $N --salt 0x0b0b --witness-file "$OUT/w/goal.pack" 2>/dev/null)"
-expect "bob committed twice (deposits taken)" "balance: $((1000000 - 20)), nonce: 2" account --account bob
+expect "bob committed twice" "nonce: 2" account --account bob
+expect "bob's commit deposits taken" "^$((1000000 - 20))\$" balance --balance bob --asset test
 wait_slot $(( $(slot) + 2 ))
 
 TRUST=$(cat "$OUT/w/goal.trust")
@@ -242,7 +243,7 @@ wait_slot "$END"
 item "$($W finalize --bounty 0)"
 expect "bounty 0 claimed" 'Claimed' bounty --bounty 0
 # Bob's deposit for bounty 0 came back at his reveal; bounty 1's stays locked until he releases it.
-expect "bob was paid $REWARD" "balance: $((1000000 - 10 + REWARD)), nonce: 2" account --account bob
+expect "bob was paid $REWARD" "^$((1000000 - 10 + REWARD))\$" balance --balance bob --asset test
 phase
 TOTAL_SECS=$(echo "$(now) - $DEMO_START" | bc)
 
