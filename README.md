@@ -1,13 +1,25 @@
 # witness
 
-A verification layer, as a JAM service. Witness does three things:
+Witness is a verification layer for JAM: checks run under consensus, their results become a public
+registry of verified claims, and payments can depend on them.
 
 - **It runs checks under consensus.** A check is a PVM program, `check(params, blobs, x) -> bool`.
   Witness runs it in refine, so JAM's guarantors and auditors stand behind the result.
-- **It records verified claims.** An attestation records "check C, with params P, accepted these
-  subjects, trusting subjects of earlier attestations". Later work trusts them instead of checking
-  them again, and other services can read them.
+- **It records verified claims.** An attestation records "check C, with params P, accepted the
+  subjects with these hashes, trusting subjects of earlier attestations". Later work trusts them
+  instead of checking them again, and other services can read them.
 - **It conditions payments on checks.** Money is escrowed and released when a check passes.
+
+The layer is how it works, and the registry is why it compounds. Each attestation is a fact later
+checks can build on, so a library verified once (Mathlib, say) makes every proof that uses it
+cheaper. Witness stores claims, not work: an attestation is a small record whose id hashes the
+check, the params, the root of a Merkle tree over the subjects' hashes, and its parents. The
+subjects, proofs, binaries and other artifacts stay off chain, content-addressed and rebuildable
+by anyone.
+
+The two faces have different audiences. Buyers, including agents, come to verify and then pay: a
+check they trust, and money that moves only when it passes. Ecosystem users and funders care about
+the registry: a growing, public set of verified facts that anyone can rely on and extend.
 
 Bounties are the product built on it so far, and the clearest example: a maker posts a check with a
 reward, hunters commit to an `x` and then reveal it, and among the reveals that pass the check,

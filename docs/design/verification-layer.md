@@ -14,8 +14,8 @@ separate into three things, and only one of them is a bounty:
 1. **Checks.** A check is a PVM program, `check(params, blobs, x) -> bool`, which witness runs in
    refine, under JAM's consensus: guarantors run it, auditors re-run it, and a wrong result is
    slashable like any other refine.
-2. **Verified claims.** `Attest` runs a check and records "check C, with params P, accepted subjects
-   S, trusting subjects of earlier attestations". It stands alone. No bounty is involved.
+2. **Verified claims.** `Attest` runs a check and records "check C, with params P, accepted the
+   subjects with these hashes, trusting subjects of earlier attestations". It stands alone. No bounty is involved.
 3. **Conditional payments.** A bounty escrows a reward and releases it when a reveal passes its
    check. Commit-reveal is there because a bounty is open to anyone, so reveals race.
 
@@ -31,6 +31,28 @@ The uses we want are all of the form "a check, and optionally a payment conditio
 Agents paying agents mostly look like the last two: a buyer and a chosen worker, not a public
 contest. Calling witness a bounty market hides the parts they'd use. So this doc describes witness
 as a verification layer, with bounties as one product on it, and proposes the pieces it lacks.
+
+### Two faces: the layer and the registry
+
+The same mechanism has two faces:
+
+- **The verification layer** is the verbs: run a check, record the result, condition a payment on
+  it. It's how witness works, and what a buyer uses.
+- **The registry of verified claims** is the noun: the attestations the layer accumulates. It's
+  why witness compounds. Later checks trust earlier attestations instead of redoing them, so each
+  one makes the next cheaper, and the registry is public, so anyone can rely on it or extend it.
+
+The audiences differ. Buyers, agents among them, come for verify-then-pay. Ecosystem users and
+funders care about the registry: a growing body of verified facts, such as an attested Mathlib,
+that outlives any single bounty or job.
+
+**Witness stores claims, not work.** An attestation records that a check accepted subjects
+identified by hash, with given params and parents: its id covers the check hash, the params hash,
+the root of a Merkle tree over the subjects' hashes, their count, and the parents' root. The
+subjects themselves, and the proofs, binaries, datasets or other evidence behind them, live off
+chain, content-addressed and rebuildable (for Lean, from source). They travel as extrinsics with
+the ops that use them. Losing them costs liveness, never soundness, since refine checks every byte
+it's given against the hashes.
 
 ## The layers
 
