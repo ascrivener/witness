@@ -290,6 +290,8 @@ polkajam --chain dev:40000 dump-spec dev.json
   with an independent kernel, attesting library once (Mathlib's, say) and binding a
   solver's proof to the bounty's statement. It has proved "there are infinitely many primes" on
   a local testnet, from Mathlib, in 66 attested layers.
+  [docs/demo-lean-bounty.md](docs/demo-lean-bounty.md) pays a bounty for a jam-lean theorem
+  (`Picoalloc.alloc_wf`) end to end in witness-sim (`scripts/lean-bounty-demo.sh`).
 
 ## Writing a check
 
