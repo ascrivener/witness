@@ -6,8 +6,9 @@
 #
 # The target is Picoalloc.alloc_wf (jam-lean's Services/Picoalloc/Alloc.lean: an alignment-1
 # alloc keeps the heap invariant), over Lean core only. MODULE and THEOREM pick another;
-# OTHER names a theorem of the same closure that the negative cases use as "a different
-# statement". See docs/demo-lean-bounty.md for what it shows and the numbers it measured.
+# OTHER (in OTHER_MODULE) is "a different statement" for the negative case: one no one has
+# attested, so outside THEOREM's closure. WRONG is a theorem of THEOREM's closure whose proof the
+# wrong-proof case pairs with THEOREM's statement. See docs/demo-lean-bounty.md for what it shows and the numbers it measured.
 #
 # 1. Export THEOREM's closure from jam-lean (lean4export) and convert it to content-addressed
 #    nodes (witness-lean's `lean-host convert`).
@@ -16,8 +17,8 @@
 #    witness-sim, several attesters a round (scripts/attest-batches.py).
 # 3. Alice posts a bounty whose check is witness-lean's Lean check, with params the hash of
 #    THEOREM's statement node (its name and type: no proof), citing one attested node.
-#    She also posts a second bounty for OTHER's statement.
-# 4. Carol commits to a wrong proof (THEOREM's statement with OTHER's proof); Bob commits to the
+#    She also posts a second bounty for OTHER's statement (hashed from its own export).
+# 4. Carol commits to a wrong proof (THEOREM's statement with WRONG's proof); Bob commits to the
 #    real one. Carol's reveal is rejected; Bob's real proof is rejected by the OTHER bounty
 #    (a proof of a different statement); Bob's reveal to the THEOREM bounty is accepted.
 # 5. After the claim window, Finalize pays Bob the reward.
@@ -34,7 +35,9 @@ set -euo pipefail
 : "${LEAN4EXPORT:?set LEAN4EXPORT to the lean4export binary}"
 MODULE=${MODULE:-Services.Picoalloc.Alloc}
 THEOREM=${THEOREM:-Picoalloc.alloc_wf}
-OTHER=${OTHER:-Picoalloc.allocPost_wf}
+OTHER=${OTHER:-Picoalloc.free_wf}
+OTHER_MODULE=${OTHER_MODULE:-Services.Picoalloc.Free}
+WRONG=${WRONG:-Picoalloc.allocPost_wf}
 # The bounty's check gas: witness_types::MAX_CHECK_GAS, all a check may have.
 GAS=${GAS:-5000000000}
 MAX_CHECK_GAS=5000000000
@@ -105,17 +108,26 @@ phase build
 (cargo build -q --release -p witness-sim -p witness-cli && cargo jam-build --out-dir out -p witness-service >/dev/null)
 (cd "$WITNESS_LEAN_DIR" && cargo build -q --release -p lean-host && cargo jam-build --out-dir out >/dev/null)
 cp "$WITNESS_LEAN_DIR/out/lean-check.jam" "$CHECK"
-(cd "$JAM_LEAN_DIR" && lake build "$MODULE" >/dev/null)
+(cd "$JAM_LEAN_DIR" && lake build "$MODULE" "$OTHER_MODULE" >/dev/null)
 
 step "exporting $THEOREM from jam-lean ($MODULE) and converting it to nodes"
 phase export
-(cd "$JAM_LEAN_DIR" && lake env "$LEAN4EXPORT" "$MODULE" -- "$THEOREM" "$OTHER") >"$OUT/export.ndjson"
+(cd "$JAM_LEAN_DIR" && lake env "$LEAN4EXPORT" "$MODULE" -- "$THEOREM") >"$OUT/export.ndjson"
+# The maker of the OTHER bounty hashes its statement from an export of their own: nodes are
+# content-addressed, so it's the hash any export of it would give.
+(cd "$JAM_LEAN_DIR" && lake env "$LEAN4EXPORT" "$OTHER_MODULE" -- "$OTHER") >"$OUT/other.ndjson"
 phase convert
 "$HOST" convert "$OUT/export.ndjson" "$OUT/nodes" >/dev/null
-GOAL_NODE=$(python3 -I -c 'import json,sys; m=json.load(open(sys.argv[1])); print(next(e["hash"] for e in m if sys.argv[2] in e["names"]))' \
-	"$OUT/nodes/manifest.json" "$THEOREM")
-OTHER_NODE=$(python3 -I -c 'import json,sys; m=json.load(open(sys.argv[1])); print(next(e["hash"] for e in m if sys.argv[2] in e["names"]))' \
-	"$OUT/nodes/manifest.json" "$OTHER")
+rm -rf "$OUT/other-nodes"
+"$HOST" convert "$OUT/other.ndjson" "$OUT/other-nodes" >/dev/null
+node_of() { # DIR NAME
+	python3 -I -c 'import json,sys; m=json.load(open(sys.argv[1])); print(next(e["hash"] for e in m if sys.argv[2] in e["names"]))' \
+		"$1/manifest.json" "$2"
+}
+GOAL_NODE=$(node_of "$OUT/nodes" "$THEOREM")
+WRONG_NODE=$(node_of "$OUT/nodes" "$WRONG")
+OTHER_NODE=$(node_of "$OUT/other-nodes" "$OTHER")
+[ -e "$OUT/nodes/nodes/$OTHER_NODE" ] && fail "$OTHER is in $THEOREM's closure, so it will be attested: pick another OTHER"
 echo "$(python3 -I -c 'import json,sys; print(len(json.load(open(sys.argv[1]))))' "$OUT/nodes/manifest.json") nodes; $THEOREM is $GOAL_NODE"
 
 step "planning the library into batches"
@@ -177,7 +189,7 @@ item "$($W create --service "$SVC" --maker alice --nonce $N --check "$CHECK" --p
 expect "bounty 1 open: prove $OTHER ($OTHER_NODE)" 'status: Open' bounty --bounty 1
 expect "alice escrowed both rewards" "^$((1000000 - 2 * REWARD))\$" balance --balance alice --asset test
 
-# A wrong proof: THEOREM's statement, with OTHER's proof (a real proof, of something else).
+# A wrong proof: THEOREM's statement, with WRONG's proof (a real proof, of something else).
 python3 -I -c '
 import sys
 def uvar(n):
@@ -188,7 +200,7 @@ def uvar(n):
         else: out.append(b); return bytes(out)
 items = [open(p, "rb").read() for p in sys.argv[2:]]
 open(sys.argv[1], "wb").write(uvar(len(items)) + b"".join(uvar(len(i)) + i for i in items))
-' "$OUT/wrong.pack" "$OUT/nodes/nodes/$GOAL_NODE" "$OUT/nodes/proofs/$OTHER_NODE"
+' "$OUT/wrong.pack" "$OUT/nodes/nodes/$GOAL_NODE" "$OUT/nodes/proofs/$WRONG_NODE"
 
 step "hunters commit"
 phase commit
@@ -208,7 +220,7 @@ reveal() { # BOUNTY PARAMS HUNTER SALT PACK
 		--check-gas "$GAS" --hunter "$3" --salt "$4" --witness-file "$5" --extrinsics "$X")"
 }
 
-step "carol reveals a wrong proof ($THEOREM's statement, $OTHER's proof)"
+step "carol reveals a wrong proof ($THEOREM's statement, $WRONG's proof)"
 phase reveal-wrong-proof
 reveal 0 "$GOAL_NODE" carol 0x0c0c "$OUT/wrong.pack"
 WRONG_REFINE=$(last_refine) WRONG_GAS=$(last_check_gas)
@@ -249,10 +261,10 @@ TOTAL_SECS=$(echo "$(now) - $DEMO_START" | bc)
 
 step "report"
 python3 -I - "$OUT" "$BATCHES" "$GAS" "$MAX_CHECK_GAS" "$TOTAL_SECS" "$REVEAL_SECS" "$REVEAL_GAS" "$WRONG_GAS" "$OTHER_GAS" \
-	"$WRONG_REFINE" "$OTHER_REFINE" "$THEOREM" "$OTHER" "$GOAL_NODE" "$GAS_PER_MS" "$WITNESS_DIR/out/witness-service.jam" <<'EOF'
+	"$WRONG_REFINE" "$OTHER_REFINE" "$THEOREM" "$OTHER" "$GOAL_NODE" "$WRONG" "$GAS_PER_MS" "$WITNESS_DIR/out/witness-service.jam" <<'EOF'
 import json, os, re, statistics, sys
 (out, batches, gas, max_gas, total, reveal_secs, reveal_gas, wrong_gas, other_gas, wrong_refine,
- other_refine, theorem, other, goal, gas_per_ms, service) = sys.argv[1:]
+ other_refine, theorem, other, goal, wrong, gas_per_ms, service) = sys.argv[1:]
 log = open(f"{out}/sim/log").read().splitlines()
 phases = [l.split("\t") for l in open(f"{out}/times.tsv").read().splitlines()]
 times = {p[0]: float(p[1]) for p in phases}
@@ -277,7 +289,7 @@ r = {
     "batch_bytes": {"min": min(subjects), "median": int(statistics.median(subjects)), "max": max(subjects)},
     "reveal_gas": int(reveal_gas), "reveal_trusts": len(goal_trust),
     "goal_pack_bytes": os.path.getsize(f"{out}/w/goal.pack"),
-    "wrong_proof": {"gas": int(wrong_gas or 0), "refine": wrong_refine},
+    "wrong_proof": {"proof_of": wrong, "gas": int(wrong_gas or 0), "refine": wrong_refine},
     "other_statement_reveal": {"gas": int(other_gas or 0), "refine": other_refine},
     "check_blob_bytes": os.path.getsize(f"{out}/lean-check.jam"), "service_blob_bytes": os.path.getsize(service),
     "export_bytes": os.path.getsize(f"{out}/export.ndjson"),
@@ -293,8 +305,8 @@ lines = [
     f"- {r['batches']} attest batches over {depths} depths; a batch's subjects and witness {r['batch_bytes']['min']:,}–{r['batch_bytes']['max']:,} B (median {r['batch_bytes']['median']:,})",
     f"- attest gas: min {a['min']:.3g}, median {a['median']:.3g}, max {a['max']:.3g} ({pct(a['max'])} of MAX_CHECK_GAS), total {a['total']:.3g}",
     f"- reveal gas: {r['reveal_gas']:.3g} ({pct(r['reveal_gas'])} of MAX_CHECK_GAS), trusting {r['reveal_trusts']} nodes; witness {r['goal_pack_bytes']:,} B",
-    f"- wrong proof: {wrong_refine} after {r['wrong_proof']['gas']:.3g} gas",
-    f"- proof of a different statement: {other_refine} after {r['other_statement_reveal']['gas']:.3g} gas",
+    f"- wrong proof ({theorem}'s statement, {wrong}'s proof): {wrong_refine} after {r['wrong_proof']['gas']:.3g} gas",
+    f"- {theorem}'s proof revealed to a bounty for {other}: {other_refine} after {r['other_statement_reveal']['gas']:.3g} gas",
     f"- check blob {r['check_blob_bytes']:,} B, service blob {r['service_blob_bytes']:,} B; {int(gas_per_ms)/1e6:.0f}M gas per native ms here",
     "", "| phase | seconds |", "|---|---|",
 ] + [f"| {k} | {v:.1f} |" for k, v in r["seconds"].items()]
