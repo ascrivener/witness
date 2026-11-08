@@ -1,28 +1,68 @@
 # witness
 
-A "find the witness" bounty market as a JAM service. A maker posts `check(params, x) -> bool`
-with a reward. Hunters commit to an `x` and then reveal it. Among the reveals that pass the
-check, the one whose commitment reached the chain first wins.
+Witness is a verification layer for JAM: checks run under consensus, their results become a public
+registry of verified claims, and payments can depend on them.
+
+- **It runs checks under consensus.** A check is a PVM program, `check(params, blobs, x) -> bool`.
+  Witness runs it in refine, so JAM's guarantors and auditors stand behind the result.
+- **It records verified claims.** An attestation records "check C, with params P, accepted the
+  subjects with these hashes, trusting subjects of earlier attestations". Later work trusts them
+  instead of checking them again, and other services can read them.
+- **It conditions payments on checks.** Money is escrowed and released when a check passes.
+
+The layer is how it works, and the registry is why it compounds. Each attestation is a fact later
+checks can build on, so a library verified once (Mathlib, say) makes every proof that uses it
+cheaper. Witness stores claims, not work: an attestation is a small record whose id hashes the
+check, the params, the root of a Merkle tree over the subjects' hashes, and its parents. The
+subjects, proofs, binaries and other artifacts stay off chain, content-addressed and rebuildable
+by anyone.
+
+The two faces have different audiences. Buyers, including agents, come to verify and then pay: a
+check they trust, and money that moves only when it passes. Ecosystem users and funders care about
+the registry: a growing, public set of verified facts that anyone can rely on and extend.
+
+Bounties are the product built on it so far, and the clearest example: a maker posts a check with a
+reward, hunters commit to an `x` and then reveal it, and among the reveals that pass the check,
+the one whose commitment reached the chain first wins. Assigned jobs, where a buyer pays a named
+worker whose output passes a check, are a proposal. See
+[docs/design/verification-layer.md](docs/design/verification-layer.md) for the layers, what's
+built and what's proposed, and how formal verification, verifiable inference and agent work
+markets map onto them.
 
 Rewards are paid in stablecoins (or any asset) held by token services: users deposit them by a
 transfer from the token service and withdraw them by a transfer back. Witness's own native
 balance only pays for the records it stores. See [docs/design/tokens.md](docs/design/tokens.md).
 Not yet deployed anywhere with real money: test builds also have a faucet (`Mint`).
 
-## How it works
+## The layers
+
+| Layer | Built today | Ops | Proposed |
+|---|---|---|---|
+| [Checks](#checks) | PVM programs with params, blobs, trusted subjects and up to 5×10⁹ gas, run in refine | run inside `Attest` and `Reveal` | a library of [standard checks](docs/design/standard-checks.md) |
+| [Verified claims](#verified-claims-attestations) | attestations, forming a DAG, kept for good | `Attest` | a stable format for other services to read |
+| [Conditional payments](#conditional-payments) | open bounties, with commit-reveal | `CreateBounty`, `Commit`, `Reveal`, `Finalize`, `Reclaim`, `Release` | [assigned jobs](#assigned-jobs-proposed) |
+| [Other services](#use-by-other-services) | another service's accumulate can read attestations from witness's storage | none: they read storage | notifications by transfer |
+
+Balances (deposits and withdrawals of token-service assets, and fees) sit under all of them.
+
+## Operations
 
 | Op | Refine (in-core, stateless) | Accumulate (on-chain) |
 |---|---|---|
-| deposit (a transfer in) | — | from an accepted token service, with a deposit memo: credit the account it names with that asset |
-| `Withdraw` | verify the account's signature | debit the asset; send its token service a transfer whose memo pays the payee there |
-| `Mint` | — | test builds: credit the test asset (a faucet, at most `MAX_MINT`) |
+| **Verified claims** | | |
+| `Attest` | read the check, the subjects and the trusted subjects it cites from the extrinsics, and compute the subjects' Merkle root; verify the attester's signature over the claim; run the check in attest mode with the attester's witness | the parents were recorded and this wasn't yet; take the configured attest deposit (in the fee asset); record the attestation |
+| **Conditional payments: bounties** | | |
 | `CreateBounty` | verify the maker's Ed25519 signature | check nonce, balance and limits, that the bounty's asset is accepted, and that cited attestations exist and are by the bounty's check with one set of params; escrow the reward; store the bounty |
 | `Commit` | verify the committer's signature | the bounty takes commitments; lock the configured commit deposit (in the fee asset); record the slot of `blake2b(bounty_id, x, hunter, salt)` |
 | `Reveal` | read the check blob, the plain blobs and the trusted subjects the reveal cites (the bounty's, and any more it adds) from the work item's extrinsics, checking each against the bounty's hashes or its claim's Merkle root; run the check on them (attested ones marked trusted), `params` and `x` in an inner PVM with the bounty's `check_gas` | the terms match, the cited attestations were recorded, and the commitment is older than this slot, by the bounty's disclosure window if it has one, and made before expiry. The first valid reveal opens the claim window, and later ones replace the leader if their commitment is earlier. Refund the deposit |
 | `Finalize` | — | once the claim window has closed, pay the leader |
 | `Reclaim` | verify the maker's signature | if no one revealed by `expiry + disclosure window + REVEAL_GRACE`, refund the maker |
 | `Release` | — | delete a commitment (named by bounty and hash) that can no longer be revealed; its deposit stays forfeit |
-| `Attest` | read the check, the subjects and the trusted subjects it cites from the extrinsics, and compute the subjects' Merkle root; verify the attester's signature over the claim; run the check in attest mode with the attester's witness | the parents were recorded and this wasn't yet; take the configured attest deposit (in the fee asset); record the attestation |
+| **Balances** | | |
+| deposit (a transfer in) | — | from an accepted token service, with a deposit memo: credit the account it names with that asset |
+| `Withdraw` | verify the account's signature | debit the asset; send its token service a transfer whose memo pays the payee there |
+| `Mint` | — | test builds: credit the test asset (a faucet, at most `MAX_MINT`) |
+| **Administration** | | |
 | `Propose` | verify the admin's signature | record an admin action (a configuration, a new admin, or an upgrade, whose code it solicits) to take effect after `ADMIN_DELAY`; the first configuration applies at once |
 | `Apply` | — | carry out a proposal whose delay has passed |
 | `Cancel` | verify the admin's signature | drop a proposal |
@@ -34,7 +74,80 @@ its hash), and the rest in extrinsics that are each a SCALE `Vec<Vec<u8>>` of bl
 So state holds only records: bounties, commitments, accounts, balances and attestations. See
 [docs/design/extrinsics.md](docs/design/extrinsics.md).
 
-### Attestations
+## Checks
+
+Check blobs are JAM program blobs, as `cargo jam-build` writes them for an authorizer-type crate:
+conventional metadata, then a standard program (GP appendix A.7). Refine skips the metadata and
+builds the inner PVM's memory and registers exactly as `Y(p, args)` would
+([service/src/check_vm.rs](service/src/check_vm.rs), [types/src/program.rs](types/src/program.rs)).
+The arguments (interface version 2) are:
+
+```
+E1(2) ++ E1(mode) ++ E4(n) ++ [E1(trusted) ++ hash ++ E4(|data|) ++ data]^n ++ E4(|params|) ++ params ++ x
+```
+
+`mode` is 0 to reveal and 1 to attest. The `n` blobs are the trusted subjects, in the order the
+op cites them, then, when revealing, the bounty's plain blobs, or, when attesting, the subjects to
+attest, untrusted, with the attester's witness as `x`. At most `MAX_BLOBS` blobs and
+`MAX_BLOBS_LEN` bytes in all. `witness_check` parses the arguments back. Halting with 1 in `φ7` means true. Anything else
+(0, panic, page fault, out of gas, any host call but `grow_heap`) means false. `check_gas` is
+capped at `MAX_CHECK_GAS` (5×10⁹, the full spec's refine gas), and refine lends the inner VM at
+most what it can spare of it, keeping a reserve for its own work after.
+
+A check may call `grow_heap` (host call 1). Refine maps the pages it asks for, after the check's
+read-write data and short of its stack, charges the check the gas `grow_heap` costs a service, and
+resumes it. Everything the check uses, arguments included, must fit in `MAX_CHECK_PAGES` (128 MiB);
+past that the call returns the heap's current end and the allocation fails.
+
+Because the check gets the bounty's `params` and blobs, one check blob serves many bounties.
+`checks/blake2b-preimage` takes the target hash as its params, so any number of "find the
+preimage" bounties share one on-chain blob. `checks/dictionary` reads a dictionary blob and builds
+a set of its words on the heap, so bounties at different difficulties share both blobs.
+`checks/sorted-words` attests batches of word volumes (sorted, after the words it trusts) once, then
+binary-searches trusted volumes on each reveal instead of checking them in full.
+
+### Writing a check
+
+```rust
+#![cfg_attr(not(test), no_std)]
+fn check(params: &[u8], x: &[u8]) -> bool { /* ... */ }
+witness_check::declare_check!(check);
+```
+
+The crate depends on `witness-check` and `polkavm-derive`, and declares
+`[package.metadata.jam] type = "authorizer"` so `cargo jam-build` builds it with the single entry
+point a check needs. A check declared this way ignores the bounty's blobs, and is false in any
+mode but reveal.
+
+A check that reads blobs takes the whole input instead:
+
+```rust
+fn check(input: &witness_check::Input) -> bool {
+    let Some(environment) = input.blob(0) else { return false };
+    /* ... input.mode, input.params, input.witness, environment.data ... */
+}
+witness_check::declare_full_check!(check);
+```
+
+It should return false for any mode it doesn't handle. A check that supports attest mode
+verifies `input.subjects()` (the untrusted blobs) given `input.trusted()`. In reveal mode it
+can rely on trusted blobs, which its own attest mode accepted, and must verify untrusted ones. With `witness-check`'s `alloc` feature the check gets a global allocator, so `alloc`
+types (`Vec`, `BTreeMap`) work. Checks get no other host calls, so no logging or I/O. The stack is
+8 KiB unless the check raises it with `polkavm_derive::min_stack_size!`.
+
+### Checks built on witness
+
+- **Lean 4 proofs:** [witness-lean](https://github.com/ascrivener/witness-lean) checks Lean proofs
+  with an independent kernel, attesting library once (Mathlib's, say) and binding a
+  solver's proof to the bounty's statement. It has proved "there are infinitely many primes" on
+  a local testnet, from Mathlib, in 66 attested layers.
+  [docs/demo-lean-bounty.md](docs/demo-lean-bounty.md) pays a bounty for a jam-lean theorem
+  (`Picoalloc.alloc_wf`) end to end in witness-sim (`scripts/lean-bounty-demo.sh`).
+
+[docs/design/standard-checks.md](docs/design/standard-checks.md) lists these and the samples, and
+proposes the checks worth adding (inference-proof verifiers, test harnesses, certificate checkers).
+
+## Verified claims: attestations
 
 An attestation records that a check, run once in attest mode with some params, accepted every
 subject in a list, given trusted subjects of earlier attestations: "check C verified B₁…Bₙ, given
@@ -77,7 +190,16 @@ losing them costs liveness, never soundness, since refine checks every byte it's
 attester's witness is the evidence (a batch's proofs, say) and is not part of the claim.
 Attestations are permanent. See [docs/design/attestation-dag.md](docs/design/attestation-dag.md).
 
-### Front-running
+## Conditional payments
+
+### Bounties
+
+A bounty is an open offer: a maker escrows a reward for anyone whose witness `x` passes the
+bounty's check. Anyone can answer, and revealing `x` publishes it, so bounties use commit-reveal:
+hunters commit to `x` first, and among the valid reveals in the claim window, the earliest
+commitment wins. The rest of this section is how that holds up.
+
+#### Front-running
 
 Revealing `x` publishes it, and guarantors see it first. Anyone who copies `x` can only commit
 after seeing it, so the original commitment is always earlier. Getting your reveal on chain first
@@ -91,7 +213,7 @@ Commitments are stored per bounty. A commitment hash hides which bounty it is fo
 global key someone could copy a hunter's in-flight commitment onto another bounty first and block
 the real one. Keyed by bounty, the copy sits apart where no reveal can ever match it.
 
-### Disclosure windows
+#### Disclosure windows
 
 Some witnesses shouldn't be published the moment they're found: a report of a bug in a live
 protocol (see [witness-evm](https://github.com/ascrivener/witness-evm)) reveals how to exploit it,
@@ -111,7 +233,7 @@ still loses. The reward stays escrowed until `expiry + disclosure_window + REVEA
 commitment made just before expiry still gets its window and the grace. With a window of 0 (the
 default) a bounty works as before.
 
-### Bound claims
+#### Bound claims
 
 A reveal can win by *trusting* attested work rather than carrying it: a refutation attested in
 chunks pays out once a reveal trusts the attested empty clause (see
@@ -139,7 +261,33 @@ witness (sat-check ignores the witness once the empty clause is trusted).
 
 `rules/src/tests.rs` covers the attack without the option, and with it.
 
-### Spam
+### Assigned jobs (proposed)
+
+Not implemented. A buyer escrows a payment for a named worker, released when the worker's
+submission passes the job's check, with a deadline after which the buyer can reclaim it. Only one
+account can be paid, so copying a submission gains nothing: no commit-reveal, no claim window, and
+the first passing submission pays at once. An optional worker bond covers a worker who accepts and
+doesn't deliver. The ops (`CreateJob`, `AcceptJob`, `Submit`, `ReclaimJob`), their records and their
+failure cases are sketched in
+[docs/design/verification-layer.md](docs/design/verification-layer.md#sketch-assigned-job-ops).
+
+## Use by other services
+
+JAM lets a service read another service's storage in accumulate, but not in refine, and not
+write it. So another service's accumulate can confirm an attestation today, with no change to
+witness: its work item carries the claim and a subject's Merkle path, and it reads
+`StorageKey::Attestation(id)` from witness's storage, checks the record's check and params hashes
+are ones it trusts, and checks the path against the claim's root. An upgrade gate (a service that
+only upgrades to code an attested check approved) can be built this way, given a check that can
+judge code. The storage layout is internal for now, and witness's admin can change it, so a
+stable format is proposed before anyone relies on it. See
+[docs/design/verification-layer.md](docs/design/verification-layer.md#4-consumption-by-other-jam-services).
+
+## Balances and spam
+
+Balances are per account and per asset, credited by deposits from accepted token services and
+paid out by `Withdraw` ([docs/design/tokens.md](docs/design/tokens.md)). Escrow, rewards and
+deposits all come out of them.
 
 Each commitment locks the configured commit deposit, and only a valid reveal gets it back. Each
 attestation pays the attest deposit, for good. Both are in one fee asset the configuration
@@ -147,38 +295,6 @@ names: they exist because every record is storage witness's sponsor pays for.
 Accumulate checks the service can pay the storage deposit for an operation before writing
 anything. An operation it can't store is rejected whole, and the other work items in the same
 batch still go through.
-
-### Checks
-
-Check blobs are JAM program blobs, as `cargo jam-build` writes them for an authorizer-type crate:
-conventional metadata, then a standard program (GP appendix A.7). Refine skips the metadata and
-builds the inner PVM's memory and registers exactly as `Y(p, args)` would
-([service/src/check_vm.rs](service/src/check_vm.rs), [types/src/program.rs](types/src/program.rs)).
-The arguments (interface version 2) are:
-
-```
-E1(2) ++ E1(mode) ++ E4(n) ++ [E1(trusted) ++ hash ++ E4(|data|) ++ data]^n ++ E4(|params|) ++ params ++ x
-```
-
-`mode` is 0 to reveal and 1 to attest. The `n` blobs are the trusted subjects, in the order the
-op cites them, then, when revealing, the bounty's plain blobs, or, when attesting, the subjects to
-attest, untrusted, with the attester's witness as `x`. At most `MAX_BLOBS` blobs and
-`MAX_BLOBS_LEN` bytes in all. `witness_check` parses the arguments back. Halting with 1 in `φ7` means true. Anything else
-(0, panic, page fault, out of gas, any host call but `grow_heap`) means false. `check_gas` is
-capped at `MAX_CHECK_GAS` (5×10⁹, the full spec's refine gas), and refine lends the inner VM at
-most what it can spare of it, keeping a reserve for its own work after.
-
-A check may call `grow_heap` (host call 1). Refine maps the pages it asks for, after the check's
-read-write data and short of its stack, charges the check the gas `grow_heap` costs a service, and
-resumes it. Everything the check uses, arguments included, must fit in `MAX_CHECK_PAGES` (128 MiB);
-past that the call returns the heap's current end and the allocation fails.
-
-Because the check gets the bounty's `params` and blobs, one check blob serves many bounties.
-`checks/blake2b-preimage` takes the target hash as its params, so any number of "find the
-preimage" bounties share one on-chain blob. `checks/dictionary` reads a dictionary blob and builds
-a set of its words on the heap, so bounties at different difficulties share both blobs.
-`checks/sorted-words` attests batches of word volumes (sorted, after the words it trusts) once, then
-binary-searches trusted volumes on each reveal instead of checking them in full.
 
 ## Layout
 
@@ -284,44 +400,6 @@ polkajam --chain dev:40000 dump-spec dev.json
 # in the wrapper: replace an argument --chain=dev:* with --chain=/path/to/full-gas.json
 ```
 
-## Checks built on witness
-
-- **Lean 4 proofs:** [witness-lean](https://github.com/ascrivener/witness-lean) checks Lean proofs
-  with an independent kernel, attesting library once (Mathlib's, say) and binding a
-  solver's proof to the bounty's statement. It has proved "there are infinitely many primes" on
-  a local testnet, from Mathlib, in 66 attested layers.
-  [docs/demo-lean-bounty.md](docs/demo-lean-bounty.md) pays a bounty for a jam-lean theorem
-  (`Picoalloc.alloc_wf`) end to end in witness-sim (`scripts/lean-bounty-demo.sh`).
-
-## Writing a check
-
-```rust
-#![cfg_attr(not(test), no_std)]
-fn check(params: &[u8], x: &[u8]) -> bool { /* ... */ }
-witness_check::declare_check!(check);
-```
-
-The crate depends on `witness-check` and `polkavm-derive`, and declares
-`[package.metadata.jam] type = "authorizer"` so `cargo jam-build` builds it with the single entry
-point a check needs. A check declared this way ignores the bounty's blobs, and is false in any
-mode but reveal.
-
-A check that reads blobs takes the whole input instead:
-
-```rust
-fn check(input: &witness_check::Input) -> bool {
-    let Some(environment) = input.blob(0) else { return false };
-    /* ... input.mode, input.params, input.witness, environment.data ... */
-}
-witness_check::declare_full_check!(check);
-```
-
-It should return false for any mode it doesn't handle. A check that supports attest mode
-verifies `input.subjects()` (the untrusted blobs) given `input.trusted()`. In reveal mode it
-can rely on trusted blobs, which its own attest mode accepted, and must verify untrusted ones. With `witness-check`'s `alloc` feature the check gets a global allocator, so `alloc`
-types (`Vec`, `BTreeMap`) work. Checks get no other host calls, so no logging or I/O. The stack is
-8 KiB unless the check raises it with `polkavm_derive::min_stack_size!`.
-
 ## Using it by hand
 
 `scripts/e2e.sh` is the worked example. In short, with `W=./target/debug/witness`, `SVC` the
@@ -394,7 +472,11 @@ or did not apply it.
 - Attestations are never released.
 - A check only trusts its own attestations. Building on another checker's attested layers would
   need the check to learn which checker made each one.
-- Attestations form linear chains, and a check receives a subject's whole chain, so a refine must
-  load (and typically parse) everything before the subject. A chain's total size is bounded by
-  what one refine can process. Libraries too big for that need attestations that form a DAG, with
-  each subject naming only what it uses.
+- Attestations form a DAG, and a check receives only the trusted subjects an op cites, but those
+  must all fit in one refine with the check's own work (`MAX_BLOBS`, `MAX_BLOBS_LEN`, the work
+  package's size). The linear chains of the first version, where a check received a subject's
+  whole chain, are gone ([docs/design/attestation-dag.md](docs/design/attestation-dag.md)).
+- The storage layout of attestations and bounties is internal. Another service can read it, but
+  a witness upgrade could change it (see "Use by other services").
+- Assigned jobs and notifications to other services are proposals, not implemented
+  ([docs/design/verification-layer.md](docs/design/verification-layer.md)).
