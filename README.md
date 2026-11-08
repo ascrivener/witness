@@ -141,6 +141,8 @@ types (`Vec`, `BTreeMap`) work. Checks get no other host calls, so no logging or
   with an independent kernel, attesting library once (Mathlib's, say) and binding a
   solver's proof to the bounty's statement. It has proved "there are infinitely many primes" on
   a local testnet, from Mathlib, in 66 attested layers.
+  [docs/demo-lean-bounty.md](docs/demo-lean-bounty.md) pays a bounty for a jam-lean theorem
+  (`Picoalloc.alloc_wf`) end to end in witness-sim (`scripts/lean-bounty-demo.sh`).
 
 [docs/design/standard-checks.md](docs/design/standard-checks.md) lists these and the samples, and
 proposes the checks worth adding (inference-proof verifiers, test harnesses, certificate checkers).

@@ -272,7 +272,8 @@ gas, so it would need its own deposit. Not needed until a consumer exists.
 checker and whose blobs cite the attested statement's environment. A solver commits, attests the
 library layers their proof uses that aren't attested yet, and reveals the proof trusting them.
 witness-lean has proved "there are infinitely many primes" from Mathlib this way, in 66 attested
-layers.
+layers. [docs/demo-lean-bounty.md](../demo-lean-bounty.md) runs a bounty for a jam-lean theorem
+(`Picoalloc.alloc_wf`) end to end in witness-sim.
 
 **Flow, assigned job (proposed):** the buyer creates a job naming the worker, the Lean check, the
 statement and a deadline. The worker submits a proof; the check passes; the worker is paid. If the
