@@ -28,11 +28,6 @@ on:
       sync_timeout_minutes:
         description: How long to wait for the node to sync
         default: "300"
-      chain:
-        description: "`toaster` (PolkaJam's built-in Toaster spec, with its proxy nodes) or `file` (the fetched chain spec)"
-        type: choice
-        options: [toaster, file]
-        default: toaster
       stall_minutes:
         description: Give up if the node has no blocks past genesis after this long
         default: "20"
@@ -129,13 +124,12 @@ jobs:
       - name: Start the node
         env:
           NODE_ARGS: ${{ inputs.node_args }}
-          CHAIN: ${{ inputs.chain }}
         run: |
           { "$POLKAJAM" --version; "$POLKAJAM" --help; "$POLKAJAM" run --help; "$JAMT" --help; } >"$LOGS/help.txt" 2>&1 || true
           version=$("$POLKAJAM" --version); echo "$version"
           grep -q "$POLKAJAM_VERSION" <<<"$version" || { echo "expected polkajam $POLKAJAM_VERSION"; exit 1; }
-          if [ "$CHAIN" = file ]; then chain=$RUNNER_TEMP/public.json; else chain=toaster; fi
-          args=(--chain "$chain" run --rpc-port 19800 --temp)
+          # Not `--chain toaster`: in PolkaJam 0.1.29 that is another network (stress-255).
+          args=(--chain "$RUNNER_TEMP/public.json" run --rpc-port 19800 --temp)
           # Runners have no global IPv6; bind IPv4 if the node offers the flag and none was given.
           if [ -z "$(ip -6 addr show scope global)" ] && grep -q -- '--listen-ip' "$LOGS/help.txt" \
               && ! grep -q -- '--listen-ip' <<<"$NODE_ARGS"; then
