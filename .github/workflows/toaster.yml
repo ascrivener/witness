@@ -1,0 +1,237 @@
+# Witness on the JAM Toaster public testnet (chain spec public-30, PolkaJam 0.1.29).
+#
+# There's no public RPC, so each run starts its own non-validating PolkaJam node, waits for it
+# to sync, and then does `action`:
+#   sync-only    measure syncing, and record the node's view of the chain
+#   deploy       create the witness service from the build vendored in ascrivener/jam-lean
+#                (checked byte for byte against a rebuild at the same commit), configure it, and
+#                propose handing the admin role to the key of the WITNESS_ADMIN_SEED secret
+#   bounty       one bounty end to end on service `service_id`
+#   apply-admin  apply proposal `proposal_id` on service `service_id` once its delay has passed
+# See docs/toaster.md. Logs and a summary are uploaded as the run's artifact.
+name: Toaster
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: What to do once the node has synced
+        type: choice
+        options: [sync-only, deploy, bounty, apply-admin]
+        default: sync-only
+      service_id:
+        description: Witness's service id (bounty, apply-admin)
+        default: ""
+      proposal_id:
+        description: The admin proposal to apply (apply-admin)
+        default: "0"
+      sync_timeout_minutes:
+        description: How long to wait for the node to sync
+        default: "300"
+      node_args:
+        description: Extra arguments for `polkajam run` (e.g. --listen-ip 0.0.0.0)
+        default: ""
+
+concurrency:
+  group: toaster
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  POLKAJAM_VERSION: 0.1.29
+  CHAINSPEC_URL: https://jamtoaster.network/chainspec/public.json
+  CHAIN_ID: public-30
+  # The witness build jam-lean's theorems are about: ascrivener/witness at 71e585a, built with
+  # cargo jam-build 0.1.29, vendored in ascrivener/jam-lean at this commit.
+  WITNESS_COMMIT: 71e585a634545b1cb90cf4737198a74865ee2100
+  JAM_LEAN_COMMIT: 98bc6aa6a44f81967024446bb9c53e8f1406b642
+  SERVICE_SHA256: 408b5be2fde1ae49b64f7c1ee44d2660472f1c9545320bf7a65ee9281206e2e4
+  JAM_RPC: ws://localhost:19800
+  LOGS: ${{ github.workspace }}/toaster-logs
+
+jobs:
+  toaster:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check inputs
+        env:
+          ACTION: ${{ inputs.action }}
+          SERVICE_ID: ${{ inputs.service_id }}
+          PROPOSAL_ID: ${{ inputs.proposal_id }}
+          TIMEOUT: ${{ inputs.sync_timeout_minutes }}
+        run: |
+          mkdir -p "$LOGS"
+          [[ $TIMEOUT =~ ^[0-9]+$ ]] || { echo "bad sync_timeout_minutes"; exit 1; }
+          case $ACTION in
+            bounty|apply-admin) [[ $SERVICE_ID =~ ^[0-9]+$ ]] || { echo "$ACTION needs service_id"; exit 1; } ;;
+          esac
+          [[ $PROPOSAL_ID =~ ^[0-9]+$ ]] || { echo "bad proposal_id"; exit 1; }
+
+      - name: Host setup
+        run: |
+          sudo sysctl vm.unprivileged_userfaultfd=1
+          sudo sysctl kernel.apparmor_restrict_unprivileged_userns=0 || true
+          { uname -a; nproc; free -h; df -h .; ip addr; } >"$LOGS/host.txt" 2>&1
+
+      - name: Download PolkaJam
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/polkajam" && cd "$RUNNER_TEMP/polkajam"
+          for tag in "v$POLKAJAM_VERSION" v0.8.0; do
+            names=$(gh release view "$tag" -R paritytech/polkajam-releases --json assets -q '.assets[].name' || true)
+            [ -n "$names" ] && break
+          done
+          echo "release $tag assets:"; echo "$names"
+          asset=$(grep -i linux <<<"$names" | grep -iE 'x86_64|amd64|x64' | grep -viE 'sha|sig|asc' | head -1)
+          [ -n "$asset" ] || { echo "no linux x86_64 asset"; exit 1; }
+          gh release download "$tag" -R paritytech/polkajam-releases -p "$asset"
+          case $asset in
+            *.tar.gz|*.tgz) tar xzf "$asset" ;;
+            *.tar.xz) tar xJf "$asset" ;;
+            *.zip) unzip -q "$asset" ;;
+            *) chmod +x "$asset" ;;
+          esac
+          for bin in polkajam jamt; do
+            path=$(find "$PWD" -type f -name "$bin" | head -1)
+            [ -n "$path" ] || { echo "no $bin in $asset"; find . -type f; exit 1; }
+            chmod +x "$path"
+            echo "$(echo "$bin" | tr a-z A-Z)=$path" >>"$GITHUB_ENV"
+          done
+          echo "$tag $asset $(sha256sum "$asset" | cut -d' ' -f1)" >"$LOGS/polkajam-release.txt"
+
+      - name: Fetch the chain spec
+        run: |
+          curl -fsSL "$CHAINSPEC_URL" -o "$RUNNER_TEMP/public.json"
+          id=$(jq -r '.id // empty' "$RUNNER_TEMP/public.json")
+          echo "chain spec id: $id, sha256: $(sha256sum "$RUNNER_TEMP/public.json" | cut -d' ' -f1)" | tee "$LOGS/chainspec.txt"
+          [ "$id" = "$CHAIN_ID" ] || { echo "expected chain spec $CHAIN_ID"; exit 1; }
+          jq 'del(.genesis_state)' "$RUNNER_TEMP/public.json" >"$LOGS/chainspec-head.json" || true
+
+      - name: Start the node
+        env:
+          NODE_ARGS: ${{ inputs.node_args }}
+        run: |
+          { "$POLKAJAM" --version; "$POLKAJAM" --help; "$POLKAJAM" run --help; "$JAMT" --help; } >"$LOGS/help.txt" 2>&1 || true
+          version=$("$POLKAJAM" --version); echo "$version"
+          grep -q "$POLKAJAM_VERSION" <<<"$version" || { echo "expected polkajam $POLKAJAM_VERSION"; exit 1; }
+          args=(--chain "$RUNNER_TEMP/public.json" run --rpc-port 19800 --temp)
+          # Runners have no global IPv6; bind IPv4 if the node offers the flag and none was given.
+          if [ -z "$(ip -6 addr show scope global)" ] && grep -q -- '--listen-ip' "$LOGS/help.txt" \
+              && ! grep -q -- '--listen-ip' <<<"$NODE_ARGS"; then
+            args+=(--listen-ip 0.0.0.0)
+          fi
+          # shellcheck disable=SC2206
+          args+=($NODE_ARGS)
+          echo "polkajam ${args[*]}" | tee "$LOGS/node-command.txt"
+          nohup "$POLKAJAM" "${args[@]}" >"$LOGS/node.log" 2>&1 &
+          echo $! >"$RUNNER_TEMP/node.pid"
+          sleep 20
+          kill -0 "$(cat "$RUNNER_TEMP/node.pid")" || { tail -50 "$LOGS/node.log"; exit 1; }
+          tail -20 "$LOGS/node.log"
+
+      # While the node syncs: build the CLI and the checks at the deployed commit, and get the
+      # service blob from jam-lean, checked against the rebuild.
+      - name: Install Rust and cargo-jam-build
+        run: rustup toolchain install stable --profile minimal -c rust-src
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-jam-build
+          key: cargo-jam-build-0.1.29-${{ runner.os }}
+      - run: command -v cargo-jam-build || cargo install cargo-jam-build --version 0.1.29 --locked
+      - name: Build witness at the deployed commit
+        run: |
+          git worktree add "$RUNNER_TEMP/w" "$WITNESS_COMMIT"
+          cd "$RUNNER_TEMP/w"
+          cargo build --locked -p witness-cli
+          cargo jam-build --out-dir out -- --locked
+          sha256sum out/*.jam | tee "$LOGS/built-blobs.txt"
+          echo "W=$RUNNER_TEMP/w/target/debug/witness" >>"$GITHUB_ENV"
+          echo "CHECKS=$RUNNER_TEMP/w/out" >>"$GITHUB_ENV"
+      - name: Get the vendored service blob
+        run: |
+          blob=$RUNNER_TEMP/witness-service.jam
+          curl -fsSL "https://raw.githubusercontent.com/ascrivener/jam-lean/$JAM_LEAN_COMMIT/services/witness/witness-service.jam" -o "$blob"
+          echo "$SERVICE_SHA256  $blob" | sha256sum -c
+          cmp "$blob" "$CHECKS/witness-service.jam"
+          echo "jam-lean's blob is the rebuild, byte for byte: sha256 $SERVICE_SHA256" | tee "$LOGS/blob-check.txt"
+          echo "SERVICE_JAM=$blob" >>"$GITHUB_ENV"
+
+      - name: Wait for the node to sync
+        id: sync
+        env:
+          TIMEOUT: ${{ inputs.sync_timeout_minutes }}
+        run: |
+          set +e
+          python3 scripts/toaster/sync.py "$TIMEOUT" "$LOGS/sync.csv" "$LOGS/sync-status.json"
+          status=$?
+          kill -0 "$(cat "$RUNNER_TEMP/node.pid")" || { echo "the node died"; tail -50 "$LOGS/node.log"; exit 1; }
+          echo "synced=$([ $status = 0 ] && echo true || echo false)" >>"$GITHUB_OUTPUT"
+          exit 0
+
+      - name: The node's view of the chain
+        if: always()
+        run: |
+          {
+            echo "## jamt inspect slot"; timeout 60 "$JAMT" inspect slot
+            echo "## jamt list"; timeout 60 "$JAMT" list
+            echo "## parameters"; timeout 60 python3 -c "import sys; sys.path.insert(0, 'scripts'); from jamrpc import Rpc, url; import json; print(json.dumps(Rpc(url()).call('parameters'), indent=1))"
+          } >"$LOGS/chain-view.txt" 2>&1 || true
+          cat "$LOGS/chain-view.txt"
+
+      - name: Not synced
+        if: steps.sync.outputs.synced != 'true'
+        env:
+          ACTION: ${{ inputs.action }}
+        run: |
+          echo "The node didn't sync in time."
+          [ "$ACTION" = sync-only ] || exit 1
+
+      - name: Deploy
+        if: inputs.action == 'deploy' && steps.sync.outputs.synced == 'true'
+        env:
+          WITNESS_ADMIN_SEED: ${{ secrets.WITNESS_ADMIN_SEED }}
+          OUT: ${{ env.LOGS }}
+        run: scripts/toaster/run.sh deploy
+
+      - name: Bounty
+        if: inputs.action == 'bounty' && steps.sync.outputs.synced == 'true'
+        env:
+          OUT: ${{ env.LOGS }}
+          SERVICE_ID: ${{ inputs.service_id }}
+        run: scripts/toaster/run.sh bounty "$SERVICE_ID"
+
+      - name: Apply the admin proposal
+        if: inputs.action == 'apply-admin' && steps.sync.outputs.synced == 'true'
+        env:
+          WITNESS_ADMIN_SEED: ${{ secrets.WITNESS_ADMIN_SEED }}
+          OUT: ${{ env.LOGS }}
+          SERVICE_ID: ${{ inputs.service_id }}
+          PROPOSAL_ID: ${{ inputs.proposal_id }}
+        run: scripts/toaster/run.sh apply-admin "$SERVICE_ID" "$PROPOSAL_ID"
+
+      - name: Summary
+        if: always()
+        env:
+          ACTION: ${{ inputs.action }}
+        run: |
+          {
+            echo "### Toaster: $ACTION"
+            for f in sync-status.json summary.json; do
+              [ -f "$LOGS/$f" ] && { echo "\`$f\`"; echo '```json'; cat "$LOGS/$f"; echo '```'; }
+            done
+          } >>"$GITHUB_STEP_SUMMARY"
+          kill "$(cat "$RUNNER_TEMP/node.pid" 2>/dev/null)" 2>/dev/null || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: toaster-${{ inputs.action }}-${{ github.run_id }}
+          path: toaster-logs/
