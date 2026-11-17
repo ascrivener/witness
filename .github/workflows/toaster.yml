@@ -28,6 +28,9 @@ on:
       sync_timeout_minutes:
         description: How long to wait for the node to sync
         default: "300"
+      stall_minutes:
+        description: Give up if the node has no blocks past genesis after this long
+        default: "20"
       node_args:
         description: Extra arguments for `polkajam run` (e.g. --listen-ip 0.0.0.0)
         default: ""
@@ -67,9 +70,11 @@ jobs:
           SERVICE_ID: ${{ inputs.service_id }}
           PROPOSAL_ID: ${{ inputs.proposal_id }}
           TIMEOUT: ${{ inputs.sync_timeout_minutes }}
+          STALL: ${{ inputs.stall_minutes }}
         run: |
           mkdir -p "$LOGS"
           [[ $TIMEOUT =~ ^[0-9]+$ ]] || { echo "bad sync_timeout_minutes"; exit 1; }
+          [[ $STALL =~ ^[0-9]+$ ]] || { echo "bad stall_minutes"; exit 1; }
           case $ACTION in
             bounty|apply-admin) [[ $SERVICE_ID =~ ^[0-9]+$ ]] || { echo "$ACTION needs service_id"; exit 1; } ;;
           esac
@@ -123,6 +128,7 @@ jobs:
           { "$POLKAJAM" --version; "$POLKAJAM" --help; "$POLKAJAM" run --help; "$JAMT" --help; } >"$LOGS/help.txt" 2>&1 || true
           version=$("$POLKAJAM" --version); echo "$version"
           grep -q "$POLKAJAM_VERSION" <<<"$version" || { echo "expected polkajam $POLKAJAM_VERSION"; exit 1; }
+          # Not `--chain toaster`: in PolkaJam 0.1.29 that is another network (stress-255).
           args=(--chain "$RUNNER_TEMP/public.json" run --rpc-port 19800 --temp)
           # Runners have no global IPv6; bind IPv4 if the node offers the flag and none was given.
           if [ -z "$(ip -6 addr show scope global)" ] && grep -q -- '--listen-ip' "$LOGS/help.txt" \
@@ -137,6 +143,7 @@ jobs:
           sleep 20
           kill -0 "$(cat "$RUNNER_TEMP/node.pid")" || { tail -50 "$LOGS/node.log"; exit 1; }
           tail -20 "$LOGS/node.log"
+          grep -q "Chain ID: $CHAIN_ID" "$LOGS/node.log" || { echo "the node isn't on $CHAIN_ID"; exit 1; }
 
       # While the node syncs: build the CLI and the checks at the deployed commit, and get the
       # service blob from jam-lean, checked against the rebuild.
@@ -178,6 +185,7 @@ jobs:
         id: sync
         env:
           TIMEOUT: ${{ inputs.sync_timeout_minutes }}
+          SYNC_STALL_MINUTES: ${{ inputs.stall_minutes }}
         run: |
           set +e
           python3 scripts/toaster/sync.py "$TIMEOUT" "$LOGS/sync.csv" "$LOGS/sync-status.json"
@@ -189,6 +197,9 @@ jobs:
       - name: The node's view of the chain
         if: always()
         run: |
+          echo "## node log: $(grep -c 'Failed to connect' "$LOGS/node.log" || true) failed bootnode connections"
+          grep -E 'Net status|Sync status' "$LOGS/node.log" | awk 'NR % 150 == 1' | tail -40 || true
+          grep -vE 'Net status|Sync status|Failed to connect|jsonrpsee' "$LOGS/node.log" | tail -40 || true
           {
             echo "## jamt inspect slot"; timeout 60 "$JAMT" inspect slot
             echo "## jamt list"; timeout 60 "$JAMT" list
