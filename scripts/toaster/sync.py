@@ -9,7 +9,8 @@ and what `syncState` reports (JIP-2; blank if the node doesn't answer it). The w
 (now - JAM common era) / 6 s, the JAM common era being 2025-01-01 12:00:00 UTC (GP section 4.4).
 
 The node counts as synced once its best slot is within 3 of the wall-clock slot and has been
-advancing for a minute. Exits 0 when synced, 1 on timeout. Either way it writes STATUS_JSON (if
+advancing for a minute. Exits 0 when synced, 1 on timeout, and 1 early if after
+$SYNC_STALL_MINUTES (default 20) the node still has no block past genesis. Either way it writes STATUS_JSON (if
 given): the node's view of the chain at the end, and how long syncing took.
 """
 
@@ -23,7 +24,7 @@ from jamrpc import Rpc, url  # noqa: E402
 
 JCE = 1735732800  # 2025-01-01 12:00:00 UTC
 SLOT_SECONDS = 6
-POLL = 15
+POLL = int(os.environ.get("SYNC_POLL", 15))
 
 
 def wall_slot():
@@ -49,6 +50,8 @@ def snapshot():
 def main(timeout_min, csv_path, status_path=None):
     start = time.time()
     deadline = start + 60 * float(timeout_min)
+    stall = 60 * float(os.environ.get("SYNC_STALL_MINUTES") or 20)
+    stalled = False
     first_block = None
     synced_at = None
     near_since = None
@@ -56,6 +59,9 @@ def main(timeout_min, csv_path, status_path=None):
     with open(csv_path, "a") as csv:
         csv.write("elapsed_s,wall_slot,best_slot,finalized_slot,sync_state\n")
         while time.time() < deadline:
+            if first_block is None and time.time() - start >= stall:
+                stalled = True
+                break
             try:
                 best, final, sync = snapshot()
             except (OSError, SystemExit) as e:
@@ -83,6 +89,7 @@ def main(timeout_min, csv_path, status_path=None):
             time.sleep(POLL)
     status = {
         "synced": synced_at is not None,
+        "stalled_at_genesis": stalled,
         "sync_seconds": synced_at,
         "first_block_seconds": first_block,
         "wall_slot": wall_slot(),
