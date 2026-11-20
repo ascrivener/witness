@@ -12,7 +12,8 @@ running a node of your own, non-validating, and talking to its RPC.
 first configuration applied at slot 9,907,103, and the admin handover is proposal 0, effective
 from slot 10,007,905. Bounty 0 then ran through mint, create, commit, a wrong reveal (rejected),
 the right reveal, an early finalize (rejected) and finalize, and was claimed by the hunter at
-slot 9,907,164.
+slot 9,907,164. An upgrade to a build with its own admin key is pending (proposal 1,
+[below](#pending-upgrade)).
 
 The chain spec's bootnode is now `195.154.91.169:5556`; the GitHub Actions runs before this
 couldn't reach the earlier one (`78.137.198.98:5556`). A node also needs `--proxy` (below) to
@@ -41,6 +42,30 @@ straight away (fee asset `test`, commit and attest deposits of 10, as in `script
 proposes handing the admin role to the key of the `WITNESS_ADMIN_SEED` repository secret, which
 `apply-admin` applies once the delay has passed. Until then anyone holding the test key can
 propose or cancel too.
+
+## Pending upgrade
+
+Proposal 1 on service 7 upgrades its code. It was proposed at slot 9,907,281 with the test key, and
+it is effective from slot **10,008,081**: the delay comes from the running build (100,800 slots),
+not the new one. The new code was provided as a preimage at slot 9,907,283. Once the slot is
+reached, anyone can apply it (`witness apply --id 1`). Until then, the test key can still cancel it.
+
+The new build is witness at `42c3802` (`main`; `service/`, `rules/` and `types/` are unchanged
+from `71e585a`), built with `cargo jam-build` 0.1.29 and rustc 1.97.0, with
+`WITNESS_ADMIN=9981b72971f6a7282c86bf149082caac7e48d5a4737c57e81be0b25a88788bcf` (the
+`WITNESS_ADMIN_SEED` key, the same one proposal 0 hands over to) and `WITNESS_ADMIN_DELAY=600`:
+
+| | |
+|---|---|
+| bytes | 222,971 |
+| sha256 | `f24c93c9b2892cb52e39b6a6567ab263226d025f553b04611749dbc06f80cf4f` |
+| blake2b-256 | `2f25d04bbb212aa47ec4e3c57e81eccc31e196f4c9a90b2a56e9510fc7515d71` |
+
+The service keeps its id and its storage. The admin is the one stored by a `SetAdmin`, or else the
+build's `WITNESS_ADMIN`. Nothing is stored yet, so once the upgrade applies the admin is the
+`WITNESS_ADMIN_SEED` key, whether or not proposal 0 has been applied, and later proposals wait 600
+slots. **Once applied, service 7 no longer runs the build jam-lean vendors**, so jam-lean's theorems
+about that blob no longer describe the code on chain.
 
 ## The workflow
 
