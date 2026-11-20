@@ -1,0 +1,35 @@
+# A daily check that nothing has changed on witness's admin state on the JAM Toaster (service 7)
+# while its proposals wait out their delay (docs/toaster.md): it syncs a node, reads the state
+# and fails, so GitHub sends a failure notice, if anything differs from what's below. It writes
+# what it found to the run's summary. It submits nothing.
+#
+# Once the proposals are applied (from slot 10,008,081, about 2026-11-27 12:08 UTC) this fails by
+# design: turn it off with Actions → Toaster watch → ⋯ → Disable workflow.
+name: Toaster watch
+
+on:
+  schedule:
+    - cron: "37 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  watch:
+    uses: ./.github/workflows/toaster.yml
+    with:
+      action: watch
+      service_id: "7"
+      sync_timeout_minutes: "60"
+      # The state after Adam's proposals of 2026-11-20: proposal 0 hands the admin role to his key,
+      # proposal 1 upgrades to main@42c3802 built with that key as WITNESS_ADMIN. The test admin's
+      # nonce counts its signed proposals (configure, SetAdmin, Upgrade), so a new proposal or a
+      # cancel would change it.
+      watch_expect: |
+        EXPECT_NEXT_PROPOSAL=2
+        EXPECT_PROPOSAL_0=set-admin 0x9981b72971f6a7282c86bf149082caac7e48d5a4737c57e81be0b25a88788bcf effective 10007905
+        EXPECT_PROPOSAL_1=upgrade 0x2f25d04bbb212aa47ec4e3c57e81eccc31e196f4c9a90b2a56e9510fc7515d71 len 222971 effective 10008081
+        EXPECT_ADMIN_NONCE=3
+        EXPECT_ADMIN_STORED=none
+        EXPECT_CODE_HASH=0xf4c0a230ce9f4cd32cb55dc61d8127d5ae2fedb004ee352cdf1f0610bceac99b
