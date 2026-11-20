@@ -135,6 +135,9 @@ Variables:
 
 ## On a real JAM testnet
 
+This has since run live on the JAM Toaster, against witness as service 7: see
+[toaster-lean.md](toaster-lean.md) for the run and its numbers.
+
 What running this on a testnet needs, beyond what ran here:
 
 1. **A testnet with the full spec's refine gas.** PolkaJam's tiny config gives 10⁹, too little
