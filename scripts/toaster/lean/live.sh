@@ -125,9 +125,11 @@ step "following service $SVC's statistics (stats.csv)"
 python3 "$LEANLIVE/stats.py" watch "$SVC" "$STATS" "$OUT/stats-raw" 2>>"$OUT/stats.log" &
 STATS_PID=$!
 trap 'kill $STATS_PID 2>/dev/null || true' EXIT
-for _ in $(seq 1 20); do [ "$(wc -l <"$STATS" 2>/dev/null || echo 0)" -gt 1 ] && break; sleep $POLL; done
-tail -3 "$STATS" || true
-[ "$(wc -l <"$STATS" 2>/dev/null || echo 0)" -gt 1 ] || echo "note: no statistics decoded yet (stats.log); rejected reveals can't be confirmed without them"
+stats_rows() { [ -f "$STATS" ] && wc -l <"$STATS" || echo 0; }
+for _ in $(seq 1 20); do [ "$(stats_rows)" -gt 1 ] && break; sleep $POLL; done
+tail -3 "$STATS" 2>/dev/null || true
+# Without them a rejected reveal can't be told from a dropped one: stop before sending anything.
+[ "$(stats_rows)" -gt 1 ] || fail "no statistics decoded after a minute (see $OUT/stats.log)"
 
 step "witness is service $SVC; minting for this run's accounts (tag $TAG)"
 phase setup

@@ -9,7 +9,7 @@ WITNESS_SIM runs with this process's WITNESS_SIM_DIR (create and configure the s
 accumulates its items in witness-sim (`items`), a second after it's submitted, as a block would; a
 fraction DROP (default 0) of packages is silently dropped, to exercise resubmitting. The slot is
 witness-sim's, passed every half second. `statistics` gives each block's service statistics as
-GP 0.8.0 encodes them (6 validators, the parameters' cores), with the check gas the items' refines
+the Toaster's node serves them (6 validators, the parameters' cores; see stats.py), with the check gas the items' refines
 used and the items applied, so scripts/toaster/lean/stats.py can follow them. Storage and service
 data come from witness-sim.
 """
@@ -147,12 +147,12 @@ def land(pkg, extrinsics):
 
 
 def statistics(s):
-    out = bytes(2 * 24 * VALIDATORS)
+    out = (natural(VALIDATORS) + bytes(24 * VALIDATORS)) * 2
     out += b"".join(natural(random.randint(0, 99)) for _ in range(PARAMS["core_count"] * 8))
-    svcs = {0: [1] * 10}
+    svcs = {0: [1] * 11}
     if s in stats:
         r, rg, a, ag, xc, xs = stats[s]
-        svcs[SERVICE] = [0, 0, r, rg, 0, xc, xs, 0, a, ag]
+        svcs[SERVICE] = [0, 0, r, rg, 0, xc, xs, 0, a, 0, ag]
     out += natural(len(svcs))
     for sid in sorted(svcs):
         out += sid.to_bytes(4, "little") + b"".join(natural(v) for v in svcs[sid])

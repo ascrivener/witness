@@ -13,11 +13,14 @@ SERVICE's row to CSV: slot, header hash, refinements, refine gas, accumulations,
 (zeros when the service did nothing in that block). With RAW_DIR it also keeps the first few raw
 blobs, to check the decoding against.
 
-π is the validators' records (V of 6 u32s each, this epoch's and the last's), the cores'
-(C records of 8 naturals), then a dictionary of services' (a u32 id, and 10 naturals: provided
-count and size, refinement count and gas, imports, extrinsic count and size, exports,
-accumulation count and gas). The chain's parameters give C, not V, so V is found by decoding:
-the one value that consumes the blob exactly, with service ids in order.
+π, as PolkaJam 0.1.29 serves it on the Toaster: the validators' records twice (this epoch's and
+the last's), each a length-prefixed list of 6 u32s per validator; the cores' (C records of 8
+naturals, C from the chain's parameters); then a dictionary of services': a u32 id and 11
+naturals. Of those, the 3rd and 4th are the refinement count and gas, and the 9th and 11th the
+accumulation count and gas: the Toaster's blobs (5 kept from the first live run) decode exactly
+so, with corevm's services refining about 5.2×10⁸ gas and accumulating about 3.9×10⁵ a block.
+The 10th has been 0 throughout and is kept unnamed. A blob that doesn't decode exactly, with
+service ids in order, is reported, not guessed at.
 """
 
 import base64
@@ -30,7 +33,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 from jamrpc import Rpc, unb64, url  # noqa: E402
 
 SERVICE_FIELDS = ("provided_count", "provided_size", "refinements", "refine_gas", "imports",
-                  "extrinsic_count", "extrinsic_size", "exports", "accumulations", "accumulate_gas")
+                  "extrinsic_count", "extrinsic_size", "exports", "accumulations", "field_10",
+                  "accumulate_gas")
 CORE_FIELDS = 8
 
 
@@ -70,21 +74,18 @@ def services_at(b, i):
 
 
 def decode(blob, cores, validators=None):
-    """(validator count, services) of a statistics blob."""
-    candidates = [validators] if validators else range(1, 4096)
-    for v in candidates:
-        i = 2 * 24 * v
-        if i >= len(blob):
-            break
-        try:
-            for _ in range(cores * CORE_FIELDS):
-                _, i = natural(blob, i)
-        except IndexError:
-            continue
-        s = services_at(blob, i)
-        if s is not None:
-            return v, s
-    return None, None
+    """(validator count, services) of a statistics blob, or (None, None)."""
+    try:
+        i, v = 0, None
+        for _ in range(2):
+            v, i = natural(blob, i)
+            i += 24 * v
+        for _ in range(cores * CORE_FIELDS):
+            _, i = natural(blob, i)
+    except IndexError:
+        return None, None
+    s = services_at(blob, i)
+    return (v, s) if s is not None else (None, None)
 
 
 def watch(service, csv_path, raw_dir=None):
@@ -126,9 +127,7 @@ def watch(service, csv_path, raw_dir=None):
             if raw_dir and kept < 5:
                 open(f"{raw_dir}/stats-{block['slot']}.bin", "wb").write(blob)
                 kept += 1
-            v, svcs = decode(blob, cores, validators)
-            if v is None and validators:
-                v, svcs = decode(blob, cores)
+            v, svcs = decode(blob, cores)
             if v is None:
                 print(f"stats.py: can't decode the statistics at {block['slot']} ({len(blob)} B)",
                       file=sys.stderr, flush=True)

@@ -225,7 +225,9 @@ jobs:
           PACKAGE_GAS: ${{ inputs.package_gas }}
           PACKAGE_ITEMS: ${{ inputs.package_items }}
           SETTLE_SLOTS: ${{ inputs.settle_slots }}
-        run: scripts/lean-bounty-demo.sh "$WORK" 2>&1 | tee "$LOGS/demo.log"
+        run: |
+          set -o pipefail
+          scripts/lean-bounty-demo.sh "$WORK" 2>&1 | tee "$LOGS/demo.log"
 
       - name: The bounty, against a stand-in node (nothing on chain)
         if: inputs.target == 'fake'
@@ -233,6 +235,7 @@ jobs:
           PACKAGE_GAS: ${{ inputs.package_gas }}
           PACKAGE_ITEMS: ${{ inputs.package_items }}
         run: |
+          set -o pipefail
           scripts/toaster/lean/test-fake.sh "$RUNNER_TEMP/fake" 2>&1 | tee "$LOGS/demo.log"
           rm -rf "$WORK" && cp -r "$RUNNER_TEMP/fake/work" "$WORK"
           cp "$RUNNER_TEMP/fake/fake-node.log" "$LOGS/"
