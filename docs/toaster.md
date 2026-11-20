@@ -41,7 +41,7 @@ That build's admin is the public test key (seed `admin`), and its admin delay is
 (about 7 days); the first configuration applies at once. So the deploy configures the service
 straight away (fee asset `test`, commit and attest deposits of 10, as in `scripts/e2e.sh`) and
 proposes handing the admin role to the key of the `WITNESS_ADMIN_SEED` repository secret, which
-`apply-admin` applies once the delay has passed. Until then anyone holding the test key can
+the workflow's `apply` applies once the delay has passed. Until then anyone holding the test key can
 propose or cancel too.
 
 ## Pending upgrade
@@ -68,6 +68,11 @@ build's `WITNESS_ADMIN`. Nothing is stored yet, so once the upgrade applies the 
 slots. **Once applied, service 7 no longer runs the build jam-lean vendors**, so jam-lean's theorems
 about that blob no longer describe the code on chain.
 
+To apply them from the workflow once effective: `action` `apply`, `service_id` 7, and
+`proposal_id` 1 with `expect` `2f25d04bbb212aa47ec4e3c57e81eccc31e196f4c9a90b2a56e9510fc7515d71`
+(from slot 10,008,081), or `proposal_id` 0 with `expect`
+`9981b72971f6a7282c86bf149082caac7e48d5a4737c57e81be0b25a88788bcf` (from slot 10,007,905).
+
 ## The workflow
 
 `.github/workflows/toaster.yml`, run by hand (Actions → Toaster → Run workflow). Each run
@@ -81,11 +86,13 @@ starts a node on it (`polkajam --chain public.json run --rpc-port 19800 --temp -
 | `sync-only` (default) | records how long syncing took and the node's view of the chain | |
 | `deploy` | creates the service, configures it, proposes the admin handover | |
 | `bounty` | one bounty on the Blake2b preimage check: mint, create, commit, reveal a wrong witness and then the right one, finalize too early, finalize after the claim window, checking state after each step | `service_id` |
-| `apply-admin` | applies the admin proposal once it's effective, and checks the admin in storage | `service_id`, `proposal_id` (0) |
+| `apply` | applies proposal `proposal_id` once it's effective (unsigned: no key needed), then checks it took: a SetAdmin's key is the stored admin, an Upgrade's code hash is the service's code hash, and the proposal is gone. With `expect`, that key or code hash must also be `expect` | `service_id`, `proposal_id` (0), `expect` |
 
 The node counts as synced once its best slot is within 3 of the wall-clock slot for a minute.
 A run gives up after `stall_minutes` (20) with no block past genesis, and after
-`sync_timeout_minutes` (300) in any case. `node_args` adds arguments to `polkajam run`. Logs
+`sync_timeout_minutes` (300) in any case. `node_args` adds arguments to `polkajam run`.
+`cli_commit` builds the witness CLI and checks at another commit, to match the code the service
+runs (default `71e585a`; the CLI is the same at the upgrade's `42c3802`). Logs
 (the node's, the sync progress as CSV, the chain spec's head, help texts) and `summary.json` are
 uploaded as the run's artifact.
 
@@ -117,7 +124,7 @@ echo "408b5be2fde1ae49b64f7c1ee44d2660472f1c9545320bf7a65ee9281206e2e4  witness-
 export JAMT=/path/to/jamt W=../witness-71e585a/target/debug/witness CHECKS=../witness-71e585a/out
 SERVICE_JAM=witness-service.jam WITNESS_ADMIN_SEED=... scripts/toaster/run.sh deploy
 scripts/toaster/run.sh bounty SERVICE_ID
-WITNESS_ADMIN_SEED=... scripts/toaster/run.sh apply-admin SERVICE_ID 0   # after the delay
+scripts/toaster/run.sh apply SERVICE_ID PROPOSAL_ID [EXPECTED_KEY_OR_CODE_HASH]   # once effective
 ```
 
 `JAM_RPC` points the scripts and `jamt` at another node (default `ws://localhost:19800`); `OUT`
