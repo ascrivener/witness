@@ -1,4 +1,4 @@
-# Witness on the JAM Toaster public testnet (chain spec public-30, PolkaJam 0.1.29).
+# Witness on the JAM Toaster public testnet (genesis 0xb8100ea7…, PolkaJam 0.1.29).
 #
 # There's no public RPC, so each run starts its own non-validating PolkaJam node, waits for it
 # to sync, and then does `action`:
@@ -45,7 +45,9 @@ permissions:
 env:
   POLKAJAM_VERSION: 0.1.29
   CHAINSPEC_URL: https://jamtoaster.network/chainspec/public.json
-  CHAIN_ID: public-30
+  # The Toaster is identified by its genesis header's hash: the chain spec's id has changed
+  # (public-30, then public) while the chain stayed the same.
+  GENESIS_HASH: b8100ea7c6c6f952bf2ad61192e17f5b788f510ae7d86603edbe9f792412087d
   # The witness build jam-lean's theorems are about: ascrivener/witness at 71e585a, built with
   # cargo jam-build 0.1.29, vendored in ascrivener/jam-lean at this commit.
   WITNESS_COMMIT: 71e585a634545b1cb90cf4737198a74865ee2100
@@ -117,8 +119,14 @@ jobs:
         run: |
           curl -fsSL "$CHAINSPEC_URL" -o "$RUNNER_TEMP/public.json"
           id=$(jq -r '.id // empty' "$RUNNER_TEMP/public.json")
-          echo "chain spec id: $id, sha256: $(sha256sum "$RUNNER_TEMP/public.json" | cut -d' ' -f1)" | tee "$LOGS/chainspec.txt"
-          [ "$id" = "$CHAIN_ID" ] || { echo "expected chain spec $CHAIN_ID"; exit 1; }
+          genesis=$(jq -r '.genesis_header' "$RUNNER_TEMP/public.json" | python3 -c \
+            "import hashlib, sys; print(hashlib.blake2b(bytes.fromhex(sys.stdin.read().strip()), digest_size=32).hexdigest())")
+          {
+            echo "chain spec id: $id, sha256: $(sha256sum "$RUNNER_TEMP/public.json" | cut -d' ' -f1)"
+            echo "genesis header hash: 0x$genesis"
+            echo "bootnodes: $(jq -c '.bootnodes' "$RUNNER_TEMP/public.json")"
+          } | tee "$LOGS/chainspec.txt"
+          [ "$genesis" = "$GENESIS_HASH" ] || { echo "expected genesis 0x$GENESIS_HASH"; exit 1; }
           jq 'del(.genesis_state)' "$RUNNER_TEMP/public.json" >"$LOGS/chainspec-head.json" || true
 
       - name: Start the node
@@ -151,7 +159,10 @@ jobs:
           sleep 20
           kill -0 "$(cat "$RUNNER_TEMP/node.pid")" || { tail -50 "$LOGS/node.log"; exit 1; }
           tail -20 "$LOGS/node.log"
-          grep -q "Chain ID: $CHAIN_ID" "$LOGS/node.log" || { echo "the node isn't on $CHAIN_ID"; exit 1; }
+          # A fresh node's best final block is genesis; the log shows its hash's first 8 bytes.
+          grep -m1 'Chain ID:' "$LOGS/node.log" || true
+          grep -q "Best final block: 0x${GENESIS_HASH:0:16}" "$LOGS/node.log" \
+            || { echo "the node's genesis isn't 0x$GENESIS_HASH"; exit 1; }
 
       # While the node syncs: build the CLI and the checks at the deployed commit, and get the
       # service blob from jam-lean, checked against the rebuild.
