@@ -1,0 +1,42 @@
+{
+  "_comment": "The libraries attested on the JAM Toaster's service 7, and the runs whose artifacts hold their work (scripts/toaster/attestations/build.py, .github/workflows/toaster-attestations.yml). `work` names the artifact's tarball of the run's work directory.",
+  "service": 7,
+  "release": "toaster-attestations-v1",
+  "libraries": [
+    {
+      "name": "picoalloc",
+      "about": "Lean core plus jam-lean's Picoalloc files: the library of Picoalloc.alloc_wf, attested for bounty 1 (docs/toaster-lean.md)",
+      "run": 44758884737,
+      "artifact": "toaster-lean-44758884737",
+      "same_as_runs": [44751676237],
+      "work": "lean-work.tgz",
+      "jam_lean": "b8864bd40cc2ca567751f644403946002de990b4",
+      "witness_lean": "77335dbe873d5d8036aecc54a8a848b88a5b1bf5",
+      "lean4export": "df81913eee5519d5a88ae5b0fd701b5298cc29ab",
+      "lean_toolchain": "leanprover/lean4:v4.36.0-rc1",
+      "module": "Services.Picoalloc.Alloc",
+      "goal": "Picoalloc.alloc_wf",
+      "bounties": [1],
+      "attest_slots": [9908620, 9908680],
+      "doc": "docs/toaster-lean.md"
+    },
+    {
+      "name": "acclogfail",
+      "about": "Lean core, Std, jam-lean's PVM and JAM model and bootstrap's code facts: the statement closure of AccLogFailGoal, attested for bounty 3 (docs/toaster-acclogfail.md)",
+      "run": 44773292559,
+      "artifact": "toaster-acclogfail-44773292559",
+      "same_as_runs": [],
+      "work": "lean-work.tgz",
+      "jam_lean": "c22c197c9c712809912827bf547e92bb8fd9330f",
+      "witness_lean": "77335dbe873d5d8036aecc54a8a848b88a5b1bf5",
+      "lean4export": "df81913eee5519d5a88ae5b0fd701b5298cc29ab",
+      "lean_toolchain": "leanprover/lean4:v4.36.0-rc1",
+      "module": "Services.Bootstrap.Acc.Final.Bounty",
+      "goal": "Services.Bootstrap.Acc.Final.accLogFail_bounty",
+      "statement": "Services.Bootstrap.Acc.Final.AccLogFailGoal",
+      "bounties": [3],
+      "attest_slots": [9909960, 9910135],
+      "doc": "docs/toaster-acclogfail.md"
+    }
+  ]
+}
