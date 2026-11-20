@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Witness bounties</title>
+<meta name="description" content="Witness service 7's bounties on the JAM Toaster testnet, and their status, read from the chain.">
+<style>
+:root {
+  --bg: #fbfbfa; --fg: #1d1d1b; --muted: #6b6b66; --line: #e3e2de; --card: #ffffff;
+  --link: #1f5fbf; --code: #f1f0ec;
+  --open: #1a7f37; --open-bg: #e6f4ea; --warn: #9a6700; --warn-bg: #fff4d6;
+  --rev: #1f5fbf; --rev-bg: #e5eefb; --done: #6e40c9; --done-bg: #efe9fb;
+  --gone: #6b6b66; --gone-bg: #eeedea; --bad: #b42318; --bad-bg: #fde8e7;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #161615; --fg: #e9e8e4; --muted: #9c9b95; --line: #2e2d2a; --card: #1e1e1c;
+    --link: #7fb0ff; --code: #2a2926;
+    --open: #5fd17a; --open-bg: #1b3323; --warn: #e3b341; --warn-bg: #3a2f12;
+    --rev: #7fb0ff; --rev-bg: #1b2a44; --done: #b69cf5; --done-bg: #2c2342;
+    --gone: #9c9b95; --gone-bg: #2a2926; --bad: #ff8a80; --bad-bg: #3d1d1b;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--fg);
+  font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+main { max-width: 860px; margin: 0 auto; padding: 24px 16px 48px; }
+h1 { font-size: 1.6rem; margin: 0 0 4px; }
+h2 { font-size: 1.15rem; margin: 32px 0 12px; }
+a { color: var(--link); }
+code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.88em; }
+code { background: var(--code); padding: 1px 4px; border-radius: 4px; overflow-wrap: anywhere; }
+.muted { color: var(--muted); }
+.lede { color: var(--muted); margin: 0 0 16px; }
+.stamp { font-size: 0.92rem; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--card); }
+.stamp.stale { border-color: var(--warn); background: var(--warn-bg); }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; margin: 0 0 12px; }
+.card.hunt { border-color: var(--open); box-shadow: inset 4px 0 0 var(--open); }
+.head { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: baseline; justify-content: space-between; }
+.title { font-weight: 600; font-size: 1.05rem; }
+.id { color: var(--muted); font-weight: 400; }
+.badge { display: inline-block; font-size: 0.8rem; font-weight: 600; padding: 2px 9px; border-radius: 999px; white-space: nowrap; }
+.s-open { color: var(--open); background: var(--open-bg); }
+.s-warn { color: var(--warn); background: var(--warn-bg); }
+.s-rev { color: var(--rev); background: var(--rev-bg); }
+.s-done { color: var(--done); background: var(--done-bg); }
+.s-gone { color: var(--gone); background: var(--gone-bg); }
+.s-bad { color: var(--bad); background: var(--bad-bg); }
+.about { margin: 6px 0 10px; }
+dl { display: grid; grid-template-columns: max-content 1fr; gap: 4px 14px; margin: 0; font-size: 0.93rem; }
+dt { color: var(--muted); }
+dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+@media (max-width: 520px) { dl { grid-template-columns: 1fr; gap: 0; } dd { margin-bottom: 6px; } }
+.err { color: var(--bad); }
+footer { margin-top: 40px; font-size: 0.88rem; color: var(--muted); }
+ul { padding-left: 20px; }
+li { margin: 4px 0; }
+</style>
+</head>
+<body>
+<main>
+<h1>Witness bounties</h1>
+<p class="lede">Bounties on <a href="https://github.com/ascrivener/witness">witness</a>, deployed as
+<b>service 7</b> on the <a href="https://jamtoaster.network">JAM Toaster</a> testnet. A bounty pays
+whoever first reveals a witness its check accepts, such as a Lean proof of a theorem.</p>
+<div id="stamp" class="stamp">Loading the latest snapshot…</div>
+
+<h2>Bounties</h2>
+<div id="bounties"></div>
+
+<h2>Hunting and posting</h2>
+<ul>
+  <li><b>Hunt:</b> commit to your witness first, then reveal it; the earliest commitment that reveals
+    a valid witness wins once the claim window closes. The Lean bounties' statements, libraries and
+    steps: <a id="d-acc" href="#">AccLogFail</a>, <a id="d-lean" href="#">the Lean demo</a>.</li>
+  <li><b>Post:</b> pick a check, put its hash and params in a bounty with a reward and expiry, and
+    sign it. <a id="d-post" href="#">The AccLogFail bounty</a> shows a Lean bounty posted end to end.</li>
+  <li><b>A node:</b> the Toaster has no public RPC, so acting on a bounty needs a PolkaJam node of
+    your own; <a id="d-toaster" href="#">docs/toaster.md</a> has the steps.</li>
+</ul>
+
+<h2>Service</h2>
+<div id="service" class="card"></div>
+
+<footer>
+  <p>Read from the chain by a GitHub Actions workflow, about hourly: it syncs a PolkaJam 0.1.29 node
+  of its own (genesis <code>0xb8100ea7…</code>) and reads service 7's storage at its best block.
+  Times are approximate: slot 0 is 2025-01-01 12:00 UTC and slots are 6 seconds. Commitments and
+  attestations aren't shown: storage has no count of them.
+  <a id="raw" href="snapshot.json">The raw snapshot</a> ·
+  <a id="runs" href="#">workflow runs</a>.</p>
+</footer>
+</main>
+<script>
+"use strict";
+const JCE = Date.UTC(2025, 0, 1, 12, 0, 0);
+const SLOT_MS = 6000;
+const REVEAL_GRACE = 20; // witness_types::REVEAL_GRACE
+const TEST_ASSET = "4294967295/0";
+
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const nowSlot = () => Math.floor((Date.now() - JCE) / SLOT_MS);
+const slotDate = (s) => new Date(JCE + s * SLOT_MS);
+const fmtDate = (d) => d.toISOString().slice(0, 16).replace("T", " ") + " UTC";
+const num = (n) => BigInt(n).toLocaleString("en-US");
+const short = (h) => h.slice(0, 10) + "…" + h.slice(-4);
+
+function ago(ms) {
+  const m = Math.round(Math.abs(ms) / 60000);
+  const txt = m < 60 ? `${m} min` : m < 48 * 60 ? `${Math.round(m / 60)} h` : `${Math.round(m / 1440)} days`;
+  return ms >= 0 ? `${txt} ago` : `in ${txt}`;
+}
+function when(slot, current) {
+  return `slot ${num(slot)} · ${fmtDate(slotDate(slot))} (${ago((current - slot) * SLOT_MS)})`;
+}
+
+let meta = { checks: {}, code: {}, accounts: {}, bounties: {}, repo: "https://github.com/ascrivener/witness" };
+const docUrl = (path) => `${meta.repo}/blob/main/${path}`;
+const account = (h) => meta.accounts[h] ? `${esc(meta.accounts[h])} <span class="muted mono">${short(h)}</span>` : `<span class="mono">${short(h)}</span>`;
+function check(hash) {
+  const key = Object.keys(meta.checks).find((p) => hash.startsWith(p));
+  const c = key && meta.checks[key];
+  return c ? `<a href="${esc(c.url)}">${esc(c.name)}</a> <span class="muted mono">${short(hash)}</span>` : `<span class="mono">${short(hash)}</span>`;
+}
+const assetName = (a) => a.name || (`${a.service}/${a.id}` === TEST_ASSET ? "test" : `asset ${a.id} of service ${a.service}`);
+
+// What a bounty's status means at slot `now` (rules/src/lib.rs: revealable, reclaim).
+function status(b, now) {
+  const s = b.status, t = b.terms;
+  if (s.kind === "Open") {
+    if (now < t.expiry) return ["Open", "s-open", `Takes commitments until ${when(t.expiry, now)}.`];
+    const last = t.expiry + t.disclosure_window + REVEAL_GRACE;
+    if (now < last) return ["Expired, reveals open", "s-warn", `No new commitments since slot ${num(t.expiry)}; earlier ones can reveal until slot ${num(last)}.`];
+    return ["Expired", "s-gone", `Nobody revealed before slot ${num(last)}: the maker can reclaim the reward.`];
+  }
+  if (s.kind === "Revealing") {
+    const lead = `Leading: ${account(s.leader.hunter)}, committed at slot ${num(s.leader.committed)}.`;
+    if (now < s.window_end) return ["Revealing", "s-rev", `A valid witness is revealed; the claim window ends at ${when(s.window_end, now)}. An earlier commitment can still beat it. ${lead}`];
+    return ["Ready to finalize", "s-rev", `The claim window ended at slot ${num(s.window_end)}; anyone can finalize to pay the leader. ${lead}`];
+  }
+  if (s.kind === "Claimed") return ["Claimed", "s-done", `Won by ${account(s.winner.hunter)}, paid at ${when(s.slot, now)}.`];
+  if (s.kind === "Reclaimed") return ["Reclaimed", "s-gone", "Nobody won it; the maker took the reward back."];
+  return [s.kind, "s-bad", ""];
+}
+
+function bountyCard(b, now) {
+  const m = meta.bounties[b.id] || {};
+  if (b.missing) return `<div class="card"><div class="title">Bounty ${b.id}</div><p class="err">Not in storage.</p></div>`;
+  const t = b.terms;
+  const [label, cls, detail] = status(b, now);
+  const rows = [];
+  rows.push(["Reward", `<b>${num(t.reward)}</b> ${esc(assetName(t.asset))}`]);
+  rows.push(["Expiry", when(t.expiry, now)]);
+  rows.push(["Check", check(t.check_hash)]);
+  if (m.theorem) rows.push(["Theorem", `<code>${esc(m.theorem)}</code>`]);
+  let params = `${t.params_len} bytes`;
+  if (t.params && t.params_len <= 32) params = `<span class="mono">${esc(t.params)}</span>`;
+  if (m.node) {
+    const ok = t.params === "0x" + m.node;
+    params += ok ? ` <span class="muted">(the statement node)</span>` : ` <span class="err">(not the statement node ${short("0x" + m.node)} the labels expect)</span>`;
+  }
+  rows.push(["Params", params]);
+  const att = t.blobs.filter((x) => x.kind === "attested").length;
+  if (t.blobs.length) rows.push(["Blobs", `${t.blobs.length} (${att} attested, ${t.blobs.length - att} plain)`]);
+  rows.push(["Windows", `claim ${t.claim_window} slots, disclosure ${t.disclosure_window} slots${t.bind_claim ? ", bound claim" : ""}`]);
+  rows.push(["Check gas", num(t.check_gas)]);
+  rows.push(["Maker", account(b.maker)]);
+  if (m.doc) rows.push(["More", `<a href="${docUrl(m.doc)}">${esc(m.doc)}</a>`]);
+  const live = m.hunt && b.status.kind === "Open" && now < t.expiry;
+  return `<div class="card${live ? " hunt" : ""}">
+    <div class="head"><span class="title">${esc(m.title || "Bounty " + b.id)} <span class="id">#${b.id}</span></span>
+    <span class="badge ${cls}">${label}</span></div>
+    ${m.about ? `<p class="about">${esc(m.about)}</p>` : ""}
+    <p class="about">${detail}</p>
+    <dl>${rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("")}</dl></div>`;
+}
+
+function serviceCard(s, now) {
+  const rows = [];
+  rows.push(["Service", `${s.service}`]);
+  rows.push(["Code", `<span class="mono">${short(s.code_hash)}</span>${meta.code[s.code_hash] ? ` ${esc(meta.code[s.code_hash])}` : ""}`]);
+  const c = s.config;
+  if (c) rows.push(["Deposits", `commit ${num(c.commit_deposit)}, attest ${num(c.attest_deposit)}${c.fee_asset ? ", in " + esc(assetName(c.fee_asset)) : ""}`]);
+  rows.push(["Admin", s.admin_stored ? account(s.admin_stored) : "the build's own (none stored)"]);
+  for (const p of s.proposals) {
+    const a = p.action;
+    let what = a.kind === "SetAdmin" ? `hand the admin role to ${account(a.admin)}`
+      : a.kind === "Upgrade" ? `upgrade to <span class="mono">${short(a.code_hash)}</span>${meta.code[a.code_hash] ? " (" + esc(meta.code[a.code_hash]) + ")" : ""}`
+      : "a new configuration";
+    rows.push([`Proposal ${p.id}`, `${what}; ${now >= p.effective ? "can be applied since" : "can be applied from"} ${when(p.effective, now)}`]);
+  }
+  if (!s.proposals.length) rows.push(["Proposals", "none pending"]);
+  rows.push(["Bounties", `${s.next_bounty_id} posted`]);
+  return `<dl>${rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("")}</dl>`;
+}
+
+async function getJson(path) {
+  const r = await fetch(path, { cache: "no-store" });
+  if (!r.ok) throw new Error(`${path}: HTTP ${r.status}`);
+  return r.json();
+}
+
+async function main() {
+  try { meta = Object.assign(meta, await getJson("bounties-meta.json")); } catch (e) { /* labels are optional */ }
+  for (const [id, path] of [["d-acc", "docs/toaster-acclogfail.md"], ["d-lean", "docs/toaster-lean.md"],
+    ["d-post", "docs/toaster-acclogfail.md"], ["d-toaster", "docs/toaster.md"]]) $(id).href = docUrl(path);
+  $("runs").href = `${meta.repo}/actions/workflows/toaster-board.yml`;
+  let s;
+  try { s = await getJson("snapshot.json"); } catch (e) {
+    $("stamp").innerHTML = `<span class="err">Couldn't load the snapshot (${esc(e.message)}).</span>`;
+    return;
+  }
+  // The labels are service 7's: none for a snapshot of another service (a test chain, say).
+  if (meta.service !== undefined && meta.service !== s.service) meta.bounties = {};
+  const now = Math.max(nowSlot(), s.best_block.slot);
+  const age = Date.now() - Date.parse(s.generated_at);
+  const stamp = $("stamp");
+  stamp.innerHTML = `Last updated <b>${fmtDate(new Date(s.generated_at))}</b> (${ago(age)}), at slot ${num(s.best_block.slot)}.`
+    + (age > 3 * 3600e3 ? ` <b>This is stale:</b> the latest runs may have failed.` : "");
+  if (age > 3 * 3600e3) stamp.classList.add("stale");
+  // Live, open bounties to hunt first; then the rest, newest first.
+  const rank = (b) => (b.status && b.status.kind === "Open" && now < b.terms.expiry ? 0 : b.status && b.status.kind === "Revealing" ? 1 : 2);
+  const list = [...s.bounties].sort((a, b) => rank(a) - rank(b) || b.id - a.id);
+  $("bounties").innerHTML = list.length ? list.map((b) => bountyCard(b, now)).join("") : `<p class="muted">No bounties yet.</p>`;
+  $("service").innerHTML = serviceCard(s, now);
+}
+main();
+</script>
+</body>
+</html>
