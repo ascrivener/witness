@@ -1,0 +1,172 @@
+# The attestations a reveal cites, published for good: a GitHub release (toaster-attestations-v1)
+# of the claim files, batch lists and node index of each library attested on the JAM Toaster's
+# service 7 (scripts/toaster/attestations/libraries.json), with a manifest of their hashes.
+#
+# A reveal must cite the exact attestations its proof trusts, and the batching behind them followed
+# the planner's noisy native timing, so they can't be rebuilt from source: they come from the runs
+# that attested them, whose artifacts expire. This run downloads those artifacts, builds the assets
+# (scripts/toaster/attestations/build.py: deterministic, so a rerun gives the same bytes), syncs a
+# non-validating node as toaster.yml does, checks every attestation is on chain and every bounty
+# cites what the release says (check-chain.py), and with `publish` creates the release. It submits
+# nothing to the chain.
+name: Toaster attestations
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Create the release (otherwise build and check only, and upload the assets as the run's artifact)
+        type: boolean
+        default: false
+      sync_timeout_minutes:
+        description: How long to wait for the node to sync
+        default: "60"
+
+permissions:
+  contents: write
+  actions: read
+
+env:
+  POLKAJAM_VERSION: 0.1.29
+  CHAINSPEC_URL: https://jamtoaster.network/chainspec/public.json
+  # The Toaster, identified by its genesis header's hash (see toaster.yml).
+  GENESIS_HASH: b8100ea7c6c6f952bf2ad61192e17f5b788f510ae7d86603edbe9f792412087d
+  JAM_RPC: ws://localhost:19800
+  REL: ${{ github.workspace }}/release-assets
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Host setup
+        run: |
+          sudo sysctl vm.unprivileged_userfaultfd=1
+          sudo sysctl kernel.apparmor_restrict_unprivileged_userns=0 || true
+          mkdir -p "$RUNNER_TEMP/logs" "$REL"
+
+      # The node, as toaster.yml starts it; it syncs while the rest builds.
+      - name: Download PolkaJam
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/polkajam" && cd "$RUNNER_TEMP/polkajam"
+          names=$(gh release view "v$POLKAJAM_VERSION" -R paritytech/polkajam-releases --json assets -q '.assets[].name')
+          asset=$(grep -i linux <<<"$names" | grep -iE 'x86_64|amd64|x64' | grep -viE 'sha|sig|asc' | head -1)
+          [ -n "$asset" ] || { echo "no linux x86_64 asset"; exit 1; }
+          gh release download "v$POLKAJAM_VERSION" -R paritytech/polkajam-releases -p "$asset"
+          case $asset in
+            *.tar.gz|*.tgz) tar xzf "$asset" ;;
+            *.tar.xz) tar xJf "$asset" ;;
+            *.zip) unzip -q "$asset" ;;
+            *) chmod +x "$asset" ;;
+          esac
+          path=$(find "$PWD" -type f -name polkajam | head -1)
+          [ -n "$path" ] || { echo "no polkajam in $asset"; exit 1; }
+          chmod +x "$path"
+          echo "POLKAJAM=$path" >>"$GITHUB_ENV"
+      - name: Fetch the chain spec and start the node
+        run: |
+          curl -fsSL "$CHAINSPEC_URL" -o "$RUNNER_TEMP/public.json"
+          genesis=$(jq -r '.genesis_header' "$RUNNER_TEMP/public.json" | python3 -c \
+            "import hashlib, sys; print(hashlib.blake2b(bytes.fromhex(sys.stdin.read().strip()), digest_size=32).hexdigest())")
+          [ "$genesis" = "$GENESIS_HASH" ] || { echo "expected genesis 0x$GENESIS_HASH, got 0x$genesis"; exit 1; }
+          "$POLKAJAM" --version | grep -q "$POLKAJAM_VERSION" || { echo "expected polkajam $POLKAJAM_VERSION"; exit 1; }
+          args=(--chain "$RUNNER_TEMP/public.json" run --rpc-port 19800 --temp)
+          if [ -z "$(ip -6 addr show scope global)" ] && "$POLKAJAM" run --help 2>&1 | grep -q -- '--listen-ip'; then
+            args+=(--listen-ip 0.0.0.0)
+          fi
+          args+=(--proxy "$(jq -r '.bootnodes[0]' "$RUNNER_TEMP/public.json")")
+          nohup "$POLKAJAM" "${args[@]}" >"$RUNNER_TEMP/logs/node.log" 2>&1 &
+          echo $! >"$RUNNER_TEMP/node.pid"
+          sleep 20
+          kill -0 "$(cat "$RUNNER_TEMP/node.pid")" || { tail -50 "$RUNNER_TEMP/logs/node.log"; exit 1; }
+          grep -q "Best final block: 0x${GENESIS_HASH:0:16}" "$RUNNER_TEMP/logs/node.log" \
+            || { echo "the node's genesis isn't 0x$GENESIS_HASH"; exit 1; }
+
+      - name: Build the witness CLI
+        run: cargo build -q --release --locked -p witness-cli
+
+      # The runs' artifacts, by name (scripts/toaster/attestations/libraries.json).
+      - name: Download the runs' artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for run in $(jq -r '.libraries[] | (.run, .same_as_runs[]) | tostring' scripts/toaster/attestations/libraries.json); do
+            name=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run/artifacts" -q '.artifacts[0].name')
+            expired=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run/artifacts" -q '.artifacts[0].expired')
+            [ "$expired" = false ] || { echo "run $run's artifact $name has expired"; exit 1; }
+            mkdir -p "$RUNNER_TEMP/runs/$run/work"
+            gh run download "$run" -R "$GITHUB_REPOSITORY" -n "$name" -D "$RUNNER_TEMP/runs/$run"
+            tar xzf "$RUNNER_TEMP/runs/$run/lean-work.tgz" -C "$RUNNER_TEMP/runs/$run/work"
+            echo "run $run: $name, $(ls "$RUNNER_TEMP/runs/$run/work/w" | grep -c '\.claim$') claims"
+          done
+
+      - name: Build the release's assets
+        run: |
+          conf=scripts/toaster/attestations/libraries.json
+          for name in $(jq -r '.libraries[].name' "$conf"); do
+            run=$(jq -r --arg n "$name" '.libraries[] | select(.name == $n) | .run' "$conf")
+            python3 scripts/toaster/attestations/build.py library "$conf" "$name" "$RUNNER_TEMP/runs/$run/work" "$REL" target/release/witness
+            # A run resumed from an earlier one carries the same claims: check they agree.
+            for other in $(jq -r --arg n "$name" '.libraries[] | select(.name == $n) | .same_as_runs[]' "$conf"); do
+              for f in "$RUNNER_TEMP/runs/$run/work"/w/batch-*.claim; do
+                cmp -s "$f" "$RUNNER_TEMP/runs/$other/work/w/$(basename "$f")" || { echo "run $other's $(basename "$f") differs"; exit 1; }
+              done
+              echo "$name: run $other's claims are run $run's"
+            done
+            rm -rf "${REL:?}/$name"
+          done
+          python3 scripts/toaster/attestations/build.py manifest "$conf" "$REL"
+          sha256sum "$REL"/* | tee "$RUNNER_TEMP/logs/sha256.txt"
+
+      - name: Wait for the node to sync
+        env:
+          SYNC_STALL_MINUTES: "20"
+        run: python3 scripts/toaster/sync.py "${{ inputs.sync_timeout_minutes }}" "$RUNNER_TEMP/logs/sync.csv" "$RUNNER_TEMP/logs/sync-status.json"
+
+      - name: Check the release against the chain
+        run: |
+          python3 scripts/toaster/attestations/check-chain.py "$(jq -r .service scripts/toaster/attestations/libraries.json)" \
+            "$REL" "$REL/chain-check.json" | tee "$RUNNER_TEMP/logs/chain-check.txt"
+          kill "$(cat "$RUNNER_TEMP/node.pid")" || true
+
+      - name: Publish the release
+        if: inputs.publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag=$(jq -r .release scripts/toaster/attestations/libraries.json)
+          {
+            echo "The attestations witness bounties on the JAM Toaster (service 7) rest on: for each library, the claim"
+            echo "file of every attestation (\`NAME-claims.tar.gz\`: \`NAME/lib-N.claim\`, for \`witness reveal --trust NAME/lib-N.claim:ENTRY\`),"
+            echo "and \`NAME.json\`: its commits, check, batches (subjects, trust, attestation ids) and node index."
+            echo "\`manifest.json\` lists each file's sha256; \`chain-check.json\` is what the chain held when this was published."
+            echo
+            echo "Built from the runs' artifacts by [this run]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID)"
+            echo "(\`scripts/toaster/attestations/build.py\`, deterministic). Hunting: [docs/HUNTING.md](docs/HUNTING.md)."
+            echo
+            echo '```'; cat "$RUNNER_TEMP/logs/chain-check.txt"; echo '```'
+          } >"$RUNNER_TEMP/notes.md"
+          gh release create "$tag" -R "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "$tag: attestations on the Toaster" \
+            --notes-file "$RUNNER_TEMP/notes.md" "$REL"/*
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### Toaster attestations"
+            echo '```'; cat "$RUNNER_TEMP/logs/chain-check.txt" 2>/dev/null || echo "(not checked)"; echo '```'
+            echo '```'; cat "$RUNNER_TEMP/logs/sha256.txt" 2>/dev/null; echo '```'
+          } >>"$GITHUB_STEP_SUMMARY"
+          if [ -f "$RUNNER_TEMP/logs/node.log" ]; then gzip -f "$RUNNER_TEMP/logs/node.log"; fi
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: toaster-attestations-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/logs/
+            ${{ github.workspace }}/release-assets/
