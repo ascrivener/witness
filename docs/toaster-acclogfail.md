@@ -4,7 +4,9 @@ A witness bounty on the JAM Toaster, against witness as **service 7** ([toaster.
 for a proof of one of jam-lean's open obligations: `AccLogFail`, a named hypothesis of T2
 (bootstrap's accumulate implements its spec). witness-lean's Lean check verifies a proof.
 
-**Status: not posted yet.** This document is filled in when it is.
+**Status: posted.** The bounty is **bounty 3 on service 7**, posted at slot 9,910,138 (2026-11-20) by
+[run 44773292559](https://github.com/ascrivener/witness/actions/runs/44773292559). Its library was
+attested in slots 9,909,960–9,910,135, about 18 minutes. It expires at slot 11,206,135.
 
 ## The statement
 
@@ -37,12 +39,12 @@ it uses named by hash, and no proof. A proof must use that exact name and type.
 | | |
 |---|---|
 | Service | 7 |
-| Bounty id | (when posted) |
-| Statement node | (when posted) |
+| Bounty id | **3** |
+| Statement node | `00bb0133f3bbe98877af4c7d3d9d59e3eb3068a70a545ed999d10bc2dcb0f354` |
 | Check | witness-lean `77335db`'s Lean check, the same as the [Picoalloc bounty](toaster-lean.md)'s |
 | Reward | 1,000,000 of the test asset |
 | Check gas | 5×10⁹ (`MAX_CHECK_GAS`) |
-| Expiry | about 90 days (1,296,000 slots) after posting |
+| Expiry | slot 11,206,135: 1,296,000 slots (about 90 days) after posting |
 | Claim window | 30 slots; no disclosure window |
 | Maker | the seed `bounty-acclogfail-maker` |
 | Cites | the attestation of `AccLogFailGoal` |
