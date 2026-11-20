@@ -82,10 +82,12 @@ Rules the check enforces:
 Work on it locally, in jam-lean at the pinned commit, with Lean's usual tools:
 
 ```sh
-git clone https://github.com/ascrivener/jam-lean && cd jam-lean
-git checkout "$(curl -s https://ascrivener.github.io/witness/bounties/3.json | jq -r .pins.jam_lean)"
-scripts/fetch-lake.sh --force      # its published build, so only what differs rebuilds
-lake build Services.Bootstrap.Acc.Final.Bounty
+PIN=$(curl -s https://ascrivener.github.io/witness/bounties/3.json | jq -r .pins.jam_lean)
+git clone https://github.com/ascrivener/jam-lean && git -C jam-lean checkout "$PIN"
+# its build for exactly that commit (about 12 GB unpacked), from this repository's release
+# jam-lean-lake-<first 7 of PIN>; without it, a cold build takes about 5 hours
+witness/scripts/toaster/hunt/fetch-jam-lean-cache.sh jam-lean "$PIN"
+cd jam-lean && lake build Services.Bootstrap.Acc.Final.Bounty
 lake env lean MyProof.lean         # your file
 ```
 
@@ -240,8 +242,11 @@ The bounties don't set `--bind-claim`, so a reveal may trust any number of attes
   how big it is. AccLogFail's library holds 17 MB of code facts alone, so a proof whose kernel run
   looks up much of it won't fit. Attest lemmas that need those facts (`lemmas=attest`), so that
   your reveal trusts your lemmas instead of the facts.
-- **Build time.** Each run builds jam-lean at the pinned commit from its published build (`main`'s
-  latest). The further `main` has moved, the more rebuilds; the workflow allows 5 hours.
+- **Build time.** Each run unpacks jam-lean's build for exactly the pinned commit, from the
+  release `jam-lean-lake-<commit>` (`.github/workflows/jam-lean-cache.yml` copied it from
+  jam-lean's own cache), so little rebuilds. Without that release it falls back to jam-lean's
+  latest published build (`main`'s), and the further `main` has moved the more rebuilds; the
+  workflow allows 5 hours.
 - **The test asset.** Rewards and deposits are the Toaster's test asset, minted free by its faucet.
 
 ## If something fails

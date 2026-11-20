@@ -193,8 +193,14 @@ jobs:
             echo "$repo $(git -C "${repo##*/}" rev-parse HEAD)" | tee -a "$RUNNER_TEMP/logs/sources.txt"
           done
           (cd lean4export && lake build lean4export)
-          # jam-lean from its published build where it has one: then only what differs rebuilds.
-          (cd jam-lean && { [ ! -x scripts/fetch-lake.sh ] || [ "$STEP" = test ] || scripts/fetch-lake.sh --force; } && lake build "$MODULE")
+          # jam-lean's build for exactly the pinned commit (a witness release, jam-lean-cache.yml), else
+          # jam-lean's latest published build (then what differs from it rebuilds), else cold.
+          if [ "$STEP" != test ]; then
+            scripts_dir=$GITHUB_WORKSPACE/scripts/toaster/hunt
+            "$scripts_dir/fetch-jam-lean-cache.sh" jam-lean "$jam_lean" \
+              || { [ ! -x jam-lean/scripts/fetch-lake.sh ] || (cd jam-lean && scripts/fetch-lake.sh --force); }
+          fi
+          (cd jam-lean && lake build "$MODULE")
           (cd witness-lean && cargo build -q --release -p lean-host)
           echo "LEAN4EXPORT=$RUNNER_TEMP/lean4export/.lake/build/bin/lean4export" >>"$GITHUB_ENV"
           echo "JAM_LEAN_DIR=$RUNNER_TEMP/jam-lean" >>"$GITHUB_ENV"
