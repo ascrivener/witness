@@ -242,6 +242,22 @@ The bounties don't set `--bind-claim`, so a reveal may trust any number of attes
   how big it is. AccLogFail's library holds 17 MB of code facts alone, so a proof whose kernel run
   looks up much of it won't fit. Attest lemmas that need those facts (`lemmas=attest`), so that
   your reveal trusts your lemmas instead of the facts.
+- **What a proof of `AccLogFailGoal` likely needs.** The attested library is the statement's
+  closure: what `AccLogFailGoal` mentions, not what a proof of it would use. jam-lean's proved
+  success branch, `acc_log_lineK` (the same code, 6501 … 6630), measured against it:
+  - its proof reaches **21,585 nodes outside the library**: 20 MB of statements and 151 MB of
+    proofs (jam-lean's `Fmt`, `Alloc` and `memcpy` lemmas), in 32 dependency depths. Far too much
+    to carry in a reveal, so a proof built on them needs `lemmas=attest`, which attests them all;
+  - with those attested, `acc_log_lineK`'s own check is 4.4×10⁸ gas, trusting 249 nodes (167 KB):
+    a reveal citing lemmas like it is small;
+  - but two of those lemmas can't be checked in one refine: `Fmt.io_l` (6.6×10⁹ gas) and
+    `Fmt.dl_iter` (5.8×10⁹). The next heaviest are 1.3–4.6×10⁹ (`Alloc.reg_write` 4.6×10⁹:
+    over the default `MAX_ATTEST_GAS` of 3.5×10⁹, under 5×10⁹). Over-refine declarations need
+    witness-lean's judgment splitting (`lean-host judgments`), which the hunt workflow doesn't do
+    yet. A proof that avoids them, or proves leaner versions, can be attested as it is.
+
+  (Exact PolkaJam gas, from witness-sim; `scripts/toaster/hunt/hunt.sh` does the same
+  measurement for your own lemmas before attesting.)
 - **Build time.** Each run unpacks jam-lean's build for exactly the pinned commit, from the
   release `jam-lean-lake-<commit>` (`.github/workflows/jam-lean-cache.yml` copied it from
   jam-lean's own cache), so little rebuilds. Without that release it falls back to jam-lean's
@@ -293,5 +309,7 @@ release files you already have. `scripts/toaster/hunt/test-fake.sh` is the `test
 - **Resuming an attest-mode reveal on a fresh runner.** If a reveal run attests your lemmas and then
   fails before revealing, rerun `reveal`. It plans the same batches; any whose claims differ, from a
   different timing split, are attested again, which costs deposits but is safe.
+- **Splitting a lemma too heavy for one refine** into judgments (witness-lean's `lean-host
+  judgments`), so it can be attested in pieces.
 - **`--bind-claim` bounties.** None are posted. Their witness must start with the id of the one
   attestation it trusts beyond the bounty's.
