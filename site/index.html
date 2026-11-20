@@ -72,8 +72,11 @@ whoever first reveals a witness its check accepts, such as a Lean proof of a the
 <h2>Hunting and posting</h2>
 <ul>
   <li><b>Hunt:</b> commit to your witness first, then reveal it; the earliest commitment that reveals
-    a valid witness wins once the claim window closes. The Lean bounties' statements, libraries and
-    steps: <a id="d-acc" href="#">AccLogFail</a>, <a id="d-lean" href="#">the Lean demo</a>.</li>
+    a valid witness wins once the claim window closes. <a id="d-hunt" href="#">docs/HUNTING.md</a> walks
+    you (or your agent) through it, from a copy of the repository and a GitHub Actions workflow; each
+    huntable bounty has a machine-readable spec (<a href="bounties/index.json">bounties/index.json</a>).
+    The Lean bounties' statements, libraries and steps: <a id="d-acc" href="#">AccLogFail</a>,
+    <a id="d-lean" href="#">the Lean demo</a>.</li>
   <li><b>Post:</b> pick a check, put its hash and params in a bounty with a reward and expiry, and
     sign it. <a id="d-post" href="#">The AccLogFail bounty</a> shows a Lean bounty posted end to end.</li>
   <li><b>A node:</b> the Toaster has no public RPC, so acting on a bounty needs a PolkaJam node of
@@ -168,6 +171,7 @@ function bountyCard(b, now) {
   rows.push(["Check gas", num(t.check_gas)]);
   rows.push(["Maker", account(b.maker)]);
   if (m.doc) rows.push(["More", `<a href="${docUrl(m.doc)}">${esc(m.doc)}</a>`]);
+  if (m.spec) rows.push(["Hunt", `<a href="bounties/${b.id}.json">spec (JSON)</a> · <a href="${docUrl("docs/HUNTING.md")}">how to hunt</a>`]);
   const live = m.hunt && b.status.kind === "Open" && now < t.expiry;
   return `<div class="card${live ? " hunt" : ""}">
     <div class="head"><span class="title">${esc(m.title || "Bounty " + b.id)} <span class="id">#${b.id}</span></span>
@@ -205,7 +209,7 @@ async function getJson(path) {
 async function main() {
   try { meta = Object.assign(meta, await getJson("bounties-meta.json")); } catch (e) { /* labels are optional */ }
   for (const [id, path] of [["d-acc", "docs/toaster-acclogfail.md"], ["d-lean", "docs/toaster-lean.md"],
-    ["d-post", "docs/toaster-acclogfail.md"], ["d-toaster", "docs/toaster.md"]]) $(id).href = docUrl(path);
+    ["d-post", "docs/toaster-acclogfail.md"], ["d-toaster", "docs/toaster.md"], ["d-hunt", "docs/HUNTING.md"]]) $(id).href = docUrl(path);
   $("runs").href = `${meta.repo}/actions/workflows/toaster-board.yml`;
   let s;
   try { s = await getJson("snapshot.json"); } catch (e) {

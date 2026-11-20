@@ -1,0 +1,61 @@
+# A pinned copy of jam-lean's build for one commit, for hunters (docs/HUNTING.md): jam-lean's
+# `lake-cache` release holds the build of its main's latest commit and follows main, so a bounty's
+# pinned jam-lean would rebuild more and more (cold: about 5 hours) as main moves on. This copies
+# that release's parts, while they are of COMMIT, into a release of this repository,
+# jam-lean-lake-<first 7 of COMMIT>, with their SHA256SUMS. scripts/toaster/hunt/fetch-jam-lean-cache.sh
+# unpacks it; toaster-hunt.yml uses it for the spec's jam-lean.
+name: jam-lean build cache
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: The jam-lean commit (full); jam-lean's lake-cache release must currently hold its build
+        default: c22c197c9c712809912827bf547e92bb8fd9330f
+
+permissions:
+  contents: write
+
+jobs:
+  copy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Download jam-lean's lake-cache parts
+        env:
+          COMMIT: ${{ inputs.commit }}
+        run: |
+          [[ $COMMIT =~ ^[0-9a-f]{40}$ ]] || { echo "commit: 40 hex digits"; exit 1; }
+          base=https://github.com/ascrivener/jam-lean/releases/download/lake-cache
+          mkdir -p "$RUNNER_TEMP/cache" && cd "$RUNNER_TEMP/cache"
+          curl -sSfL --retry 5 -o meta.txt "$base/meta.txt"
+          cat meta.txt
+          [ "$(sed -n 's/^sha=//p' meta.txt)" = "$COMMIT" ] || { echo "jam-lean's lake-cache is no longer of $COMMIT"; exit 1; }
+          for p in $(sed -n 's/^parts=//p' meta.txt); do
+            for i in $(seq 1 30); do curl -sSfL --retry 5 -C - -o "$p" "$base/$p" && break; sleep 2; done
+          done
+          # The parts, joined, must be a whole zstd stream of a tar holding .lake.
+          cat $(sed -n 's/^parts=//p' meta.txt) | zstd -dc | tar -t >"$RUNNER_TEMP/list"
+          echo "$(wc -l <"$RUNNER_TEMP/list") entries"; head -3 "$RUNNER_TEMP/list"
+          grep -qE '^(\./)?\.lake(/|$)' "$RUNNER_TEMP/list"
+          sha256sum $(sed -n 's/^parts=//p' meta.txt) >SHA256SUMS
+          ls -l; cat SHA256SUMS
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMMIT: ${{ inputs.commit }}
+        run: |
+          cd "$RUNNER_TEMP/cache"
+          {
+            echo "jam-lean's build (\`.lake\`) at [${COMMIT:0:7}](https://github.com/ascrivener/jam-lean/commit/$COMMIT), copied from"
+            echo "jam-lean's \`lake-cache\` release while it held that commit's build, so a bounty pinned to it rebuilds fast"
+            echo "whatever jam-lean's main does next. \`scripts/toaster/hunt/fetch-jam-lean-cache.sh JAM_LEAN_DIR $COMMIT\`"
+            echo "unpacks it (the parts, joined, are a zstd-compressed tar of \`.lake\`)."
+            echo
+            echo '```'; cat meta.txt; echo; echo "sha256:"; cat SHA256SUMS; echo '```'
+            echo
+            echo "Sizes: $(stat -c '%n %s' $(sed -n 's/^parts=//p' meta.txt) | tr '\n' ';')"
+          } >notes.md
+          gh release create "jam-lean-lake-${COMMIT:0:7}" -R "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "jam-lean build cache, ${COMMIT:0:7}" --notes-file notes.md \
+            $(sed -n 's/^parts=//p' meta.txt) SHA256SUMS meta.txt

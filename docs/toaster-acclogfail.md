@@ -56,13 +56,13 @@ The bounty can only be won by a reveal that trusts attested nodes, so the statem
 attested first: everything `AccLogFailGoal` uses, recursively, with what their proofs use. That is
 Lean core, Std, jam-lean's PVM and JAM model, and bootstrap's code facts.
 
-Sized in witness-sim before posting:
+Sized in witness-sim, and as attested ([run 44773292559](https://github.com/ascrivener/witness/actions/runs/44773292559)'s dry run; its claims are in [toaster-attestations-v1](toaster-attestations.md)):
 
 | | |
 |---|---|
 | Library | 25,795 nodes: 21.1 MB of statements (17.2 MB of them the code facts), 7.0 MB of proofs |
-| Batches | 322 (303 by dependency depth, plus splits of the batches over 800 subjects), 46 rounds of 4 attesters |
-| Gas per batch | median 3.4×10⁸, max 2.35×10⁹ (47% of `MAX_CHECK_GAS`); 76 over 10⁹ |
+| Batches | 320 attested: 275 by dependency depth, 298 once traced and split by time, plus splits of the batches over 800 subjects; 69 rounds of up to 4 attesters (the sizing run before posting had planned 322) |
+| Gas per batch | median 3.4×10⁸, max 2.35×10⁹ (47% of `MAX_CHECK_GAS`); 75 over 10⁹ (76 in the sizing run) |
 | Gas in all | 1.95×10¹¹, about 3× the Picoalloc library's |
 | Per batch | up to 1.3 MB of subjects and 2.2 MB of trusted nodes |
 
@@ -92,6 +92,11 @@ published build (`scripts/fetch-lake.sh`).
 `target: fake` runs it all against `scripts/toaster/lean/fake-node.py` instead, with nothing on chain.
 
 ## For hunters
+
+[HUNTING.md](HUNTING.md) is the step-by-step guide, with a workflow that commits, reveals and
+finalizes from your own copy of this repository. The bounty's machine-readable spec is
+[`site/bounties/3.json`](../site/bounties/3.json), served at
+<https://ascrivener.github.io/witness/bounties/3.json>.
 
 - **Your whole proof must be checked in one refine.** A reveal checks the goal's proof, and every
   node of yours that it carries, within the bounty's 5×10⁹ gas. A proof of `AccLogFail` runs through

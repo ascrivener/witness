@@ -28,7 +28,8 @@
 # first, in the reveal step, right before revealing (never before committing: once attested, a
 # lemma is public, and an earlier commitment citing it by name and type would win). In attest mode
 # every declaration of your file that gets attested must have a name with 16 or more hex digits in a
-# row, and none may have the goal's type.
+# row, and none may have the goal's type. A lemma whose own check is over MAX_ATTEST_GAS (default
+# 3.5e9) can't be attested whole: witness-lean can split it into judgments, which this doesn't do.
 #
 # HUNTER_SEED is your account's seed (secret: it signs, and the salt derives from it). JAM_RPC is the
 # node (default ws://localhost:19800). RELEASE_LOCAL is a directory holding the release's files, to
@@ -39,6 +40,9 @@ set -euo pipefail
 STEP=${1:?usage: hunt.sh STEP SPEC PROOF OUT} SPEC=${2:?spec} PROOF=${3:-} OUT=${4:?work directory}
 : "${HUNTER_SEED:?set HUNTER_SEED to the seed of your account}"
 LEMMAS=${LEMMAS:-witness}
+# The most check gas a batch of your lemmas may use, as witness-sim measures it (PolkaJam's gas):
+# 70% of a refine's 5e9 by default, the margin the libraries were attested with; up to 4.8e9 fits.
+MAX_ATTEST_GAS=${MAX_ATTEST_GAS:-3500000000}
 case $LEMMAS in witness | attest) ;; *) echo "LEMMAS: witness or attest"; exit 1 ;; esac
 cd "$(dirname "$0")/../../.."
 WITNESS_DIR=$PWD
@@ -148,7 +152,8 @@ build() {
 	local lp; lp=$(cd "$JAM_LEAN_DIR" && lake env printenv LEAN_PATH)
 	(cd "$JAM_LEAN_DIR" && lake env lean --root="$OUT/proof" -o "$OUT/proof/HuntProof.olean" "$OUT/proof/HuntProof.lean") \
 		>"$OUT/proof/lean.log" 2>&1 || { cat "$OUT/proof/lean.log"; fail "your proof doesn't compile"; }
-	cat "$OUT/proof/lean.log"
+	# Lean's messages can quote your proof: only their count, unless it failed (or LEAN_LOG=1).
+	if [ -n "${LEAN_LOG:-}" ]; then cat "$OUT/proof/lean.log"; else echo "compiled; Lean said $(grep -c . "$OUT/proof/lean.log") lines (LEAN_LOG=1 shows them)"; fi
 	grep -q "declaration uses .sorry." "$OUT/proof/lean.log" && fail "your proof uses sorry"
 	(cd "$JAM_LEAN_DIR" && LEAN_PATH="$lp:$OUT/proof" "$LEAN4EXPORT" HuntProof -- "$THEOREM") >"$OUT/proof/export.ndjson"
 	"$HOST" convert "$OUT/proof/export.ndjson" "$OUT/nodes" >/dev/null
@@ -275,8 +280,8 @@ reveal)
 		n=$(ls "$OUT"/own/batch-*.subjects | wc -l)
 		for ((i = 0; i < n; i++)); do
 			"$HOST" args "$OUT/nodes" "$OUT/lemma-traced.json" "$i" "$OUT/own/probe.args" >/dev/null
-			r=$("$SIM" check "$CHECK" "$OUT/own/probe.args" 3500000000 2>&1 || true)
-			grep -q '^Ok(())' <<<"$r" || fail "your lemma batch $i doesn't attest within 3.5e9 gas: $r"
+			r=$("$SIM" check "$CHECK" "$OUT/own/probe.args" "$MAX_ATTEST_GAS" 2>&1 || true)
+			grep -q '^Ok(())' <<<"$r" || fail "your lemma batch $i doesn't attest within $MAX_ATTEST_GAS gas (MAX_ATTEST_GAS): $r"
 			echo "lemma batch $i: $r"
 		done
 		fund $(( $(deposit_of attest_deposit) * n + 10 ))

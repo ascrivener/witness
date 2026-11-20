@@ -1,0 +1,254 @@
+# Hunt a witness bounty on the JAM Toaster from your own copy of this repository (docs/HUNTING.md):
+# Actions → Toaster hunt → Run workflow, or `gh workflow run toaster-hunt.yml -f bounty=3 -f step=...`.
+#
+# Each run syncs a non-validating PolkaJam node of its own (as toaster.yml does), builds what the
+# step needs at the commits the bounty's spec pins (site/bounties/N.json), and runs
+# scripts/toaster/hunt/hunt.sh:
+#
+#   check    build your reveal from your proof and the release of attestations, and measure it
+#            (gas in witness-sim, size against the chain's limit); nothing on chain, no node
+#   commit   check, mint test funds if needed, and commit
+#   reveal   rebuild the same witness, attest your own lemmas first (lemmas: attest), reveal, and
+#            check your commitment leads the bounty
+#   finalize after the claim window, finalize and check you were paid
+#   status   the bounty and your account
+#   test     the whole hunt against a stand-in node over witness-sim (scripts/toaster/hunt/
+#            test-fake.sh, on a sim copy of the Picoalloc bounty): nothing on chain, no secrets
+#
+# Secrets (Settings → Secrets and variables → Actions): your seed (named by `seed_secret`, default
+# HUNTER_SEED), and, unless `proof` is a path in the repository, your Lean file (named by
+# `proof_secret`, default HUNTER_PROOF: its text, or `base64 -w0` of it gzipped). In a public fork
+# keep the proof in the secret until your commitment has landed: anyone can read the repository,
+# the run's inputs and its logs. Nothing of your proof is uploaded before the reveal step.
+name: Toaster hunt
+
+on:
+  workflow_dispatch:
+    inputs:
+      bounty:
+        description: The bounty's id (its spec is site/bounties/ID.json)
+        default: "3"
+      step:
+        description: check | commit | reveal | finalize | status | test
+        type: choice
+        options: [check, commit, reveal, finalize, status, test]
+        default: check
+      proof:
+        description: Your Lean file, as a path in this repository; empty to read it from the proof secret
+        default: ""
+      lemmas:
+        description: "witness: your lemmas go in the reveal; attest: they're attested first, in the reveal step (the same at commit and reveal)"
+        type: choice
+        options: [witness, attest]
+        default: witness
+      seed_secret:
+        description: The secret holding your account's seed
+        default: HUNTER_SEED
+      proof_secret:
+        description: The secret holding your Lean file, when `proof` is empty
+        default: HUNTER_PROOF
+      sync_timeout_minutes:
+        description: How long to wait for the node to sync
+        default: "60"
+
+concurrency:
+  group: toaster-hunt
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  STEP: ${{ inputs.step }}
+  POLKAJAM_VERSION: 0.1.29
+  CHAINSPEC_URL: https://jamtoaster.network/chainspec/public.json
+  GENESIS_HASH: b8100ea7c6c6f952bf2ad61192e17f5b788f510ae7d86603edbe9f792412087d
+  RUST_TOOLCHAIN: 1.97.0
+  JAM_RPC: ws://localhost:19800
+  # The Picoalloc library's commits, for `test`.
+  TEST_JAM_LEAN: b8864bd40cc2ca567751f644403946002de990b4
+
+jobs:
+  hunt:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Inputs
+        env:
+          BOUNTY: ${{ inputs.bounty }}
+          STEP: ${{ inputs.step }}
+          PROOF_PATH: ${{ inputs.proof }}
+          SEED: ${{ secrets[inputs.seed_secret] }}
+          PROOF_SECRET: ${{ secrets[inputs.proof_secret] }}
+          SEED_NAME: ${{ inputs.seed_secret }}
+          PROOF_NAME: ${{ inputs.proof_secret }}
+        run: |
+          [[ $BOUNTY =~ ^[0-9]+$ ]] || { echo "bad bounty"; exit 1; }
+          spec=site/bounties/$BOUNTY.json
+          [ -f "$spec" ] || { echo "no spec $spec: sync your copy with ascrivener/witness, or pick a bounty listed in site/bounties/index.json"; exit 1; }
+          mkdir -p "$RUNNER_TEMP/logs" "$RUNNER_TEMP/hunt"
+          echo "SPEC=$PWD/$spec" >>"$GITHUB_ENV"
+          echo "NEEDS_NODE=$([ "$STEP" = check ] || [ "$STEP" = test ] && echo 0 || echo 1)" >>"$GITHUB_ENV"
+          echo "NEEDS_LEAN=$(case $STEP in check|commit|reveal|test) echo 1 ;; *) echo 0 ;; esac)" >>"$GITHUB_ENV"
+          if [ "$STEP" != test ]; then
+            [ -n "$SEED" ] || { echo "no seed: add a repository secret named $SEED_NAME (any secret string; it is your account)"; exit 1; }
+          fi
+          case $STEP in check|commit|reveal)
+            if [ -n "$PROOF_PATH" ]; then
+              [ -f "$PROOF_PATH" ] || { echo "no file $PROOF_PATH in the repository"; exit 1; }
+              cp "$PROOF_PATH" "$RUNNER_TEMP/hunt/proof.lean"
+            else
+              [ -n "$PROOF_SECRET" ] || { echo "no proof: give a path in the repository, or add a secret named $PROOF_NAME"; exit 1; }
+              if [[ $PROOF_SECRET == H4sI* ]]; then base64 -d <<<"$PROOF_SECRET" | gunzip >"$RUNNER_TEMP/hunt/proof.lean"
+              else printf '%s\n' "$PROOF_SECRET" >"$RUNNER_TEMP/hunt/proof.lean"; fi
+            fi
+            echo "proof: $(wc -c <"$RUNNER_TEMP/hunt/proof.lean") bytes, sha256 $(sha256sum "$RUNNER_TEMP/hunt/proof.lean" | cut -c1-16)…"
+          esac
+          echo "PIN_JAM_LEAN=$(jq -r .pins.jam_lean "$spec")" >>"$GITHUB_ENV"
+          echo "PIN_WITNESS_LEAN=$(jq -r .pins.witness_lean "$spec")" >>"$GITHUB_ENV"
+          echo "PIN_LEAN4EXPORT=$(jq -r .pins.lean4export "$spec")" >>"$GITHUB_ENV"
+          echo "LEAN_TOOLCHAIN=$(jq -r .statement.lean_toolchain "$spec")" >>"$GITHUB_ENV"
+          echo "MODULE=$(jq -r .statement.module "$spec")" >>"$GITHUB_ENV"
+
+      - name: Host setup
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo sysctl vm.unprivileged_userfaultfd=1
+          sudo sysctl kernel.apparmor_restrict_unprivileged_userns=0 || true
+
+      # The node, as toaster.yml starts it; it syncs while the rest builds.
+      - name: Download PolkaJam
+        if: env.NEEDS_NODE == '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/polkajam" && cd "$RUNNER_TEMP/polkajam"
+          names=$(gh release view "v$POLKAJAM_VERSION" -R paritytech/polkajam-releases --json assets -q '.assets[].name')
+          asset=$(grep -i linux <<<"$names" | grep -iE 'x86_64|amd64|x64' | grep -viE 'sha|sig|asc' | head -1)
+          [ -n "$asset" ] || { echo "no linux x86_64 asset"; exit 1; }
+          gh release download "v$POLKAJAM_VERSION" -R paritytech/polkajam-releases -p "$asset"
+          case $asset in
+            *.tar.gz|*.tgz) tar xzf "$asset" ;;
+            *.tar.xz) tar xJf "$asset" ;;
+            *.zip) unzip -q "$asset" ;;
+            *) chmod +x "$asset" ;;
+          esac
+          path=$(find "$PWD" -type f -name polkajam | head -1)
+          [ -n "$path" ] || { echo "no polkajam in $asset"; exit 1; }
+          chmod +x "$path"
+          echo "POLKAJAM=$path" >>"$GITHUB_ENV"
+      - name: Fetch the chain spec and start the node
+        if: env.NEEDS_NODE == '1'
+        run: |
+          curl -fsSL "$CHAINSPEC_URL" -o "$RUNNER_TEMP/public.json"
+          genesis=$(jq -r '.genesis_header' "$RUNNER_TEMP/public.json" | python3 -c \
+            "import hashlib, sys; print(hashlib.blake2b(bytes.fromhex(sys.stdin.read().strip()), digest_size=32).hexdigest())")
+          [ "$genesis" = "$GENESIS_HASH" ] || { echo "expected genesis 0x$GENESIS_HASH, got 0x$genesis"; exit 1; }
+          "$POLKAJAM" --version | grep -q "$POLKAJAM_VERSION" || { echo "expected polkajam $POLKAJAM_VERSION"; exit 1; }
+          args=(--chain "$RUNNER_TEMP/public.json" run --rpc-port 19800 --temp)
+          if [ -z "$(ip -6 addr show scope global)" ] && "$POLKAJAM" run --help 2>&1 | grep -q -- '--listen-ip'; then
+            args+=(--listen-ip 0.0.0.0)
+          fi
+          args+=(--proxy "$(jq -r '.bootnodes[0]' "$RUNNER_TEMP/public.json")")
+          nohup "$POLKAJAM" "${args[@]}" >"$RUNNER_TEMP/logs/node.log" 2>&1 &
+          echo $! >"$RUNNER_TEMP/node.pid"
+          sleep 20
+          kill -0 "$(cat "$RUNNER_TEMP/node.pid")" || { tail -50 "$RUNNER_TEMP/logs/node.log"; exit 1; }
+          grep -q "Best final block: 0x${GENESIS_HASH:0:16}" "$RUNNER_TEMP/logs/node.log" \
+            || { echo "the node's genesis isn't 0x$GENESIS_HASH"; exit 1; }
+
+      - name: Install Rust, cargo-jam-build and Lean
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal -c rust-src
+          echo "RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN" >>"$GITHUB_ENV"
+          if [ "$NEEDS_LEAN" = 1 ]; then
+            curl -sSfL https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh \
+              | sh -s -- -y --default-toolchain "$LEAN_TOOLCHAIN"
+            echo "$HOME/.elan/bin" >>"$GITHUB_PATH"
+          fi
+      - uses: actions/cache@v4
+        if: inputs.step == 'test'
+        with:
+          path: ~/.cargo/bin/cargo-jam-build
+          key: cargo-jam-build-0.1.29-${{ runner.os }}
+      - name: Build witness (CLI, witness-sim)
+        run: |
+          cargo build -q --release --locked -p witness-cli -p witness-sim
+          if [ "$STEP" = test ]; then
+            command -v cargo-jam-build || cargo install cargo-jam-build --version 0.1.29 --locked
+            cargo jam-build --out-dir out -- --locked
+          fi
+      - name: Fetch and build lean4export, jam-lean and witness-lean
+        if: env.NEEDS_LEAN == '1'
+        run: |
+          jam_lean=$PIN_JAM_LEAN
+          if [ "$STEP" = test ]; then jam_lean=$TEST_JAM_LEAN MODULE=Services.Picoalloc.Alloc; fi
+          cd "$RUNNER_TEMP"
+          for r in leanprover/lean4export:$PIN_LEAN4EXPORT ascrivener/jam-lean:$jam_lean ascrivener/witness-lean:$PIN_WITNESS_LEAN; do
+            repo=${r%%:*} commit=${r##*:}
+            git clone -q "https://github.com/$repo" "${repo##*/}"
+            git -C "${repo##*/}" checkout -q "$commit"
+            echo "$repo $(git -C "${repo##*/}" rev-parse HEAD)" | tee -a "$RUNNER_TEMP/logs/sources.txt"
+          done
+          (cd lean4export && lake build lean4export)
+          # jam-lean's build for exactly the pinned commit (a witness release, jam-lean-cache.yml), else
+          # jam-lean's latest published build (then what differs from it rebuilds), else cold.
+          if [ "$STEP" != test ]; then
+            scripts_dir=$GITHUB_WORKSPACE/scripts/toaster/hunt
+            "$scripts_dir/fetch-jam-lean-cache.sh" jam-lean "$jam_lean" \
+              || { [ ! -x jam-lean/scripts/fetch-lake.sh ] || (cd jam-lean && scripts/fetch-lake.sh --force); }
+          fi
+          (cd jam-lean && lake build "$MODULE")
+          (cd witness-lean && cargo build -q --release -p lean-host)
+          echo "LEAN4EXPORT=$RUNNER_TEMP/lean4export/.lake/build/bin/lean4export" >>"$GITHUB_ENV"
+          echo "JAM_LEAN_DIR=$RUNNER_TEMP/jam-lean" >>"$GITHUB_ENV"
+          echo "WITNESS_LEAN_DIR=$RUNNER_TEMP/witness-lean" >>"$GITHUB_ENV"
+
+      - name: Wait for the node to sync
+        if: env.NEEDS_NODE == '1'
+        env:
+          SYNC_STALL_MINUTES: "20"
+        run: |
+          python3 scripts/toaster/sync.py "${{ inputs.sync_timeout_minutes }}" "$RUNNER_TEMP/logs/sync.csv" "$RUNNER_TEMP/logs/sync-status.json"
+          kill -0 "$(cat "$RUNNER_TEMP/node.pid")" || { echo "the node died"; tail -50 "$RUNNER_TEMP/logs/node.log"; exit 1; }
+
+      - name: Hunt
+        env:
+          HUNTER_SEED: ${{ secrets[inputs.seed_secret] }}
+          LEMMAS: ${{ inputs.lemmas }}
+          STEP: ${{ inputs.step }}
+        run: |
+          set -o pipefail
+          if [ "$STEP" = test ]; then
+            unset HUNTER_SEED
+            scripts/toaster/hunt/test-fake.sh "$RUNNER_TEMP/test" 2>&1 | tee "$RUNNER_TEMP/logs/hunt.log"
+          else
+            scripts/toaster/hunt/hunt.sh "$STEP" "$SPEC" "$RUNNER_TEMP/hunt/proof.lean" "$RUNNER_TEMP/hunt/work" 2>&1 \
+              | tee "$RUNNER_TEMP/logs/hunt.log"
+          fi
+
+      # Only what can't help anyone copy your proof: the hunt's log, its state, and the bounty as it
+      # stands. Never the proof, the export or the witness.
+      - name: Summary
+        if: always()
+        env:
+          OUTCOME: ${{ job.status }}
+        run: |
+          kill "$(cat "$RUNNER_TEMP/node.pid" 2>/dev/null)" 2>/dev/null || true
+          w=$RUNNER_TEMP/hunt/work
+          for f in state bounty-revealed.json bounty-final.json attest.jsonl; do
+            if [ -f "$w/$f" ]; then cp "$w/$f" "$RUNNER_TEMP/logs/"; fi
+          done
+          if [ -f "$RUNNER_TEMP/logs/node.log" ]; then gzip -f "$RUNNER_TEMP/logs/node.log"; fi
+          {
+            echo "### Toaster hunt: bounty ${{ inputs.bounty }}, ${{ inputs.step }} (lemmas ${{ inputs.lemmas }}): $OUTCOME"
+            echo '```'; tail -12 "$RUNNER_TEMP/logs/hunt.log" 2>/dev/null || echo "(no log)"; echo '```'
+          } >>"$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: toaster-hunt-${{ inputs.bounty }}-${{ inputs.step }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/logs/
