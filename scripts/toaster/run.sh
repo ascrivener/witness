@@ -191,6 +191,8 @@ if not m:
 kind = "set-admin" if m.group(0).startswith("SetAdmin") else "upgrade"
 print(kind, "0x" + bytes(int(b) for b in m.group(1).split(",")).hex())
 ' "$OUT/proposal-$id.txt")
+	# A failed decode leaves these empty (process substitution hides its exit status).
+	[ -n "$kind" ] && [ -n "$target" ] || fail "couldn't decode proposal $id's action"
 	echo "proposal $id: $kind $target, effective from slot $effective"
 	record proposal "{\"id\": $id, \"action\": \"$kind\", \"target\": \"$target\", \"effective\": $effective}"
 	if [ -n "$expect" ] && [ "${expect#0x}" != "${target#0x}" ]; then
