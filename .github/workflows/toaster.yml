@@ -7,7 +7,9 @@
 #                (pinned by its sha256, and compared with a rebuild at the same commit), configure it, and
 #                propose handing the admin role to the key of the WITNESS_ADMIN_SEED secret
 #   bounty       one bounty end to end on service `service_id`
-#   apply-admin  apply proposal `proposal_id` on service `service_id` once its delay has passed
+#   apply        apply proposal `proposal_id` on service `service_id` once it's effective, and check
+#                it took: a SetAdmin's key becomes the stored admin, an Upgrade's code hash the
+#                service's code hash (and either must equal `expect`, if given)
 # See docs/toaster.md. Logs and a summary are uploaded as the run's artifact.
 name: Toaster
 
@@ -17,14 +19,20 @@ on:
       action:
         description: What to do once the node has synced
         type: choice
-        options: [sync-only, deploy, bounty, apply-admin]
+        options: [sync-only, deploy, bounty, apply]
         default: sync-only
       service_id:
-        description: Witness's service id (bounty, apply-admin)
+        description: Witness's service id (bounty, apply)
         default: ""
       proposal_id:
-        description: The admin proposal to apply (apply-admin)
+        description: The admin proposal to apply (apply)
         default: "0"
+      expect:
+        description: "apply: the admin key (SetAdmin) or code hash (Upgrade) the proposal must set, hex"
+        default: ""
+      cli_commit:
+        description: The commit to build the witness CLI and checks at, to match the running code (default the deployed 71e585a)
+        default: ""
       sync_timeout_minutes:
         description: How long to wait for the node to sync
         default: "300"
@@ -71,6 +79,8 @@ jobs:
           ACTION: ${{ inputs.action }}
           SERVICE_ID: ${{ inputs.service_id }}
           PROPOSAL_ID: ${{ inputs.proposal_id }}
+          EXPECT: ${{ inputs.expect }}
+          CLI_COMMIT: ${{ inputs.cli_commit }}
           TIMEOUT: ${{ inputs.sync_timeout_minutes }}
           STALL: ${{ inputs.stall_minutes }}
         run: |
@@ -78,9 +88,11 @@ jobs:
           [[ $TIMEOUT =~ ^[0-9]+$ ]] || { echo "bad sync_timeout_minutes"; exit 1; }
           [[ $STALL =~ ^[0-9]+$ ]] || { echo "bad stall_minutes"; exit 1; }
           case $ACTION in
-            bounty|apply-admin) [[ $SERVICE_ID =~ ^[0-9]+$ ]] || { echo "$ACTION needs service_id"; exit 1; } ;;
+            bounty|apply) [[ $SERVICE_ID =~ ^[0-9]+$ ]] || { echo "$ACTION needs service_id"; exit 1; } ;;
           esac
           [[ $PROPOSAL_ID =~ ^[0-9]+$ ]] || { echo "bad proposal_id"; exit 1; }
+          [[ -z $EXPECT || $EXPECT =~ ^(0x)?[0-9a-fA-F]{64}$ ]] || { echo "bad expect: 32 bytes of hex"; exit 1; }
+          [[ -z $CLI_COMMIT || $CLI_COMMIT =~ ^[0-9a-f]{7,40}$ ]] || { echo "bad cli_commit"; exit 1; }
 
       - name: Host setup
         run: |
@@ -177,6 +189,8 @@ jobs:
           key: cargo-jam-build-0.1.29-${{ runner.os }}
       - run: command -v cargo-jam-build || cargo install cargo-jam-build --version 0.1.29 --locked
       - name: Build witness at the deployed commit
+        env:
+          CLI_COMMIT: ${{ inputs.cli_commit }}
         run: |
           git worktree add "$RUNNER_TEMP/w" "$WITNESS_COMMIT"
           cd "$RUNNER_TEMP/w"
@@ -184,19 +198,28 @@ jobs:
           cargo build --locked -p witness-cli
           cargo jam-build --out-dir out -- --locked
           sha256sum out/*.jam | tee "$LOGS/built-blobs.txt"
-          echo "W=$RUNNER_TEMP/w/target/debug/witness" >>"$GITHUB_ENV"
-          echo "CHECKS=$RUNNER_TEMP/w/out" >>"$GITHUB_ENV"
+          cli=$RUNNER_TEMP/w
+          # The CLI (its ops, keys and decoding) must match the code the service runs, which an
+          # upgrade changes. It's the same at 71e585a and at the upgrade's commit.
+          if [ -n "$CLI_COMMIT" ] && [ "$(git rev-parse "$CLI_COMMIT^{commit}")" != "$(git rev-parse HEAD)" ]; then
+            git worktree add "$RUNNER_TEMP/cli" "$CLI_COMMIT"
+            cli=$RUNNER_TEMP/cli
+            (cd "$cli" && cargo build --locked -p witness-cli && cargo jam-build --out-dir out -- --locked)
+          fi
+          echo "CLI and checks from $(git -C "$cli" rev-parse HEAD)" | tee -a "$LOGS/toolchain.txt"
+          echo "W=$cli/target/debug/witness" >>"$GITHUB_ENV"
+          echo "CHECKS=$cli/out" >>"$GITHUB_ENV"
       - name: Get the vendored service blob
         run: |
           blob=$RUNNER_TEMP/witness-service.jam
           curl -fsSL "https://raw.githubusercontent.com/ascrivener/jam-lean/$JAM_LEAN_COMMIT/services/witness/witness-service.jam" -o "$blob"
           # The gate is the pinned hash. The rebuild is a cross-check: it depends on the toolchain.
           echo "$SERVICE_SHA256  $blob" | sha256sum -c
-          if cmp "$blob" "$CHECKS/witness-service.jam"; then
+          if cmp "$blob" "$RUNNER_TEMP/w/out/witness-service.jam"; then
             echo "jam-lean's blob (sha256 $SERVICE_SHA256) is the rebuild, byte for byte" | tee "$LOGS/blob-check.txt"
           else
             echo "::warning::the rebuild differs from jam-lean's blob; deploying jam-lean's (sha256 $SERVICE_SHA256)"
-            echo "rebuild differs: $(sha256sum "$CHECKS/witness-service.jam")" | tee "$LOGS/blob-check.txt"
+            echo "rebuild differs: $(sha256sum "$RUNNER_TEMP/w/out/witness-service.jam")" | tee "$LOGS/blob-check.txt"
           fi
           echo "SERVICE_JAM=$blob" >>"$GITHUB_ENV"
 
@@ -248,14 +271,15 @@ jobs:
           SERVICE_ID: ${{ inputs.service_id }}
         run: scripts/toaster/run.sh bounty "$SERVICE_ID"
 
-      - name: Apply the admin proposal
-        if: inputs.action == 'apply-admin' && steps.sync.outputs.synced == 'true'
+      # Unsigned: anyone can apply an effective proposal, so no key is needed.
+      - name: Apply a proposal
+        if: inputs.action == 'apply' && steps.sync.outputs.synced == 'true'
         env:
-          WITNESS_ADMIN_SEED: ${{ secrets.WITNESS_ADMIN_SEED }}
           OUT: ${{ env.LOGS }}
           SERVICE_ID: ${{ inputs.service_id }}
           PROPOSAL_ID: ${{ inputs.proposal_id }}
-        run: scripts/toaster/run.sh apply-admin "$SERVICE_ID" "$PROPOSAL_ID"
+          EXPECT: ${{ inputs.expect }}
+        run: scripts/toaster/run.sh apply "$SERVICE_ID" "$PROPOSAL_ID" "$EXPECT"
 
       - name: Summary
         if: always()

@@ -4,7 +4,7 @@
 #
 #   scripts/toaster/run.sh deploy
 #   scripts/toaster/run.sh bounty SERVICE_ID
-#   scripts/toaster/run.sh apply-admin SERVICE_ID PROPOSAL_ID
+#   scripts/toaster/run.sh apply SERVICE_ID PROPOSAL_ID [EXPECTED_KEY_OR_CODE_HASH]
 #
 # Needs, from the environment:
 #   JAMT        the polkajam release's jamt
@@ -12,12 +12,13 @@
 #   SERVICE_JAM the service blob to deploy (deploy)
 #   CHECKS      the directory of check blobs built at that commit (bounty)
 #   OUT         where to write summary.json and notes (default: .)
-#   WITNESS_ADMIN_SEED  the seed of the admin to hand on to (deploy proposes it, apply-admin
-#                       checks it); deploy skips the rotation without it
+#   WITNESS_ADMIN_SEED  the seed of the admin to hand on to (deploy proposes it);
+#                       deploy skips the rotation without it
 #
 # deploy: creates the service, proposes its first configuration (applied at once), then proposes
 # handing the admin role from the build's public test key (seed "admin") to WITNESS_ADMIN_SEED's,
-# which `apply-admin` applies once ADMIN_DELAY (100,800 slots, about 7 days) has passed.
+# which `apply` applies once ADMIN_DELAY (100,800 slots, about 7 days) has passed. `apply`
+# applies any effective proposal (SetAdmin or Upgrade) and checks the admin or the code hash after.
 # bounty: one bounty on the Blake2b preimage check, end to end: mint, create, commit, reveal a
 # wrong witness and then the right one, finalize after the claim window. Its accounts are seeds
 # unique to the run, so reruns and other users don't collide.
@@ -170,25 +171,52 @@ deploy() {
 }
 
 
-apply_admin() {
-	local id=$1
-	: "${WITNESS_ADMIN_SEED:?apply-admin needs WITNESS_ADMIN_SEED}"
-	local admin; admin=$($W account --seed "$WITNESS_ADMIN_SEED")
+# Apply proposal $1 and check it took effect: a SetAdmin's key becomes the stored admin, an
+# Upgrade's code hash the service's code hash. With $2 (hex), that key or code hash must also be
+# $2. `apply` is unsigned: anyone can apply an effective proposal.
+apply_proposal() {
+	local id=$1 expect=${2:-}
 	step "applying proposal $id"
 	show proposal --proposal "$id" | tee "$OUT/proposal-$id.txt"
-	local effective; effective=$(sed -nE 's/.*effective: ([0-9]+).*/\1/p' "$OUT/proposal-$id.txt")
+	local effective kind target
+	effective=$(sed -nE 's/.*effective: ([0-9]+).*/\1/p' "$OUT/proposal-$id.txt")
 	[ -n "$effective" ] || fail "no proposal $id"
-	grep -q "${admin#0x}" "$OUT/proposal-$id.txt" || echo "note: proposal $id doesn't show the new admin's key in hex; check it"
+	# The proposal's action: SetAdmin([..32 bytes..]) or Upgrade { code_hash: [..], code_len: N }.
+	read -r kind target < <(python3 -c '
+import re, sys
+text = open(sys.argv[1]).read()
+m = re.search(r"SetAdmin\(\[([0-9, ]+)\]\)", text) or re.search(r"Upgrade \{ code_hash: \[([0-9, ]+)\]", text)
+if not m:
+    sys.exit("not a SetAdmin or an Upgrade: " + text)
+kind = "set-admin" if m.group(0).startswith("SetAdmin") else "upgrade"
+print(kind, "0x" + bytes(int(b) for b in m.group(1).split(",")).hex())
+' "$OUT/proposal-$id.txt")
+	# A failed decode leaves these empty (process substitution hides its exit status).
+	[ -n "$kind" ] && [ -n "$target" ] || fail "couldn't decode proposal $id's action"
+	echo "proposal $id: $kind $target, effective from slot $effective"
+	record proposal "{\"id\": $id, \"action\": \"$kind\", \"target\": \"$target\", \"effective\": $effective}"
+	if [ -n "$expect" ] && [ "${expect#0x}" != "${target#0x}" ]; then
+		fail "proposal $id's target is $target, not the expected 0x${expect#0x}"
+	fi
 	[ "$(slot)" -ge "$effective" ] || fail "proposal $id is effective from slot $effective; it's slot $(slot)"
+	local before; before=$(code_hash "$SVC")
+	record code_hash_before "\"$before\""
 	item "$($W apply --id "$id")"
+	local now=
 	for _ in $(seq 1 60); do
-		[ "$(raw_storage "$SVC" $ADMIN_KEY)" = "$admin" ] && break
+		case $kind in
+			set-admin) now=$(raw_storage "$SVC" $ADMIN_KEY) ;;
+			upgrade) now=$(code_hash "$SVC") ;;
+		esac
+		[ "$now" = "$target" ] && break
 		sleep $POLL
 	done
-	[ "$(raw_storage "$SVC" $ADMIN_KEY)" = "$admin" ] || fail "the admin is not $admin"
-	echo "ok: admin is now $admin"
-	record admin "\"$admin\""
-	record admin_applied_slot "$(slot)"
+	[ "$now" = "$target" ] || fail "after applying proposal $id: $kind is $now, not $target"
+	expect "proposal $id consumed" '^none$' proposal --proposal "$id"
+	echo "ok: $kind is now $target"
+	record "${kind/-/_}_applied" "\"$target\""
+	record applied_slot "$(slot)"
+	record code_hash_after "\"$(code_hash "$SVC")\""
 }
 
 bounty() {
@@ -269,7 +297,7 @@ bounty() {
 case "${1:-}" in
 	deploy) deploy ;;
 	bounty) SVC=${2:?service id}; record service_id "$SVC"; bounty ;;
-	apply-admin) SVC=${2:?service id}; record service_id "$SVC"; apply_admin "${3:?proposal id}" ;;
-	*) echo "usage: $0 deploy | bounty SERVICE_ID | apply-admin SERVICE_ID PROPOSAL_ID" >&2; exit 2 ;;
+	apply) SVC=${2:?service id}; record service_id "$SVC"; apply_proposal "${3:?proposal id}" "${4:-}" ;;
+	*) echo "usage: $0 deploy | bounty SERVICE_ID | apply SERVICE_ID PROPOSAL_ID [EXPECTED_KEY_OR_CODE_HASH]" >&2; exit 2 ;;
 esac
 printf '\n%s done\n' "$1"
