@@ -2,7 +2,8 @@
 """Attest a DAG of batches in parallel: several attesters, several batches to a work package.
 
     attest-batches.py WORK --witness W --service SVC --check CHECK --check-gas G --attesters A,B,...
-                      [--params HEX] [--package-gas G] [--settle SLOTS] [--sim WITNESS_SIM]
+                      [--params HEX] [--package-gas G] [--package-items N] [--settle SLOTS]
+                      [--land-slots N] [--log FILE] [--sim WITNESS_SIM]
 
 WORK holds the batches, numbered from 0, each as the arguments of `witness attest`:
 batch-N.subjects (comma-separated subject files), batch-N.trust (comma-separated CLAIM:ENTRY
@@ -25,7 +26,11 @@ and auditor shares one machine, which can't refine a package of the chain's full
 guarantors' deadline: "Slow refine ... 5 s" in the node log, then "Not enough signatures", and the
 package is dropped. A batch needing more still goes alone. --settle waits some slots after a round
 lands, while the validators audit it: on one machine, a round sent straight after the last can find
-them too busy to refine it in time. Both are off by default.
+them too busy to refine it in time. --package-items caps the items in a package (each carries
+its own copy of the check, so on a public testnet this bounds what one package sends through a
+node's proxy). All three are off by default. --land-slots is how long a round may take to land
+before what's missing is requeued (default 4 slots). --log appends a JSON line a round: its packages
+(attester, batches, bytes sent, refine gas given), what landed, and the slots and seconds it took.
 
 On a testnet (JAM_RPC, default ws://localhost:19800) it submits through jam-submit.py, next to
 this script; with --sim, through witness-sim, a round at once (`witness-sim items`), which refines
@@ -34,6 +39,7 @@ its items in parallel and accumulates them in order, as a block lands many packa
 
 import argparse
 import importlib.util
+import json
 import os
 import re
 import subprocess
@@ -233,7 +239,8 @@ class Attester:
         """Batches for a package, from pending in order: as many as fit, by estimate."""
         p = self.chain.params
         room = {"refine": self.a.package_gas or p["max_refine_gas"], "accumulate": p["max_accumulate_gas"],
-                "input": int(0.95 * p["max_input"]), "package": MAX_PACKAGE, "items": p["max_work_items"]}
+                "input": int(0.95 * p["max_input"]), "package": MAX_PACKAGE,
+                "items": min(p["max_work_items"], self.a.package_items or p["max_work_items"])}
         chosen, mine = [], set()
         for n in pending:
             if not room["items"]:
@@ -301,6 +308,7 @@ class Attester:
         attesters = self.a.attesters.split(",")
         cores = max(1, self.chain.params.get("core_count", 1))
         start, rounds, failed = time.time(), 0, 0
+        log = open(self.a.log, "a") if self.a.log else None
         # A resumed run: what an earlier one attested (each has the claim it wrote).
         self.attested = {n for n in range(self.total) if self.is_attested(n)}
         if self.attested:
@@ -309,7 +317,8 @@ class Attester:
             rounds += 1
             pending = [n for n in range(self.total) if n not in self.attested]
             taken, refused, sent = set(), set(), []
-            packages = []
+            packages, logged = [], []
+            round_start, round_slot = time.time(), self.chain.slot()
             if self.chain.sim:
                 built = self.round(attesters, pending, taken | refused)
             for i, who in enumerate(attesters):
@@ -324,6 +333,9 @@ class Attester:
                     continue
                 try:
                     self.chain.submit([item for _, item in items], i % cores)
+                    logged.append({"attester": who, "core": i % cores, "batches": [n for n, _ in items],
+                                   "items": len(items), "bytes": sum(len(it[0]) + sum(map(len, it[1])) for _, it in items),
+                                   "refine_gas": sum(it[2] for _, it in items), "slot": self.chain.slot()})
                 except SystemExit as e:
                     # The testnet sometimes can't reach a guarantor; the next round tries again.
                     print(f"{who}'s package of {len(items)} not submitted: {e}", flush=True)
@@ -354,7 +366,7 @@ class Attester:
                 continue
             # Wait for the round to land: everything sent attested, or the deadline.
             waiting = set(taken)
-            deadline = self.chain.slot() + LAND_SLOTS
+            deadline = self.chain.slot() + (self.a.land_slots or LAND_SLOTS)
             while waiting:
                 waiting = {n for n in waiting if not self.is_attested(n)}
                 if not waiting or self.chain.sim or self.chain.slot() > deadline:
@@ -374,6 +386,12 @@ class Attester:
             print(f"round {rounds}: {len(landed)} of {len(taken)} batches attested in {len(sent)} packages "
                   f"({', '.join(str(len(s)) for s in sent)} items); {len(self.attested)} of {self.total} attested, "
                   f"{time.time() - start:.0f} s", flush=True)
+            if log:
+                log.write(json.dumps({"round": rounds, "start_slot": round_slot, "end_slot": self.chain.slot(),
+                                      "seconds": round(time.time() - round_start, 1), "packages": logged,
+                                      "landed": sorted(landed), "not_landed": sorted(waiting),
+                                      "attested": len(self.attested)}) + "\n")
+                log.flush()
 
 
 def main():
@@ -384,7 +402,10 @@ def main():
     p.add_argument("--check-gas", type=int, required=True)
     p.add_argument("--params", help="the attest params, hex (default none)")
     p.add_argument("--package-gas", type=int, help="refine gas to fill a package with (default the chain's)")
+    p.add_argument("--package-items", type=int, help="the most items in a package (default the chain's)")
     p.add_argument("--settle", type=int, default=0, help="slots to wait after a round lands (default 0)")
+    p.add_argument("--land-slots", type=int, help=f"slots to wait for a round to land (default {LAND_SLOTS})")
+    p.add_argument("--log", help="append a JSON line a round to this file (testnet only)")
     p.add_argument("--sim", help="witness-sim, in place of a testnet")
     a = p.parse_args()
     a.work = os.path.abspath(a.work)

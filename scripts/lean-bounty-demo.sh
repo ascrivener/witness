@@ -29,6 +29,13 @@
 #
 # Needs: elan with jam-lean's toolchain (v4.36.0-rc1), a lean4export built for it, cargo-jam-build
 # 0.1.29 (see README), and Python 3.
+#
+# Live: with SERVICE_ID and TAG set, steps 3 to 5 run on a JAM chain instead, against witness
+# already deployed and configured there as service SERVICE_ID, through the node at JAM_RPC
+# (default ws://localhost:19800): see scripts/toaster/lean/live.sh, which
+# .github/workflows/toaster-lean.yml runs on the JAM Toaster (docs/toaster-lean.md). With
+# REUSE_PLAN=1 and OUT holding an earlier run's work, it skips exporting and planning and
+# resumes from the chain's state.
 set -euo pipefail
 : "${WITNESS_LEAN_DIR:?set WITNESS_LEAN_DIR to a witness-lean checkout}"
 : "${JAM_LEAN_DIR:?set JAM_LEAN_DIR to a jam-lean checkout}"
@@ -50,7 +57,21 @@ JAM_LEAN_DIR=$(cd "$JAM_LEAN_DIR" && pwd)
 OUT=${1:-$(mktemp -d)}
 mkdir -p "$OUT"
 OUT=$(cd "$OUT" && pwd)
-rm -rf "$OUT/nodes" "$OUT/w" "$OUT/sim" "$OUT/extrinsics"
+SERVICE_ID=${SERVICE_ID:-}
+if [ -n "$SERVICE_ID" ]; then
+	: "${TAG:?live mode (SERVICE_ID) needs TAG, to name the accounts of the run}"
+	export JAM_RPC=${JAM_RPC:-ws://localhost:19800}
+fi
+# Live, a resumed run reuses the earlier one's check blob, nodes, plan, batches and claims: its
+# attestations on chain are of exactly those.
+REUSE=
+if [ -n "$SERVICE_ID" ] && [ -n "${REUSE_PLAN:-}" ] && [ -f "$OUT/w/goal.hash" ] && [ -f "$OUT/lean-check.jam" ] \
+	&& [ -f "$OUT/gas_per_ms" ]; then
+	REUSE=1
+	rm -rf "$OUT/sim" "$OUT/extrinsics"
+else
+	rm -rf "$OUT/nodes" "$OUT/w" "$OUT/sim" "$OUT/extrinsics" "$OUT/other-nodes" "$OUT/state" "$OUT/live.jsonl" "$OUT/stats.csv"
+fi
 W=$WITNESS_DIR/target/release/witness
 SIM=$WITNESS_DIR/target/release/witness-sim
 HOST=$WITNESS_LEAN_DIR/target/release/lean-host
@@ -60,6 +81,7 @@ X=$OUT/extrinsics OP=$OUT/op.hex
 export WITNESS_SIM_DIR=$OUT/sim
 LOG=$WITNESS_SIM_DIR/log
 TIMES=$OUT/times.tsv
+[ -n "$REUSE" ] && [ -s "$TIMES" ] && mv "$TIMES" "$OUT/times-$(date +%s).tsv"
 : >"$TIMES"
 
 step() { printf '\n== %s\n' "$*"; }
@@ -107,9 +129,31 @@ step "building witness (service, CLI, simulator) and witness-lean (check, lean-h
 phase build
 (cargo build -q --release -p witness-sim -p witness-cli && cargo jam-build --out-dir out -p witness-service >/dev/null)
 (cd "$WITNESS_LEAN_DIR" && cargo build -q --release -p lean-host && cargo jam-build --out-dir out >/dev/null)
-cp "$WITNESS_LEAN_DIR/out/lean-check.jam" "$CHECK"
+if [ -n "$REUSE" ]; then
+	cmp -s "$WITNESS_LEAN_DIR/out/lean-check.jam" "$CHECK" \
+		|| echo "note: the check built now differs from the earlier run's; using the earlier run's, which its claims name"
+else
+	cp "$WITNESS_LEAN_DIR/out/lean-check.jam" "$CHECK"
+fi
 (cd "$JAM_LEAN_DIR" && lake build "$MODULE" "$OTHER_MODULE" >/dev/null)
 
+node_of() { # DIR NAME
+	python3 -I -c 'import json,sys; m=json.load(open(sys.argv[1])); print(next(e["hash"] for e in m if sys.argv[2] in e["names"]))' \
+		"$1/manifest.json" "$2"
+}
+if [ -n "$REUSE" ]; then
+	step "reusing the earlier run's export, nodes and plan in $OUT"
+	GOAL_NODE=$(node_of "$OUT/nodes" "$THEOREM")
+	WRONG_NODE=$(node_of "$OUT/nodes" "$WRONG")
+	OTHER_NODE=$(node_of "$OUT/other-nodes" "$OTHER")
+	GAS_PER_MS=$(cat "$OUT/gas_per_ms")
+	BATCHES=$(ls "$OUT"/w/batch-*.subjects | wc -l)
+	POLKAVM_BACKEND=$(sed -n 's/^polkavm backend: //p' "$OUT/backend")
+	[ "$POLKAVM_BACKEND" = default ] && POLKAVM_BACKEND= || export POLKAVM_BACKEND
+	[ "$(cat "$OUT/w/goal.hash")" = "$GOAL_NODE" ] || fail "the plan's goal isn't $THEOREM"
+	CITE=$(cat "$OUT/w/goal.cite")
+	echo "$BATCHES batches; $THEOREM is $GOAL_NODE"
+else
 step "exporting $THEOREM from jam-lean ($MODULE) and converting it to nodes"
 phase export
 (cd "$JAM_LEAN_DIR" && lake env "$LEAN4EXPORT" "$MODULE" -- "$THEOREM") >"$OUT/export.ndjson"
@@ -120,10 +164,6 @@ phase convert
 "$HOST" convert "$OUT/export.ndjson" "$OUT/nodes" >/dev/null
 rm -rf "$OUT/other-nodes"
 "$HOST" convert "$OUT/other.ndjson" "$OUT/other-nodes" >/dev/null
-node_of() { # DIR NAME
-	python3 -I -c 'import json,sys; m=json.load(open(sys.argv[1])); print(next(e["hash"] for e in m if sys.argv[2] in e["names"]))' \
-		"$1/manifest.json" "$2"
-}
 GOAL_NODE=$(node_of "$OUT/nodes" "$THEOREM")
 WRONG_NODE=$(node_of "$OUT/nodes" "$WRONG")
 OTHER_NODE=$(node_of "$OUT/other-nodes" "$OTHER")
@@ -147,6 +187,7 @@ echo "polkavm backend: ${POLKAVM_BACKEND:-default}" >"$OUT/backend"
 # What a native millisecond of the check costs in gas on this machine, so batches are cut to fit
 # a refine (as witness-lean's lean-e2e.sh): TRACE_GAS a batch, by default 2.9×10⁹.
 GAS_PER_MS=${GAS_PER_MS:-$(python3 "$LEANTOOLS/gas_per_ms.py" "$HOST" "$SIM" "$CHECK" "$OUT/nodes" "$OUT/plan.json")}
+echo "$GAS_PER_MS" >"$OUT/gas_per_ms"
 TRACE_MS=${TRACE_MS:-$(( ${TRACE_GAS:-2900000000} / GAS_PER_MS ))}
 echo "$(( GAS_PER_MS / 1000000 ))M gas per native ms: batches up to $TRACE_MS ms"
 "$HOST" trace "$OUT/nodes" "$OUT/plan.json" "$OUT/plan-traced.json" "$TRACE_MS" | tee "$OUT/trace.log"
@@ -162,32 +203,7 @@ done
 [ "$(cat "$OUT/w/goal.hash")" = "$GOAL_NODE" ] || fail "the plan's goal isn't $THEOREM"
 CITE=$(cat "$OUT/w/goal.cite")
 echo "$BATCHES batches"
-
-step "deploying witness in witness-sim and configuring it"
-phase deploy
-"$SIM" create-service out/witness-service.jam 10000000000 >/dev/null
-SVC=$(( 16#$("$SIM" list | tail -1 | cut -f1) ))
-item "$($W propose --service "$SVC" --nonce 0 --fee-asset test --commit-deposit 10 --attest-deposit 10)"
-expect "witness configured" 'fee_asset: Some' config --config
-ATTESTERS=${ATTESTERS:-pat,quinn,rene,sam}
-for who in alice bob carol ${ATTESTERS//,/ }; do item "$($W mint --to "$who" --amount 1000000)"; done
-
-step "attesters ($ATTESTERS) attest the library: $BATCHES batches"
-phase attest
-python3 "$WITNESS_DIR/scripts/attest-batches.py" "$OUT/w" --witness "$W" --service "$SVC" --check "$CHECK" \
-	--check-gas "$GAS" --attesters "$ATTESTERS" --sim "$SIM"
-
-step "alice posts the bounties"
-phase bounty
-take alice
-item "$($W create --service "$SVC" --maker alice --nonce $N --check "$CHECK" --params "$GOAL_NODE" \
-	--blobs "$CITE" --reward $REWARD --check-gas "$GAS" --expiry $(( $(slot) + 2000 )))"
-expect "bounty 0 open: prove $THEOREM ($GOAL_NODE)" 'status: Open' bounty --bounty 0
-take alice
-item "$($W create --service "$SVC" --maker alice --nonce $N --check "$CHECK" --params "$OTHER_NODE" \
-	--blobs "$CITE" --reward $REWARD --check-gas "$GAS" --expiry $(( $(slot) + 2000 )))"
-expect "bounty 1 open: prove $OTHER ($OTHER_NODE)" 'status: Open' bounty --bounty 1
-expect "alice escrowed both rewards" "^$((1000000 - 2 * REWARD))\$" balance --balance alice --asset test
+fi
 
 # A wrong proof: THEOREM's statement, with WRONG's proof (a real proof, of something else).
 python3 -I -c '
@@ -235,6 +251,38 @@ def uvar(n):
 items = [open(p, "rb").read() for p in sys.argv[2:]]
 open(sys.argv[1], "wb").write(uvar(len(items)) + b"".join(uvar(len(i)) + i for i in items))
 ' "$OUT/forged.pack" "$OUT/nodes/nodes/$GOAL_NODE" "$OUT/forged.proof"
+
+if [ -n "$SERVICE_ID" ]; then
+	# Steps 3 to 5 on a chain.
+	. "$WITNESS_DIR/scripts/toaster/lean/live.sh"
+	exit
+fi
+
+step "deploying witness in witness-sim and configuring it"
+phase deploy
+"$SIM" create-service out/witness-service.jam 10000000000 >/dev/null
+SVC=$(( 16#$("$SIM" list | tail -1 | cut -f1) ))
+item "$($W propose --service "$SVC" --nonce 0 --fee-asset test --commit-deposit 10 --attest-deposit 10)"
+expect "witness configured" 'fee_asset: Some' config --config
+ATTESTERS=${ATTESTERS:-pat,quinn,rene,sam}
+for who in alice bob carol ${ATTESTERS//,/ }; do item "$($W mint --to "$who" --amount 1000000)"; done
+
+step "attesters ($ATTESTERS) attest the library: $BATCHES batches"
+phase attest
+python3 "$WITNESS_DIR/scripts/attest-batches.py" "$OUT/w" --witness "$W" --service "$SVC" --check "$CHECK" \
+	--check-gas "$GAS" --attesters "$ATTESTERS" --sim "$SIM"
+
+step "alice posts the bounties"
+phase bounty
+take alice
+item "$($W create --service "$SVC" --maker alice --nonce $N --check "$CHECK" --params "$GOAL_NODE" \
+	--blobs "$CITE" --reward $REWARD --check-gas "$GAS" --expiry $(( $(slot) + 2000 )))"
+expect "bounty 0 open: prove $THEOREM ($GOAL_NODE)" 'status: Open' bounty --bounty 0
+take alice
+item "$($W create --service "$SVC" --maker alice --nonce $N --check "$CHECK" --params "$OTHER_NODE" \
+	--blobs "$CITE" --reward $REWARD --check-gas "$GAS" --expiry $(( $(slot) + 2000 )))"
+expect "bounty 1 open: prove $OTHER ($OTHER_NODE)" 'status: Open' bounty --bounty 1
+expect "alice escrowed both rewards" "^$((1000000 - 2 * REWARD))\$" balance --balance alice --asset test
 
 step "hunters commit"
 phase commit
