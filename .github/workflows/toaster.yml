@@ -135,6 +135,14 @@ jobs:
               && ! grep -q -- '--listen-ip' <<<"$NODE_ARGS"; then
             args+=(--listen-ip 0.0.0.0)
           fi
+          # An ordinary node submits work packages through a proxy; without one, create-service fails
+          # with "Failed to submit work-package to even a single proxy/guarantor". The chain spec's
+          # first bootnode serves as one.
+          if ! grep -qE -- '--(no-)?proxy' <<<"$NODE_ARGS"; then
+            proxy=$(jq -r '.bootnodes[0] // empty' "$RUNNER_TEMP/public.json")
+            [ -n "$proxy" ] || { echo "the chain spec lists no bootnode to use as a proxy"; exit 1; }
+            args+=(--proxy "$proxy")
+          fi
           # shellcheck disable=SC2206
           args+=($NODE_ARGS)
           echo "polkajam ${args[*]}" | tee "$LOGS/node-command.txt"
