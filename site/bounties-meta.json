@@ -1,0 +1,58 @@
+{
+  "_comment": "Hand-kept labels for the bounty board (site/index.html): what the chain doesn't carry. Bounties by id; checks by the first bytes of their code hash; accounts and service code by their full hex. The snapshot (snapshot.json) is read from the chain by .github/workflows/toaster-board.yml.",
+  "service": 7,
+  "repo": "https://github.com/ascrivener/witness",
+  "checks": {
+    "0xcc419035": {
+      "name": "Lean check (witness-lean 77335db)",
+      "about": "Runs a Lean 4 kernel: accepts a proof of the theorem whose statement node hashes to the params.",
+      "url": "https://github.com/ascrivener/witness-lean/tree/77335dbe873d5d8036aecc54a8a848b88a5b1bf5"
+    },
+    "0x945cd93c": {
+      "name": "Blake2b preimage check",
+      "about": "Accepts a witness whose Blake2b-256 hash is the params.",
+      "url": "https://github.com/ascrivener/witness/tree/main/checks/blake2b-preimage"
+    }
+  },
+  "code": {
+    "0xf4c0a230ce9f4cd32cb55dc61d8127d5ae2fedb004ee352cdf1f0610bceac99b": "witness 71e585a, the build jam-lean's theorems are about",
+    "0x2f25d04bbb212aa47ec4e3c57e81eccc31e196f4c9a90b2a56e9510fc7515d71": "witness 42c3802 with its own admin key (proposal 1's upgrade)"
+  },
+  "accounts": {
+    "0x5402051ea9ef82b9a3e2e27e3a2a4b58f047c002ae6f3a0510f9849e720f253a": "the public test admin (seed admin)",
+    "0x9981b72971f6a7282c86bf149082caac7e48d5a4737c57e81be0b25a88788bcf": "the WITNESS_ADMIN_SEED key",
+    "0x858055e6f802219ad90b24cf73260214c2e87273c7dd80c528cd5a7000f4f8f2": "lean-alloc1-alice",
+    "0x6e09bdf40d0cdb2f1f211c8506537debb359a8826c7dcfa0748e2400bd87bc66": "lean-alloc1-bob",
+    "0x116b65ce34487e4c5e350f6d4182b037116b554e75f193513e7329ef5cfc9894": "lean-alloc1-carol",
+    "0xa66401bbfe551de493951fe49abc6384d4ee9b6c767e13db0c246d2fa891d894": "bounty-acclogfail-maker"
+  },
+  "bounties": {
+    "0": {
+      "title": "Test bounty: a Blake2b preimage",
+      "about": "The first bounty on the Toaster, run end to end by the deploy workflow: commit, a wrong reveal, the right reveal, finalize.",
+      "doc": "docs/toaster.md"
+    },
+    "1": {
+      "title": "Picoalloc.alloc_wf",
+      "theorem": "Picoalloc.alloc_wf",
+      "node": "7ce01691db1fb346b84f37274809ff53fbab2cb72ff0b30850798325dd052a09",
+      "about": "The live Lean bounty demo: a proof of jam-lean's allocator theorem, revealed and paid on chain.",
+      "doc": "docs/toaster-lean.md"
+    },
+    "2": {
+      "title": "Picoalloc.free_wf",
+      "theorem": "Picoalloc.free_wf",
+      "node": "afb01982909759ee14f5b84d0426964d2d114bb0da6c7b80274d566c5d8b7514",
+      "about": "Part of the Lean demo, posted to show a proof of a different statement rejected. Its library isn't attested.",
+      "doc": "docs/toaster-lean.md"
+    },
+    "3": {
+      "title": "AccLogFail (jam-lean)",
+      "theorem": "Services.Bootstrap.Acc.Final.accLogFail_bounty : AccLogFailGoal",
+      "node": "00bb0133f3bbe98877af4c7d3d9d59e3eb3068a70a545ed999d10bc2dcb0f354",
+      "about": "An open obligation of jam-lean: the failure tail of bootstrap's accumulate log line. A proof discharges AccLogFail for accumulate_spec. Its library is attested on chain.",
+      "doc": "docs/toaster-acclogfail.md",
+      "hunt": true
+    }
+  }
+}

@@ -1,0 +1,147 @@
+# The bounty board: a public page (site/index.html) of witness's bounties on the JAM Toaster
+# (service 7), published with GitHub Pages. About hourly, and on demand (Actions → Toaster board →
+# Run workflow), it syncs a non-validating PolkaJam node as toaster.yml does, reads service 7's
+# bounties and admin state with scripts/toaster/board/snapshot.py (no Rust build: it decodes the
+# storage itself), and deploys site/ with that snapshot.json. It submits nothing.
+#
+# On a pull request touching the board it runs scripts/toaster/board/test-sim.sh instead: the
+# snapshot against witness-sim, checked against `witness decode`. Nothing is deployed.
+#
+# Pages must be set to deploy from GitHub Actions (Settings → Pages → Source: GitHub Actions).
+name: Toaster board
+
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: [site/**, scripts/toaster/board/**, .github/workflows/toaster-board.yml]
+  pull_request:
+    paths: [site/**, scripts/toaster/board/**, scripts/jamrpc.py, .github/workflows/toaster-board.yml]
+
+permissions:
+  contents: read
+
+env:
+  POLKAJAM_VERSION: 0.1.29
+  CHAINSPEC_URL: https://jamtoaster.network/chainspec/public.json
+  # The Toaster, identified by its genesis header's hash (see toaster.yml).
+  GENESIS_HASH: b8100ea7c6c6f952bf2ad61192e17f5b788f510ae7d86603edbe9f792412087d
+  SERVICE_ID: "7"
+  JAM_RPC: ws://localhost:19800
+
+jobs:
+  test:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          rustup toolchain install stable --profile minimal -c rust-src
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-jam-build
+          key: cargo-jam-build-0.1.29-${{ runner.os }}
+      - run: command -v cargo-jam-build || cargo install cargo-jam-build --version 0.1.29 --locked
+      - name: The snapshot against witness-sim
+        env:
+          POLKAVM_BACKEND: interpreter
+        run: scripts/toaster/board/test-sim.sh "$RUNNER_TEMP/board"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: toaster-board-test-${{ github.run_id }}
+          path: ${{ runner.temp }}/board/*.json
+
+  snapshot:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    concurrency:
+      group: toaster-board
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Host setup
+        run: |
+          sudo sysctl vm.unprivileged_userfaultfd=1
+          sudo sysctl kernel.apparmor_restrict_unprivileged_userns=0 || true
+          mkdir -p "$RUNNER_TEMP/logs"
+
+      # The node, as toaster.yml starts it.
+      - name: Download PolkaJam
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/polkajam" && cd "$RUNNER_TEMP/polkajam"
+          names=$(gh release view "v$POLKAJAM_VERSION" -R paritytech/polkajam-releases --json assets -q '.assets[].name')
+          asset=$(grep -i linux <<<"$names" | grep -iE 'x86_64|amd64|x64' | grep -viE 'sha|sig|asc' | head -1)
+          [ -n "$asset" ] || { echo "no linux x86_64 asset"; exit 1; }
+          gh release download "v$POLKAJAM_VERSION" -R paritytech/polkajam-releases -p "$asset"
+          case $asset in
+            *.tar.gz|*.tgz) tar xzf "$asset" ;;
+            *.tar.xz) tar xJf "$asset" ;;
+            *.zip) unzip -q "$asset" ;;
+            *) chmod +x "$asset" ;;
+          esac
+          path=$(find "$PWD" -type f -name polkajam | head -1)
+          [ -n "$path" ] || { echo "no polkajam in $asset"; exit 1; }
+          chmod +x "$path"
+          echo "POLKAJAM=$path" >>"$GITHUB_ENV"
+
+      - name: Fetch the chain spec and start the node
+        run: |
+          curl -fsSL "$CHAINSPEC_URL" -o "$RUNNER_TEMP/public.json"
+          genesis=$(jq -r '.genesis_header' "$RUNNER_TEMP/public.json" | python3 -c \
+            "import hashlib, sys; print(hashlib.blake2b(bytes.fromhex(sys.stdin.read().strip()), digest_size=32).hexdigest())")
+          [ "$genesis" = "$GENESIS_HASH" ] || { echo "expected genesis 0x$GENESIS_HASH, got 0x$genesis"; exit 1; }
+          "$POLKAJAM" --version | grep -q "$POLKAJAM_VERSION" || { echo "expected polkajam $POLKAJAM_VERSION"; exit 1; }
+          args=(--chain "$RUNNER_TEMP/public.json" run --rpc-port 19800 --temp)
+          if [ -z "$(ip -6 addr show scope global)" ] && "$POLKAJAM" run --help 2>&1 | grep -q -- '--listen-ip'; then
+            args+=(--listen-ip 0.0.0.0)
+          fi
+          args+=(--proxy "$(jq -r '.bootnodes[0]' "$RUNNER_TEMP/public.json")")
+          nohup "$POLKAJAM" "${args[@]}" >"$RUNNER_TEMP/logs/node.log" 2>&1 &
+          echo $! >"$RUNNER_TEMP/node.pid"
+          sleep 20
+          kill -0 "$(cat "$RUNNER_TEMP/node.pid")" || { tail -50 "$RUNNER_TEMP/logs/node.log"; exit 1; }
+          grep -q "Best final block: 0x${GENESIS_HASH:0:16}" "$RUNNER_TEMP/logs/node.log" \
+            || { echo "the node's genesis isn't 0x$GENESIS_HASH"; exit 1; }
+
+      - name: Wait for the node to sync
+        env:
+          SYNC_STALL_MINUTES: "15"
+        run: python3 scripts/toaster/sync.py 30 "$RUNNER_TEMP/logs/sync.csv" "$RUNNER_TEMP/logs/sync-status.json"
+
+      - name: Read service 7
+        run: |
+          python3 scripts/toaster/board/snapshot.py "$SERVICE_ID" site/snapshot.json | tee -a "$GITHUB_STEP_SUMMARY"
+          kill "$(cat "$RUNNER_TEMP/node.pid")" || true
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: toaster-board-${{ github.run_id }}
+          path: |
+            site/snapshot.json
+            ${{ runner.temp }}/logs/sync*
+
+  deploy:
+    needs: snapshot
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
