@@ -6,11 +6,17 @@ The [JAM Toaster](https://jamtoaster.network) is Parity's public JAM testnet: ch
 GP 0.8.0, PolkaJam 0.1.29. It has no public RPC, so deploying and using witness there means
 running a node of your own, non-validating, and talking to its RPC.
 
-**Status: not deployed yet.** A node in GitHub Actions hasn't connected to the network: it
-starts on `public-30` at the right genesis, but gets no peers, and logs `Failed to connect to
-bootnode` for the chain spec's one bootnode (`78.137.198.98:5556`) every few seconds, for as long
-as it runs (two hours, once). The steps below are ready, and they run the same from any machine
-whose node can sync. This page gets the service id once there is one.
+**Status: deployed; one bounty paid end to end.** Witness is **service 7**, created at slot
+9,907,098 (2026-11-20) from a macOS node following the steps below, code hash
+`0xf4c0a230ce9f4cd32cb55dc61d8127d5ae2fedb004ee352cdf1f0610bceac99b` (the blob's blake2b-256). Its
+first configuration applied at slot 9,907,103, and the admin handover is proposal 0, effective
+from slot 10,007,905. Bounty 0 then ran through mint, create, commit, a wrong reveal (rejected),
+the right reveal, an early finalize (rejected) and finalize, and was claimed by the hunter at
+slot 9,907,164.
+
+The chain spec's bootnode is now `195.154.91.169:5556`; the GitHub Actions runs before this
+couldn't reach the earlier one (`78.137.198.98:5556`). A node also needs `--proxy` (below) to
+submit work packages.
 
 ## The build deployed
 
@@ -63,7 +69,11 @@ Anywhere a PolkaJam node can sync (Linux, or macOS with the macOS release):
 ```sh
 # PolkaJam 0.1.29 from paritytech/polkajam-releases (tag v0.1.29), and the chain spec
 curl -fsSLO https://jamtoaster.network/chainspec/public.json
-polkajam --chain public.json run --rpc-port 19800 --temp     # on Linux, first:
+# --proxy: without one an ordinary node can't hand work packages to guarantors ("Failed to
+# submit work-package to even a single proxy/guarantor"); the chain spec's bootnode serves
+polkajam --chain public.json run --rpc-port 19800 --temp \
+  --proxy "$(python3 -c 'import json; print(json.load(open("public.json"))["bootnodes"][0])')"
+# on Linux, first:
 # sudo sysctl vm.unprivileged_userfaultfd=1 kernel.apparmor_restrict_unprivileged_userns=0
 
 # in another shell, from this repository: the CLI and checks at the deployed commit
@@ -73,6 +83,8 @@ git worktree add ../witness-71e585a 71e585a
 curl -fsSLo witness-service.jam \
   https://raw.githubusercontent.com/ascrivener/jam-lean/98bc6aa6a44f81967024446bb9c53e8f1406b642/services/witness/witness-service.jam
 echo "408b5be2fde1ae49b64f7c1ee44d2660472f1c9545320bf7a65ee9281206e2e4  witness-service.jam" | sha256sum -c
+# (on macOS: `shasum -a 256 -c`; `cargo jam-build` needs `rustup component add rust-src
+# --toolchain 1.97.0`; and run.sh uses GNU `stat`, so put coreutils' gstat first in PATH as stat)
 
 # once the node has synced (scripts/toaster/sync.py 300 sync.csv waits for it)
 export JAMT=/path/to/jamt W=../witness-71e585a/target/debug/witness CHECKS=../witness-71e585a/out
