@@ -1,7 +1,8 @@
 # Witness on the JAM Toaster
 
 The [JAM Toaster](https://jamtoaster.network) is Parity's public JAM testnet: chain spec
-`public-30` ([public.json](https://jamtoaster.network/chainspec/public.json)), genesis header hash
+[public.json](https://jamtoaster.network/chainspec/public.json) (id `public`, formerly
+`public-30`: the id and bootnode have changed, the chain hasn't), genesis header hash
 `0xb8100ea7c6c6f952bf2ad61192e17f5b788f510ae7d86603edbe9f792412087d`, 10 cores, 6-second slots,
 GP 0.8.0, PolkaJam 0.1.29. It has no public RPC, so deploying and using witness there means
 running a node of your own, non-validating, and talking to its RPC.
@@ -70,8 +71,9 @@ about that blob no longer describe the code on chain.
 ## The workflow
 
 `.github/workflows/toaster.yml`, run by hand (Actions → Toaster → Run workflow). Each run
-downloads PolkaJam 0.1.29, starts a node on `public-30` (`polkajam --chain public.json run
---rpc-port 19800 --temp`), checks the chain id, builds the witness CLI and the checks at
+downloads PolkaJam 0.1.29, checks that the chain spec's genesis header hashes to `0xb8100ea7…`,
+starts a node on it (`polkajam --chain public.json run --rpc-port 19800 --temp --proxy
+<bootnode>`), checks the node's genesis is the same, builds the witness CLI and the checks at
 `71e585a`, waits for the node to sync, then does `action`:
 
 | `action` | does | inputs |
