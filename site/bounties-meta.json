@@ -52,7 +52,43 @@
       "node": "00bb0133f3bbe98877af4c7d3d9d59e3eb3068a70a545ed999d10bc2dcb0f354",
       "about": "An open obligation of jam-lean: the failure tail of bootstrap's accumulate log line. A proof discharges AccLogFail for accumulate_spec. Its library is attested on chain.",
       "doc": "docs/toaster-acclogfail.md",
-      "hunt": true
+      "hunt": true,
+      "spec": {
+        "statement": {
+          "theorem": "Services.Bootstrap.Acc.Final.accLogFail_bounty",
+          "type": "Services.Bootstrap.Acc.Final.AccLogFailGoal",
+          "module": "Services.Bootstrap.Acc.Final.Bounty",
+          "definition": "Services/Bootstrap/Acc/Final/Bounty.lean"
+        },
+        "library": "acclogfail",
+        "witness_service": "71e585a634545b1cb90cf4737198a74865ee2100",
+        "terms": {
+          "reward": "1000000",
+          "asset": {
+            "service": 4294967295,
+            "id": 0,
+            "name": "test"
+          },
+          "check_gas": 5000000000,
+          "expiry": 11206135,
+          "claim_window": 30,
+          "disclosure_window": 0,
+          "bind_claim": false,
+          "posted_slot": 9910138
+        },
+        "maker": "0xa66401bbfe551de493951fe49abc6384d4ee9b6c767e13db0c246d2fa891d894"
+      }
     }
+  },
+  "chain": {
+    "name": "JAM Toaster",
+    "chainspec": "https://jamtoaster.network/chainspec/public.json",
+    "genesis_header_hash": "0xb8100ea7c6c6f952bf2ad61192e17f5b788f510ae7d86603edbe9f792412087d",
+    "polkajam": "0.1.29",
+    "slot_seconds": 6,
+    "slot_zero_utc": "2025-01-01T12:00:00Z"
+  },
+  "release": {
+    "tag": "toaster-attestations-v1"
   }
 }

@@ -1,0 +1,99 @@
+{
+ "format": 1,
+ "chain": {
+  "name": "JAM Toaster",
+  "chainspec": "https://jamtoaster.network/chainspec/public.json",
+  "genesis_header_hash": "0xb8100ea7c6c6f952bf2ad61192e17f5b788f510ae7d86603edbe9f792412087d",
+  "polkajam": "0.1.29",
+  "slot_seconds": 6,
+  "slot_zero_utc": "2025-01-01T12:00:00Z"
+ },
+ "service": 7,
+ "bounty": 3,
+ "title": "AccLogFail (jam-lean)",
+ "about": "An open obligation of jam-lean: the failure tail of bootstrap's accumulate log line. A proof discharges AccLogFail for accumulate_spec. Its library is attested on chain.",
+ "doc": "https://github.com/ascrivener/witness/blob/main/docs/toaster-acclogfail.md",
+ "statement": {
+  "theorem": "Services.Bootstrap.Acc.Final.accLogFail_bounty",
+  "type": "Services.Bootstrap.Acc.Final.AccLogFailGoal",
+  "lean": "theorem Services.Bootstrap.Acc.Final.accLogFail_bounty : Services.Bootstrap.Acc.Final.AccLogFailGoal",
+  "imports": [
+   "Services.Bootstrap.Acc.Final.Bounty"
+  ],
+  "module": "Services.Bootstrap.Acc.Final.Bounty",
+  "definition": "/-- **`AccLogFail` for bootstrap's code** (the statement of the `AccLogFail` bounty): `AccLogFail`\n    at the heap bound 1044430 and the stack 4278050816 … 4278059008, for every code that is\n    bootstrap's, its PVM code with the code facts, and every environment with that code and the\n    full parameters, the premises under which `AccHyps` asks for `AccHypsAt.logFail`. -/\ndef AccLogFailGoal : Prop :=\n  ∀ (code : ByteArray) (jb : JamBlob), IsBootstrapCode code → JamBlob.parse? code = some jb →\n    ∀ (P : Program), Code.HasCode jb.code P → CodeX.HasCodeX jb.code P → CodeA.HasCodeA jb.code P →\n      CodeF.HasCodeF jb.code P →\n    ∀ (env : AccEnv), env.code = code → env.params = Params.full →\n      AccLogFail jb.code env 1044430 4278050816 4278059008",
+  "definition_url": "https://github.com/ascrivener/jam-lean/blob/c22c197c9c712809912827bf547e92bb8fd9330f/Services/Bootstrap/Acc/Final/Bounty.lean",
+  "node": "00bb0133f3bbe98877af4c7d3d9d59e3eb3068a70a545ed999d10bc2dcb0f354",
+  "lean_toolchain": "leanprover/lean4:v4.36.0-rc1"
+ },
+ "pins": {
+  "jam_lean": "c22c197c9c712809912827bf547e92bb8fd9330f",
+  "witness_lean": "77335dbe873d5d8036aecc54a8a848b88a5b1bf5",
+  "lean4export": "df81913eee5519d5a88ae5b0fd701b5298cc29ab",
+  "witness_service": "71e585a634545b1cb90cf4737198a74865ee2100"
+ },
+ "check": {
+  "hash": "0xcc419035c5e61104c274de261033ffb484e9a2250adf05f3936b51aab6c877e4",
+  "sha256": "dfecff134eb35022fb425fd037ca01cf2288646b7d11649b8c762b1201d7103a",
+  "name": "Lean check (witness-lean 77335db)"
+ },
+ "check_gas": 5000000000,
+ "library": "acclogfail",
+ "cite": {
+  "claim": "lib-319.claim",
+  "entry": 0,
+  "node": "5f5f9bf1a5906967035a88a6c4a6b7b7b18852a7e08d3bd83812336adb2da867",
+  "attestation": "0x438152c36938ebef99a81b3d5ea9c9237d789d52d80198b2fd7954e638ca41f0",
+  "library": "acclogfail"
+ },
+ "reward": "1000000",
+ "asset": {
+  "service": 4294967295,
+  "id": 0,
+  "name": "test"
+ },
+ "expiry": {
+  "slot": 11206135,
+  "approx_utc": "2027-02-18T16:53:30Z"
+ },
+ "claim_window": 30,
+ "disclosure_window": 0,
+ "bind_claim": false,
+ "posted_slot": 9910138,
+ "maker": "0xa66401bbfe551de493951fe49abc6384d4ee9b6c767e13db0c246d2fa891d894",
+ "status": "https://ascrivener.github.io/witness/snapshot.json",
+ "release": {
+  "tag": "toaster-attestations-v1",
+  "url": "https://github.com/ascrivener/witness/releases/tag/toaster-attestations-v1",
+  "manifest": "https://github.com/ascrivener/witness/releases/download/toaster-attestations-v1/manifest.json",
+  "manifest_sha256": "460548c869a7d675cbc08cf9ecfc61d75a9d3d0a577ef9e6b2089c4d89c56a3b",
+  "assets": {
+   "manifest.json": "https://github.com/ascrivener/witness/releases/download/toaster-attestations-v1/manifest.json",
+   "acclogfail.json": "https://github.com/ascrivener/witness/releases/download/toaster-attestations-v1/acclogfail.json",
+   "acclogfail-claims.tar.gz": "https://github.com/ascrivener/witness/releases/download/toaster-attestations-v1/acclogfail-claims.tar.gz",
+   "lean-check.jam": "https://github.com/ascrivener/witness/releases/download/toaster-attestations-v1/lean-check.jam"
+  },
+  "sha256": {
+   "acclogfail.json": "4b75e1d767c188d66f02a6c5fb9f0bcae22b3ae76250b6bf6ade222046a8edc8",
+   "acclogfail-claims.tar.gz": "c5e6db510c17c4bebfc65f3492ee27c991f9f2f076515d66c8c4ac5fde2db9e7",
+   "lean-check.jam": "dfecff134eb35022fb425fd037ca01cf2288646b7d11649b8c762b1201d7103a"
+  }
+ },
+ "hunt": {
+  "guide": "https://github.com/ascrivener/witness/blob/main/docs/HUNTING.md",
+  "workflow": ".github/workflows/toaster-hunt.yml",
+  "secrets": {
+   "HUNTER_SEED": "your account's seed (any secret string)",
+   "HUNTER_PROOF": "your Lean file, if it isn't committed to the repository (a public fork)"
+  },
+  "commands": {
+   "test": "gh workflow run toaster-hunt.yml -R YOU/witness -f bounty=3 -f step=test",
+   "check": "gh workflow run toaster-hunt.yml -R YOU/witness -f bounty=3 -f step=check -f proof=PATH_OR_EMPTY",
+   "commit": "gh workflow run toaster-hunt.yml -R YOU/witness -f bounty=3 -f step=commit -f proof=PATH_OR_EMPTY",
+   "reveal": "gh workflow run toaster-hunt.yml -R YOU/witness -f bounty=3 -f step=reveal -f proof=PATH_OR_EMPTY",
+   "finalize": "gh workflow run toaster-hunt.yml -R YOU/witness -f bounty=3 -f step=finalize",
+   "status": "gh workflow run toaster-hunt.yml -R YOU/witness -f bounty=3 -f step=status"
+  },
+  "local": "HUNTER_SEED=... scripts/toaster/hunt/hunt.sh STEP site/bounties/3.json PROOF.lean WORK"
+ }
+}

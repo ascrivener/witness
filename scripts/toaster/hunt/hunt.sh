@@ -148,7 +148,8 @@ build() {
 	local lp; lp=$(cd "$JAM_LEAN_DIR" && lake env printenv LEAN_PATH)
 	(cd "$JAM_LEAN_DIR" && lake env lean --root="$OUT/proof" -o "$OUT/proof/HuntProof.olean" "$OUT/proof/HuntProof.lean") \
 		>"$OUT/proof/lean.log" 2>&1 || { cat "$OUT/proof/lean.log"; fail "your proof doesn't compile"; }
-	cat "$OUT/proof/lean.log"
+	# Lean's messages can quote your proof: only their count, unless it failed (or LEAN_LOG=1).
+	if [ -n "${LEAN_LOG:-}" ]; then cat "$OUT/proof/lean.log"; else echo "compiled; Lean said $(grep -c . "$OUT/proof/lean.log") lines (LEAN_LOG=1 shows them)"; fi
 	grep -q "declaration uses .sorry." "$OUT/proof/lean.log" && fail "your proof uses sorry"
 	(cd "$JAM_LEAN_DIR" && LEAN_PATH="$lp:$OUT/proof" "$LEAN4EXPORT" HuntProof -- "$THEOREM") >"$OUT/proof/export.ndjson"
 	"$HOST" convert "$OUT/proof/export.ndjson" "$OUT/nodes" >/dev/null

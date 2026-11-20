@@ -1,0 +1,26 @@
+{
+ "format": 1,
+ "service": 7,
+ "chain": "JAM Toaster",
+ "status": "https://ascrivener.github.io/witness/snapshot.json",
+ "guide": "https://github.com/ascrivener/witness/blob/main/docs/HUNTING.md",
+ "bounties": [
+  {
+   "bounty": 3,
+   "title": "AccLogFail (jam-lean)",
+   "theorem": "Services.Bootstrap.Acc.Final.accLogFail_bounty",
+   "node": "00bb0133f3bbe98877af4c7d3d9d59e3eb3068a70a545ed999d10bc2dcb0f354",
+   "reward": "1000000",
+   "asset": {
+    "service": 4294967295,
+    "id": 0,
+    "name": "test"
+   },
+   "expiry": {
+    "slot": 11206135,
+    "approx_utc": "2027-02-18T16:53:30Z"
+   },
+   "spec": "https://ascrivener.github.io/witness/bounties/3.json"
+  }
+ ]
+}

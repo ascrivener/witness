@@ -93,6 +93,11 @@ published build (`scripts/fetch-lake.sh`).
 
 ## For hunters
 
+[HUNTING.md](HUNTING.md) is the step-by-step guide, with a workflow that commits, reveals and
+finalizes from your own copy of this repository. The bounty's machine-readable spec is
+[`site/bounties/3.json`](../site/bounties/3.json), served at
+<https://ascrivener.github.io/witness/bounties/3.json>.
+
 - **Your whole proof must be checked in one refine.** A reveal checks the goal's proof, and every
   node of yours that it carries, within the bounty's 5×10⁹ gas. A proof of `AccLogFail` runs through
   code steps 6501 … 6630, so it may not fit.

@@ -4,7 +4,8 @@
 # (Claimed, Open, Revealing, Reclaimed, one Open past its expiry, and one citing blobs) and a pending proposal; serves
 # it through scripts/toaster/lean/fake-node.py and runs snapshot.py against that. Then checks every
 # value snapshot.py decoded against `witness decode`'s, and the storage keys it reads against
-# `witness key`'s.
+# `witness key`'s, and that site/bounties is what scripts/toaster/board/specs.py writes (it reads the
+# release toaster-attestations-v1).
 #
 #   scripts/toaster/board/test-sim.sh OUT
 #
@@ -96,4 +97,6 @@ raw() { "$SIM" inspect storage --raw "$SVC" "$1"; }
 	printf 'admin\t-\t%s\t-\n' "$($W account --seed someone)"
 } >"$OUT/decoded.tsv"
 python3 scripts/toaster/board/check-sim.py "$OUT/snapshot.json" "$OUT/decoded.tsv" "$(slot)"
+# The bounty specs (site/bounties) are what specs.py makes from bounties-meta.json and the release.
+python3 scripts/toaster/board/specs.py --check
 printf '\nsnapshot passed against witness-sim\n'
