@@ -151,7 +151,7 @@ python3 "$WITNESS_DIR/scripts/attest-batches.py" "$OUT/w" --witness "$W" --servi
 	${LAND_SLOTS:+--land-slots "$LAND_SLOTS"} \
 	--log "$OUT/attest.jsonl" | tee -a "$OUT/attest.log"
 # The slot attesting ended, once: a resumed run that finds it all attested keeps the first.
-[ "$(get attest_done)" = 1 ] || { put attest_end_slot "$(slot)"; put attest_done 1; }
+[ -n "$(get attest_end_slot)" ] || put attest_end_slot "$(slot)"
 echo "attest: $(stats_since "$ATTEST_SLOT" | python3 -I -c 'import json, sys; s = json.load(sys.stdin); print({k: s[k] for k in ("refinements", "refine_gas", "accumulations", "accumulate_gas")} if s else "no statistics")')"
 
 declare -A NONCE
