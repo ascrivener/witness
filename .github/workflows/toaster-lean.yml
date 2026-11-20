@@ -240,24 +240,31 @@ jobs:
           rm -rf "$WORK" && cp -r "$RUNNER_TEMP/fake/work" "$WORK"
           cp "$RUNNER_TEMP/fake/fake-node.log" "$LOGS/"
 
+      # Runs whatever happened before; its own failures fail the job too. A failed demo step
+      # already fails the job (pipefail): the summary says so, plainly, at the top.
       - name: Summary
         if: always()
+        env:
+          OUTCOME: ${{ job.status }}
         run: |
           kill "$(cat "$RUNNER_TEMP/node.pid" 2>/dev/null)" 2>/dev/null || true
           {
-            echo "### Toaster Lean bounty (${{ inputs.target }}, tag $TAG)"
-            [ -f "$WORK/report.md" ] && cat "$WORK/report.md"
-            [ -f "$WORK/state" ] && { echo '```'; cat "$WORK/state"; echo '```'; }
+            echo "### Toaster Lean bounty (${{ inputs.target }}, tag $TAG): $OUTCOME"
+            if [ "$OUTCOME" != success ]; then
+              echo "**The run did not complete.** The last lines of the demo's log:"
+              echo '```'; tail -15 "$LOGS/demo.log" 2>/dev/null || echo "(no demo log)"; echo '```'
+            fi
+            if [ -f "$WORK/report.md" ]; then cat "$WORK/report.md"; fi
+            if [ -f "$WORK/state" ]; then echo '```'; cat "$WORK/state"; echo '```'; fi
           } >>"$GITHUB_STEP_SUMMARY"
           # The work for resuming (without the export, which is rebuilt in a minute), and the logs.
           if [ -d "$WORK" ]; then
             tar czf "$LOGS/lean-work.tgz" -C "$WORK" --exclude=export.ndjson --exclude=other.ndjson --exclude=sim .
             for f in report.md report.json live.jsonl attest.jsonl attest.log stats.csv stats.log state times.tsv trace.log config.txt; do
-              [ -f "$WORK/$f" ] && cp "$WORK/$f" "$LOGS/"
+              if [ -f "$WORK/$f" ]; then cp "$WORK/$f" "$LOGS/"; fi
             done
           fi
-          [ -f "$LOGS/node.log" ] && gzip -f "$LOGS/node.log"
-          true
+          if [ -f "$LOGS/node.log" ]; then gzip -f "$LOGS/node.log"; fi
 
       - uses: actions/upload-artifact@v4
         if: always()
