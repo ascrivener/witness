@@ -73,6 +73,16 @@ To apply them from the workflow once effective: `action` `apply`, `service_id` 7
 (from slot 10,008,081), or `proposal_id` 0 with `expect`
 `9981b72971f6a7282c86bf149082caac7e48d5a4737c57e81be0b25a88788bcf` (from slot 10,007,905).
 
+### Daily watch
+
+Until then, `.github/workflows/toaster-watch.yml` checks service 7 every day at 04:37 UTC (and
+on demand: Actions → Toaster watch → Run workflow). It syncs a node and reads, without submitting
+anything: the proposals (exactly proposals 0 and 1, with the actions and effective slots above),
+the test admin's nonce (3: a new proposal or a cancel by the test key would change it), the stored
+admin (none yet) and the code hash (`f4c0a230…`). Any difference fails the run, which sends
+GitHub's failure notice, and the run's summary lists each check. Once the proposals are applied it
+fails by design: disable it then (Actions → Toaster watch → ⋯ → Disable workflow).
+
 ## The workflow
 
 `.github/workflows/toaster.yml`, run by hand (Actions → Toaster → Run workflow). Each run
@@ -86,6 +96,7 @@ starts a node on it (`polkajam --chain public.json run --rpc-port 19800 --temp -
 | `sync-only` (default) | records how long syncing took and the node's view of the chain | |
 | `deploy` | creates the service, configures it, proposes the admin handover | |
 | `bounty` | one bounty on the Blake2b preimage check: mint, create, commit, reveal a wrong witness and then the right one, finalize too early, finalize after the claim window, checking state after each step | `service_id` |
+| `watch` | reads service `service_id`'s proposals, test-admin nonce, stored admin and code hash, and fails unless they are `watch_expect`'s (`EXPECT_*=` lines; see `toaster-watch.yml`). Submits nothing | `service_id`, `watch_expect` |
 | `apply` | applies proposal `proposal_id` once it's effective (unsigned: no key needed), then checks it took: a SetAdmin's key is the stored admin, an Upgrade's code hash is the service's code hash, and the proposal is gone. With `expect`, that key or code hash must also be `expect` | `service_id`, `proposal_id` (0), `expect` |
 
 The node counts as synced once its best slot is within 3 of the wall-clock slot for a minute.

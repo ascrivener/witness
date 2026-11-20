@@ -5,6 +5,7 @@
 #   scripts/toaster/run.sh deploy
 #   scripts/toaster/run.sh bounty SERVICE_ID
 #   scripts/toaster/run.sh apply SERVICE_ID PROPOSAL_ID [EXPECTED_KEY_OR_CODE_HASH]
+#   EXPECT_...=... scripts/toaster/run.sh watch SERVICE_ID
 #
 # Needs, from the environment:
 #   JAMT        the polkajam release's jamt
@@ -219,6 +220,63 @@ print(kind, "0x" + bytes(int(b) for b in m.group(1).split(",")).hex())
 	record code_hash_after "\"$(code_hash "$SVC")\""
 }
 
+# One line for proposal $1, or "none": `set-admin KEY effective SLOT` or
+# `upgrade CODE_HASH len BYTES effective SLOT`.
+proposal_line() {
+	local v; v=$(storage --proposal "$1")
+	[ -n "$v" ] || { echo none; return; }
+	$W decode --proposal "$v" | python3 -c '
+import re, sys
+text = sys.stdin.read()
+hexof = lambda s: "0x" + bytes(int(b) for b in s.split(",")).hex()
+eff = re.search(r"effective: (\d+)", text)
+m = re.search(r"SetAdmin\(\[([0-9, ]+)\]\)", text)
+u = re.search(r"Upgrade \{ code_hash: \[([0-9, ]+)\], code_len: (\d+)", text)
+if m and eff:
+    print("set-admin", hexof(m.group(1)), "effective", eff.group(1))
+elif u and eff:
+    print("upgrade", hexof(u.group(1)), "len", u.group(2), "effective", eff.group(1))
+else:
+    print("other:", " ".join(text.split()))
+'
+}
+
+# Read service $SVC's admin state and compare it with the EXPECT_* variables: proposals 0 to
+# EXPECT_NEXT_PROPOSAL - 1 are EXPECT_PROPOSAL_<id> (proposal_line's form) and there are no
+# others; the test admin's (seed "admin") nonce is EXPECT_ADMIN_NONCE; the stored admin is
+# EXPECT_ADMIN_STORED ("none" until a SetAdmin applies); the code hash is EXPECT_CODE_HASH.
+# Writes $OUT/watch.md and fails on any difference. Submits nothing.
+watch() {
+	: "${EXPECT_NEXT_PROPOSAL:?}" "${EXPECT_ADMIN_NONCE:?}" "${EXPECT_ADMIN_STORED:?}" "${EXPECT_CODE_HASH:?}"
+	local report=$OUT/watch.md bad=0
+	printf '| check | expected | on chain (slot %s) | |\n|---|---|---|---|\n' "$(slot)" >"$report"
+	check() {
+		local ok=yes
+		[ "$2" = "$3" ] || { ok="**CHANGED**"; bad=$((bad + 1)); }
+		printf '| %s | `%s` | `%s` | %s |\n' "$1" "$2" "$3" "$ok" >>"$report"
+		echo "$1: expected [$2], got [$3]: $ok"
+	}
+	local next v
+	v=$(raw_storage "$SVC" "$NEXT_PROPOSAL_KEY")
+	next=$([ -n "$v" ] && python3 -c "import sys; print(int.from_bytes(bytes.fromhex(sys.argv[1][2:]), 'little'))" "$v" || echo 0)
+	check "next proposal id" "$EXPECT_NEXT_PROPOSAL" "$next"
+	local id var
+	for ((id = 0; id <= EXPECT_NEXT_PROPOSAL; id++)); do
+		var=EXPECT_PROPOSAL_$id
+		check "proposal $id" "${!var:-none}" "$(proposal_line "$id")"
+	done
+	v=$(storage --account admin)
+	check "test admin's nonce" "$EXPECT_ADMIN_NONCE" \
+		"$([ -n "$v" ] && $W decode --account "$v" | sed -nE 's/.*nonce: ([0-9]+).*/\1/p' || echo 0)"
+	v=$(raw_storage "$SVC" "$ADMIN_KEY")
+	check "stored admin" "$EXPECT_ADMIN_STORED" "${v:-none}"
+	check "code hash" "$EXPECT_CODE_HASH" "$(code_hash "$SVC")"
+	cat "$report"
+	record watch_changes "$bad"
+	[ "$bad" = 0 ] || fail "$bad check(s) changed on service $SVC: see watch.md"
+	echo "ok: service $SVC's admin state is as expected"
+}
+
 bounty() {
 	: "${CHECKS:?}"
 	local check=$CHECKS/blake2b-preimage-check.jam
@@ -298,6 +356,7 @@ case "${1:-}" in
 	deploy) deploy ;;
 	bounty) SVC=${2:?service id}; record service_id "$SVC"; bounty ;;
 	apply) SVC=${2:?service id}; record service_id "$SVC"; apply_proposal "${3:?proposal id}" "${4:-}" ;;
-	*) echo "usage: $0 deploy | bounty SERVICE_ID | apply SERVICE_ID PROPOSAL_ID [EXPECTED_KEY_OR_CODE_HASH]" >&2; exit 2 ;;
+	watch) SVC=${2:?service id}; record service_id "$SVC"; watch ;;
+	*) echo "usage: $0 deploy | bounty SERVICE_ID | apply SERVICE_ID PROPOSAL_ID [EXPECTED_KEY_OR_CODE_HASH] | watch SERVICE_ID" >&2; exit 2 ;;
 esac
 printf '\n%s done\n' "$1"

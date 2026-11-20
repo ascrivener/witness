@@ -10,6 +10,9 @@
 #   apply        apply proposal `proposal_id` on service `service_id` once it's effective, and check
 #                it took: a SetAdmin's key becomes the stored admin, an Upgrade's code hash the
 #                service's code hash (and either must equal `expect`, if given)
+#   watch        read service `service_id`'s proposals, admin nonce, stored admin and code hash and
+#                fail unless they are `watch_expect` (KEY=VALUE lines, see run.sh); submits nothing.
+#                toaster-watch.yml runs it daily.
 # See docs/toaster.md. Logs and a summary are uploaded as the run's artifact.
 name: Toaster
 
@@ -19,7 +22,7 @@ on:
       action:
         description: What to do once the node has synced
         type: choice
-        options: [sync-only, deploy, bounty, apply]
+        options: [sync-only, deploy, bounty, apply, watch]
         default: sync-only
       service_id:
         description: Witness's service id (bounty, apply)
@@ -42,6 +45,21 @@ on:
       node_args:
         description: Extra arguments for `polkajam run` (e.g. --listen-ip 0.0.0.0)
         default: ""
+      watch_expect:
+        description: "watch: EXPECT_*=VALUE lines"
+        default: ""
+  # The same inputs, for toaster-watch.yml.
+  workflow_call:
+    inputs:
+      action: { type: string, default: sync-only }
+      service_id: { type: string, default: "" }
+      proposal_id: { type: string, default: "0" }
+      expect: { type: string, default: "" }
+      cli_commit: { type: string, default: "" }
+      sync_timeout_minutes: { type: string, default: "300" }
+      stall_minutes: { type: string, default: "20" }
+      node_args: { type: string, default: "" }
+      watch_expect: { type: string, default: "" }
 
 concurrency:
   group: toaster
@@ -88,7 +106,9 @@ jobs:
           [[ $TIMEOUT =~ ^[0-9]+$ ]] || { echo "bad sync_timeout_minutes"; exit 1; }
           [[ $STALL =~ ^[0-9]+$ ]] || { echo "bad stall_minutes"; exit 1; }
           case $ACTION in
-            bounty|apply) [[ $SERVICE_ID =~ ^[0-9]+$ ]] || { echo "$ACTION needs service_id"; exit 1; } ;;
+            bounty|apply|watch) [[ $SERVICE_ID =~ ^[0-9]+$ ]] || { echo "$ACTION needs service_id"; exit 1; } ;;
+            sync-only|deploy) ;;
+            *) echo "unknown action $ACTION"; exit 1 ;;
           esac
           [[ $PROPOSAL_ID =~ ^[0-9]+$ ]] || { echo "bad proposal_id"; exit 1; }
           [[ -z $EXPECT || $EXPECT =~ ^(0x)?[0-9a-fA-F]{64}$ ]] || { echo "bad expect: 32 bytes of hex"; exit 1; }
@@ -281,6 +301,21 @@ jobs:
           EXPECT: ${{ inputs.expect }}
         run: scripts/toaster/run.sh apply "$SERVICE_ID" "$PROPOSAL_ID" "$EXPECT"
 
+      - name: Watch
+        if: inputs.action == 'watch' && steps.sync.outputs.synced == 'true'
+        env:
+          OUT: ${{ env.LOGS }}
+          SERVICE_ID: ${{ inputs.service_id }}
+          WATCH_EXPECT: ${{ inputs.watch_expect }}
+        run: |
+          # Only EXPECT_* variables, one KEY=VALUE per line; values may hold spaces.
+          while IFS= read -r line; do
+            [ -z "${line// }" ] && continue
+            [[ $line =~ ^(EXPECT_[A-Z0-9_]+)=(.*)$ ]] || { echo "bad watch_expect line: $line"; exit 1; }
+            export "${BASH_REMATCH[1]}=${BASH_REMATCH[2]}"
+          done <<<"$WATCH_EXPECT"
+          scripts/toaster/run.sh watch "$SERVICE_ID"
+
       - name: Summary
         if: always()
         env:
@@ -288,6 +323,7 @@ jobs:
         run: |
           {
             echo "### Toaster: $ACTION"
+            [ -f "$LOGS/watch.md" ] && { echo; cat "$LOGS/watch.md"; echo; }
             for f in sync-status.json summary.json; do
               [ -f "$LOGS/$f" ] && { echo "\`$f\`"; echo '```json'; cat "$LOGS/$f"; echo '```'; }
             done
