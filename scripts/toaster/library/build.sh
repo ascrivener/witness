@@ -19,7 +19,7 @@
 # 3. Dry run, always: in witness-sim, acclogfail's batches rebuilt from this export and attested
 #    (their claims must be the release's, byte for byte), then every batch of the new library; the
 #    run stops unless each is accepted using at most MAX_ATTEST_GAS (default 3.5e9, 70% of 5e9).
-# 4. Live, with SERVICE_ID and TAG: mint the attesters (proofs-TAG-a … -f, ATTESTERS) the test
+# 4. Live, with SERVICE_ID and TAG: mint the attesters (proofs-TAG-a … -d, ATTESTERS) the test
 #    asset, attest every batch (attest-batches.py, resuming from the chain). It never runs during
 #    a quiet window (QUIET, default the service upgrade's, 2026-11-27 11:45–12:45 UTC): it stops
 #    attesting QUIET_MARGIN (10 minutes) before one, waits it out, and resumes.
@@ -53,7 +53,7 @@ if [ -n "$SERVICE_ID" ]; then
 	export JAM_RPC=${JAM_RPC:-ws://localhost:19800}
 fi
 TAG=${TAG:-sim}
-ATTESTERS=${ATTESTERS:-$(printf "proofs-$TAG-%s," a b c d e f | sed 's/,$//')}
+ATTESTERS=${ATTESTERS:-$(printf "proofs-$TAG-%s," a b c d | sed 's/,$//')}
 W=$WITNESS_DIR/target/release/witness
 SIM=$WITNESS_DIR/target/release/witness-sim
 HOST=$WITNESS_LEAN_DIR/target/release/lean-host

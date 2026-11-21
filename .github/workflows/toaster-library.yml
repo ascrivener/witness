@@ -4,7 +4,7 @@
 # hold, the declarations too heavy for one refine split into judgment ops.
 #
 # `target: dry` plans it and dry-runs every batch in witness-sim (nothing on chain, no node);
-# `target: toaster` does the same if not done, then attests live with ATTESTERS in parallel,
+# `target: toaster` does the same if not done, then attests live with up to 4 attesters in parallel,
 # resuming from the chain. A live run never attests during build.sh's quiet window (the service
 # upgrade, 2026-11-27 11:45–12:45 UTC). The work is uploaded with each run: give `resume_run_id`
 # (and the same `tag`) to resume, the planning and dry run included. Runs end before GitHub's 6 h.
@@ -28,14 +28,17 @@ on:
         description: An earlier run of this workflow whose work to resume
         default: ""
       attesters:
-        description: How many attesters (one work package each a round, on its own core)
-        default: "6"
+        description: How many attesters, 1 to 4 (one work package each a round, on its own core; the Toaster has 10, shared)
+        default: "4"
       package_gas:
         description: Refine gas to fill an attest package with
         default: "2500000000"
       package_items:
         description: The most batches in a package (each carries the 516 KB check)
         default: "6"
+      settle_slots:
+        description: Slots to wait after each round lands, leaving blocks to others (raise it to back off)
+        default: "1"
       attest_minutes:
         description: Stop attesting after this long (the run uploads its work for the next to resume)
         default: "270"
@@ -88,13 +91,14 @@ jobs:
           for v in SERVICE_ID N PACKAGE_GAS PACKAGE_ITEMS MINUTES; do
             [[ ${!v} =~ ^[0-9]+$ ]] || { echo "bad $v: ${!v}"; exit 1; }
           done
-          [ "$N" -ge 1 ] && [ "$N" -le 10 ] || { echo "attesters: 1 to 10"; exit 1; }
+          # A shared testnet: leave most of its 10 cores to others.
+          [ "$N" -ge 1 ] && [ "$N" -le 4 ] || { echo "attesters: 1 to 4"; exit 1; }
           [[ -z $RESUME || $RESUME =~ ^[0-9]+$ ]] || { echo "bad resume_run_id"; exit 1; }
           [[ -z $TAG || $TAG =~ ^[a-z0-9-]+$ ]] || { echo "tag: lowercase letters, digits and dashes"; exit 1; }
           [ -n "$RESUME" ] && [ -z "$TAG" ] && { echo "resuming needs the earlier run's tag"; exit 1; }
           TAG=${TAG:-$GITHUB_RUN_ID}
           echo "TAG=$TAG" >>"$GITHUB_ENV"
-          letters=(a b c d e f g h i j)
+          letters=(a b c d)
           echo "ATTESTERS=$(for l in "${letters[@]:0:$N}"; do printf "proofs-$TAG-%s," "$l"; done | sed 's/,$//')" >>"$GITHUB_ENV"
 
       - name: Host setup
@@ -215,6 +219,7 @@ jobs:
           SERVICE_ID: ${{ inputs.target == 'toaster' && inputs.service_id || '' }}
           PACKAGE_GAS: ${{ inputs.package_gas }}
           PACKAGE_ITEMS: ${{ inputs.package_items }}
+          SETTLE_SLOTS: ${{ inputs.settle_slots }}
           MINUTES: ${{ inputs.attest_minutes }}
         run: |
           set -o pipefail

@@ -52,11 +52,40 @@ The library is every node those roots' proofs reach that acclogfail doesn't hold
    witness-sim; their claims must be the release's, byte for byte. Then every batch of the new
    library is attested. The run stops on any rejection or any check over 3.5×10⁹ gas (70% of
    `MAX_CHECK_GAS`).
-4. **Live.** Eight attesters (`proofs-TAG-a` …) are minted the test asset and attest in
-   parallel, resuming from the chain. A run stops after `attest_minutes` and uploads its work for
+4. **Live.** At most four attesters (`proofs-TAG-a` … `-d`) are minted the test asset and attest
+   in parallel, resuming from the chain. The Toaster is shared and has 10 cores, so most are left
+   to others, and `settle_slots` (default 1) waits after each round. A run stops after `attest_minutes` and uploads its work for
    the next to resume. It never attests within 10 minutes of, or during, the service upgrade
    (2026-11-27 11:45–12:45 UTC).
 
 Then the claims go in the release `toaster-attestations-v2`, as `acclogfail-proofs`
 (`scripts/toaster/library/release.py`). The bounty-3 spec lists both libraries, so
 `scripts/toaster/hunt/hunt.sh` trusts either.
+
+## Handoff: running and resuming it
+
+For whoever takes this over. Everything needed is in git and in workflow artifacts; nothing lives
+on a machine.
+
+- **Dry run** (no node, nothing on chain): Actions → Toaster proof library → `target: dry`. A run
+  that passes leaves `dry_run=1` in its work's `state`, and its summary shows `dry-gas.json`. Its
+  artifact `toaster-library-work-RUN` is the work to resume from: plan, heavy ops and layout. The
+  live runs must use these exact batches.
+- **Live**: `target: toaster`, `resume_run_id` = the dry run's (or the last live run's) id, and
+  `tag` = the same tag every time (the attesters' seeds are `proofs-TAG-a` … `-d`). Each run
+  attests until `attest_minutes` (270), then uploads its work. Rerun with the new run's id until
+  the summary says every batch is attested ("resuming: N of N attested already" and the report).
+  From the command line:
+  `gh workflow run toaster-library.yml -f target=toaster -f tag=TAG -f resume_run_id=RUN`.
+- **Progress**: each run's summary has the last "N of M attested" line; `attest.jsonl` in its logs
+  artifact has every round. Attestations are on chain, so a lost artifact costs only re-planning:
+  a new plan's batches differ, so resume from the dry run's work, never a fresh plan.
+- **Being a good neighbour**: at most 4 attesters. If service 7's statistics show other services
+  squeezed out of blocks, raise `settle_slots` or lower `attesters` (both only change pacing).
+- **The quiet window** (2026-11-27 11:45–12:45 UTC, the service upgrade): build.sh stops 10 minutes
+  before it and waits it out. Don't dispatch a run that would start inside it.
+- **Then**: build release `toaster-attestations-v2` (picoalloc, acclogfail, and this library via
+  `scripts/toaster/library/release.py` from the last run's work), list both libraries in the
+  bounty-3 spec (`libraries` in `site/bounties-meta.json`, `scripts/toaster/board/specs.py`),
+  update HUNTING.md's limits, and re-measure the `acc_log_lineK` proxy reveal against both
+  libraries.
