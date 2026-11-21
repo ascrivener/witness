@@ -79,22 +79,28 @@ def fetch(spec_path, rel, local=None):
     if r.get("manifest_sha256") and sha256(m) != r["manifest_sha256"]:
         sys.exit(f"manifest.json's sha256 isn't the spec's {r['manifest_sha256']}")
     manifest = load(m)
-    lib = next(l for l in manifest["libraries"] if l["library"] == spec["library"])
-    for name, meta in lib["files"].items():
-        dst = get(name, r["assets"][name])
-        if sha256(dst) != meta["sha256"]:
-            sys.exit(f"{name}: sha256 {sha256(dst)}, the manifest says {meta['sha256']}")
-    with tarfile.open(f"{rel}/{spec['library']}-claims.tar.gz") as t:
-        for m in t.getmembers():
-            if not re.fullmatch(rf"{spec['library']}/lib-\d+\.claim", m.name) or not m.isfile():
-                sys.exit(f"unexpected {m.name} in the claims")
-        t.extractall(rel, filter="data")
-    doc = load(f"{rel}/{spec['library']}.json")
-    for k, want in (("check_hash", spec["check"]["hash"]), ("jam_lean", spec["pins"]["jam_lean"]),
-                    ("witness_lean", spec["pins"]["witness_lean"]), ("cite", spec["cite"])):
-        if (doc[k] if k != "cite" else {**doc["cite"], "library": spec["library"]}) != want:
-            sys.exit(f"the release's {k} isn't the spec's")
-    print(f"release {manifest['release']}: {spec['library']}, {doc['batch_count']} attestations, {doc['node_count']} nodes")
+    names = spec.get("libraries") or [spec["library"]]  # the cited library first, then any on top of it
+    for name in names:
+        lib = next(l for l in manifest["libraries"] if l["library"] == name)
+        for f, meta in lib["files"].items():
+            if os.path.exists(f"{rel}/{f}") and sha256(f"{rel}/{f}") == meta["sha256"]:
+                continue  # lean-check.jam, shared
+            dst = get(f, r["assets"][f])
+            if sha256(dst) != meta["sha256"]:
+                sys.exit(f"{f}: sha256 {sha256(dst)}, the manifest says {meta['sha256']}")
+        with tarfile.open(f"{rel}/{name}-claims.tar.gz") as t:
+            for mem in t.getmembers():
+                if not re.fullmatch(rf"{re.escape(name)}/lib-\d+\.claim", mem.name) or not mem.isfile():
+                    sys.exit(f"unexpected {mem.name} in the claims")
+            t.extractall(rel, filter="data")
+        doc = load(f"{rel}/{name}.json")
+        for k, want in (("check_hash", spec["check"]["hash"]), ("jam_lean", spec["pins"]["jam_lean"]),
+                        ("witness_lean", spec["pins"]["witness_lean"])):
+            if doc[k] != want:
+                sys.exit(f"{name}: the release's {k} isn't the spec's")
+        if name == spec["library"] and {**doc["cite"], "library": name} != spec["cite"]:
+            sys.exit("the release's cite isn't the spec's")
+        print(f"release {manifest['release']}: {name}, {doc['batch_count']} attestations, {doc['node_count']} nodes")
 
 
 def salt(seed, service, bounty):
@@ -102,10 +108,15 @@ def salt(seed, service, bounty):
 
 
 def library_index(spec, rel):
-    """Every attested node the hunter may trust: its hash -> CLAIM:ENTRY."""
-    lib = spec["library"]
-    doc = load(f"{rel}/{lib}.json")
-    index = {h: f"{rel}/{lib}/lib-{n}.claim:{e}" for h, (n, e) in doc["nodes"].items()}
+    """Every attested node the hunter may trust: its hash -> CLAIM:ENTRY, from every library the
+    spec names (the cited one first), then the hunter's own lemmas."""
+    names = spec.get("libraries") or [spec["library"]]
+    doc, index = None, {}
+    for name in names:
+        d = load(f"{rel}/{name}.json")
+        doc = doc or d
+        for h, (n, e) in d["nodes"].items():
+            index.setdefault(h, f"{rel}/{name}/lib-{n}.claim:{e}")
     own = f"{rel}/own-index.json"
     if os.path.exists(own):
         index.update(load(own))
