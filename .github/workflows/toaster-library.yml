@@ -65,7 +65,8 @@ env:
   RUST_TOOLCHAIN: 1.97.0
   JAM_RPC: ws://localhost:19800
   RELEASE: https://github.com/ascrivener/witness/releases/download/toaster-attestations-v1
-  LOGS: ${{ github.workspace }}/../library-logs
+  # Inside the workspace: upload-artifact refuses paths with `..`.
+  LOGS: ${{ github.workspace }}/library-logs
   # A fixed path, for resuming (the batches name their files relative to it).
   WORK: ${{ github.workspace }}/../library-work
   REL: ${{ github.workspace }}/../library-release
@@ -156,6 +157,8 @@ jobs:
           curl -sSfL https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh \
             | sh -s -- -y --default-toolchain "$LEAN_TOOLCHAIN"
           echo "$HOME/.elan/bin" >>"$GITHUB_PATH"
+          # witness-lean's mathlib_work.py (judgment splitting) imports plan_profile, which needs numpy.
+          python3 -m pip install -q --break-system-packages numpy
       - uses: actions/cache@v4
         with:
           path: ~/.cargo/bin/cargo-jam-build
@@ -261,7 +264,7 @@ jobs:
         if: always()
         with:
           name: toaster-library-logs-${{ github.run_id }}
-          path: ${{ github.workspace }}/../library-logs/
+          path: ${{ github.workspace }}/library-logs/
       - uses: actions/upload-artifact@v4
         if: always()
         with:
