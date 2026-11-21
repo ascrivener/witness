@@ -1,0 +1,270 @@
+# Attest jam-lean's proof-side library for AccLogFail on the JAM Toaster's service 7, on top of the
+# attested acclogfail library (scripts/toaster/library/build.sh, docs/toaster-proof-library.md):
+# what jam-lean's proofs of the first log line's region use that the statement's library doesn't
+# hold, the declarations too heavy for one refine split into judgment ops.
+#
+# `target: dry` plans it and dry-runs every batch in witness-sim (nothing on chain, no node);
+# `target: toaster` does the same if not done, then attests live with up to 4 attesters in parallel,
+# resuming from the chain. A live run never attests during build.sh's quiet window (the service
+# upgrade, 2026-11-27 11:45–12:45 UTC). The work is uploaded with each run: give `resume_run_id`
+# (and the same `tag`) to resume, the planning and dry run included. Runs end before GitHub's 6 h.
+name: Toaster proof library
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "dry: plan and dry-run in witness-sim only; toaster: then attest live"
+        type: choice
+        options: [dry, toaster]
+        default: dry
+      service_id:
+        description: Witness's service id on the Toaster
+        default: "7"
+      tag:
+        description: Names the attesters (proofs-TAG-a … -f); default the run's id. Give the earlier tag to resume
+        default: ""
+      resume_run_id:
+        description: An earlier run of this workflow whose work to resume
+        default: ""
+      attesters:
+        description: How many attesters, 1 to 4 (one work package each a round, on its own core; the Toaster has 10, shared)
+        default: "4"
+      package_gas:
+        description: Refine gas to fill an attest package with
+        default: "2500000000"
+      package_items:
+        description: The most batches in a package (each carries the 516 KB check)
+        default: "6"
+      settle_slots:
+        description: Slots to wait after each round lands, leaving blocks to others (raise it to back off)
+        default: "1"
+      attest_minutes:
+        description: Stop attesting after this long (the run uploads its work for the next to resume)
+        default: "270"
+      sync_timeout_minutes:
+        description: How long to wait for the node to sync
+        default: "60"
+
+concurrency:
+  group: toaster-library
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  POLKAJAM_VERSION: 0.1.29
+  CHAINSPEC_URL: https://jamtoaster.network/chainspec/public.json
+  GENESIS_HASH: b8100ea7c6c6f952bf2ad61192e17f5b788f510ae7d86603edbe9f792412087d
+  WITNESS_LEAN_COMMIT: 77335dbe873d5d8036aecc54a8a848b88a5b1bf5
+  JAM_LEAN_COMMIT: c22c197c9c712809912827bf547e92bb8fd9330f
+  LEAN4EXPORT_COMMIT: df81913
+  LEAN_TOOLCHAIN: leanprover/lean4:v4.36.0-rc1
+  RUST_TOOLCHAIN: 1.97.0
+  JAM_RPC: ws://localhost:19800
+  RELEASE: https://github.com/ascrivener/witness/releases/download/toaster-attestations-v1
+  LOGS: ${{ github.workspace }}/../library-logs
+  # A fixed path, for resuming (the batches name their files relative to it).
+  WORK: ${{ github.workspace }}/../library-work
+  REL: ${{ github.workspace }}/../library-release
+
+jobs:
+  library:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check inputs
+        env:
+          SERVICE_ID: ${{ inputs.service_id }}
+          TAG: ${{ inputs.tag }}
+          RESUME: ${{ inputs.resume_run_id }}
+          N: ${{ inputs.attesters }}
+          PACKAGE_GAS: ${{ inputs.package_gas }}
+          PACKAGE_ITEMS: ${{ inputs.package_items }}
+          MINUTES: ${{ inputs.attest_minutes }}
+        run: |
+          mkdir -p "$LOGS" "$REL"
+          for v in SERVICE_ID N PACKAGE_GAS PACKAGE_ITEMS MINUTES; do
+            [[ ${!v} =~ ^[0-9]+$ ]] || { echo "bad $v: ${!v}"; exit 1; }
+          done
+          # A shared testnet: leave most of its 10 cores to others.
+          [ "$N" -ge 1 ] && [ "$N" -le 4 ] || { echo "attesters: 1 to 4"; exit 1; }
+          [[ -z $RESUME || $RESUME =~ ^[0-9]+$ ]] || { echo "bad resume_run_id"; exit 1; }
+          [[ -z $TAG || $TAG =~ ^[a-z0-9-]+$ ]] || { echo "tag: lowercase letters, digits and dashes"; exit 1; }
+          [ -n "$RESUME" ] && [ -z "$TAG" ] && { echo "resuming needs the earlier run's tag"; exit 1; }
+          TAG=${TAG:-$GITHUB_RUN_ID}
+          echo "TAG=$TAG" >>"$GITHUB_ENV"
+          letters=(a b c d)
+          echo "ATTESTERS=$(for l in "${letters[@]:0:$N}"; do printf "proofs-$TAG-%s," "$l"; done | sed 's/,$//')" >>"$GITHUB_ENV"
+
+      - name: Host setup
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo docker image prune -af >/dev/null 2>&1 || true
+          sudo sysctl vm.unprivileged_userfaultfd=1
+          sudo sysctl kernel.apparmor_restrict_unprivileged_userns=0 || true
+          { uname -a; nproc; free -h; df -h .; } >"$LOGS/host.txt" 2>&1
+
+      - name: Download PolkaJam
+        if: inputs.target == 'toaster'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/polkajam" && cd "$RUNNER_TEMP/polkajam"
+          names=$(gh release view "v$POLKAJAM_VERSION" -R paritytech/polkajam-releases --json assets -q '.assets[].name')
+          asset=$(grep -i linux <<<"$names" | grep -iE 'x86_64|amd64|x64' | grep -viE 'sha|sig|asc' | head -1)
+          [ -n "$asset" ] || { echo "no linux x86_64 asset"; exit 1; }
+          gh release download "v$POLKAJAM_VERSION" -R paritytech/polkajam-releases -p "$asset"
+          case $asset in
+            *.tar.gz|*.tgz) tar xzf "$asset" ;;
+            *.tar.xz) tar xJf "$asset" ;;
+            *.zip) unzip -q "$asset" ;;
+            *) chmod +x "$asset" ;;
+          esac
+          path=$(find "$PWD" -type f -name polkajam | head -1)
+          [ -n "$path" ] || { echo "no polkajam in $asset"; exit 1; }
+          chmod +x "$path"
+          echo "POLKAJAM=$path" >>"$GITHUB_ENV"
+      - name: Fetch the chain spec and start the node
+        if: inputs.target == 'toaster'
+        run: |
+          curl -fsSL "$CHAINSPEC_URL" -o "$RUNNER_TEMP/public.json"
+          genesis=$(jq -r '.genesis_header' "$RUNNER_TEMP/public.json" | python3 -c \
+            "import hashlib, sys; print(hashlib.blake2b(bytes.fromhex(sys.stdin.read().strip()), digest_size=32).hexdigest())")
+          [ "$genesis" = "$GENESIS_HASH" ] || { echo "expected genesis 0x$GENESIS_HASH, got 0x$genesis"; exit 1; }
+          "$POLKAJAM" --version | grep -q "$POLKAJAM_VERSION" || { echo "expected polkajam $POLKAJAM_VERSION"; exit 1; }
+          args=(--chain "$RUNNER_TEMP/public.json" run --rpc-port 19800 --temp)
+          if [ -z "$(ip -6 addr show scope global)" ] && "$POLKAJAM" run --help 2>&1 | grep -q -- '--listen-ip'; then
+            args+=(--listen-ip 0.0.0.0)
+          fi
+          args+=(--proxy "$(jq -r '.bootnodes[0]' "$RUNNER_TEMP/public.json")")
+          nohup "$POLKAJAM" "${args[@]}" >"$LOGS/node.log" 2>&1 &
+          echo $! >"$RUNNER_TEMP/node.pid"
+          sleep 20
+          kill -0 "$(cat "$RUNNER_TEMP/node.pid")" || { tail -50 "$LOGS/node.log"; exit 1; }
+          grep -q "Best final block: 0x${GENESIS_HASH:0:16}" "$LOGS/node.log" \
+            || { echo "the node's genesis isn't 0x$GENESIS_HASH"; exit 1; }
+
+      - name: Install Rust, cargo-jam-build and Lean
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal -c rust-src
+          echo "RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN" >>"$GITHUB_ENV"
+          curl -sSfL https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh \
+            | sh -s -- -y --default-toolchain "$LEAN_TOOLCHAIN"
+          echo "$HOME/.elan/bin" >>"$GITHUB_PATH"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-jam-build
+          key: cargo-jam-build-0.1.29-${{ runner.os }}
+      - run: command -v cargo-jam-build || cargo install cargo-jam-build --version 0.1.29 --locked
+      - name: Fetch and build lean4export, jam-lean (pinned build) and witness-lean
+        run: |
+          cd "$RUNNER_TEMP"
+          for r in leanprover/lean4export:$LEAN4EXPORT_COMMIT ascrivener/jam-lean:$JAM_LEAN_COMMIT ascrivener/witness-lean:$WITNESS_LEAN_COMMIT; do
+            repo=${r%%:*} commit=${r##*:}
+            git clone -q "https://github.com/$repo" "${repo##*/}"
+            git -C "${repo##*/}" checkout -q "$commit"
+            echo "$repo $(git -C "${repo##*/}" rev-parse HEAD)" | tee -a "$LOGS/sources.txt"
+          done
+          (cd lean4export && lake build lean4export)
+          "$GITHUB_WORKSPACE/scripts/toaster/hunt/fetch-jam-lean-cache.sh" jam-lean "$JAM_LEAN_COMMIT"
+          (cd jam-lean && lake build Services.Bootstrap.Acc.Final.Bounty $(cat "$GITHUB_WORKSPACE/scripts/toaster/library/acclogfail-proofs.modules"))
+          df -h . | tee -a "$LOGS/host.txt"
+          (cd witness-lean && cargo build -q --release -p lean-host)
+          echo "LEAN4EXPORT=$RUNNER_TEMP/lean4export/.lake/build/bin/lean4export" >>"$GITHUB_ENV"
+          echo "JAM_LEAN_DIR=$RUNNER_TEMP/jam-lean" >>"$GITHUB_ENV"
+          echo "WITNESS_LEAN_DIR=$RUNNER_TEMP/witness-lean" >>"$GITHUB_ENV"
+      - name: The release's acclogfail library
+        run: |
+          cd "$REL"
+          for f in manifest.json acclogfail.json acclogfail-claims.tar.gz lean-check.jam; do curl -fsSL -o "$f" "$RELEASE/$f"; done
+          python3 -I -c 'import hashlib, json, sys
+          m = json.load(open("manifest.json"))
+          lib = next(l for l in m["libraries"] if l["library"] == "acclogfail")
+          for f, meta in lib["files"].items():
+              assert hashlib.sha256(open(f, "rb").read()).hexdigest() == meta["sha256"], f
+          print("acclogfail: files match the manifest")'
+          tar xzf acclogfail-claims.tar.gz
+
+      - name: Download the earlier run's work
+        if: inputs.resume_run_id != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: toaster-library-work-${{ inputs.resume_run_id }}
+          run-id: ${{ inputs.resume_run_id }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/resume
+      - name: Unpack the earlier run's work
+        if: inputs.resume_run_id != ''
+        run: |
+          mkdir -p "$WORK"
+          tar xzf "$RUNNER_TEMP/resume/library-work.tgz" -C "$WORK"
+          if grep -q '^tag=' "$WORK/state"; then
+            grep "^tag=" "$WORK/state" | tail -1 | grep -qx "tag=$TAG" || { echo "the earlier run's tag isn't $TAG"; exit 1; }
+          fi
+
+      - name: Wait for the node to sync
+        if: inputs.target == 'toaster'
+        env:
+          SYNC_STALL_MINUTES: "20"
+        run: |
+          python3 scripts/toaster/sync.py "${{ inputs.sync_timeout_minutes }}" "$LOGS/sync.csv" "$LOGS/sync-status.json"
+
+      - name: Plan, dry-run, and attest
+        env:
+          SERVICE_ID: ${{ inputs.target == 'toaster' && inputs.service_id || '' }}
+          PACKAGE_GAS: ${{ inputs.package_gas }}
+          PACKAGE_ITEMS: ${{ inputs.package_items }}
+          SETTLE_SLOTS: ${{ inputs.settle_slots }}
+          MINUTES: ${{ inputs.attest_minutes }}
+        run: |
+          set -o pipefail
+          # Stop in time to upload the work: the job's own limit is 355 minutes.
+          status=0
+          timeout --signal=TERM "$(( MINUTES * 60 ))" scripts/toaster/library/build.sh "$WORK" 2>&1 | tee -a "$LOGS/build.log" || status=$?
+          if [ "$status" = 124 ]; then
+            echo "stopped after $MINUTES minutes: rerun with resume_run_id $GITHUB_RUN_ID and tag $TAG" | tee -a "$LOGS/build.log"
+            echo "PARTIAL=1" >>"$GITHUB_ENV"
+          elif [ "$status" != 0 ]; then
+            exit "$status"
+          fi
+
+      - name: Summary
+        if: always()
+        env:
+          OUTCOME: ${{ job.status }}
+        run: |
+          kill "$(cat "$RUNNER_TEMP/node.pid" 2>/dev/null)" 2>/dev/null || true
+          attested=$(grep -o 'attested [0-9]* of [0-9]*\|[0-9]* of [0-9]* attested' "$LOGS/build.log" 2>/dev/null | tail -1)
+          {
+            echo "### Toaster proof library (${{ inputs.target }}, tag $TAG): $OUTCOME${PARTIAL:+, stopped to resume (resume_run_id $GITHUB_RUN_ID)}"
+            echo "attest progress: ${attested:-none yet}"
+            echo '```'; tail -20 "$LOGS/build.log" 2>/dev/null || echo "(no log)"; echo '```'
+            if [ -f "$WORK/report.md" ]; then cat "$WORK/report.md"; fi
+            if [ -f "$WORK/dry-gas.json" ]; then echo '```'; cat "$WORK/dry-gas.json"; echo '```'; fi
+            if [ -f "$WORK/state" ]; then echo '```'; cat "$WORK/state"; echo '```'; fi
+          } >>"$GITHUB_STEP_SUMMARY"
+          if [ -d "$WORK" ]; then
+            # The work for resuming: without the pack (made again from nodes if needed) or the dry run's chain.
+            tar czf "$RUNNER_TEMP/library-work.tgz" -C "$WORK" --exclude=./dry --exclude=./base-work --exclude=./pack .
+            for f in report.md report.json state trace.log dry-gas.json attest.jsonl attest.log set.json; do
+              if [ -f "$WORK/$f" ]; then cp "$WORK/$f" "$LOGS/"; fi
+            done
+          fi
+          if [ -f "$LOGS/node.log" ]; then gzip -f "$LOGS/node.log"; fi
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: toaster-library-logs-${{ github.run_id }}
+          path: ${{ github.workspace }}/../library-logs/
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: toaster-library-work-${{ github.run_id }}
+          path: ${{ runner.temp }}/library-work.tgz
+          compression-level: 0

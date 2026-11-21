@@ -193,7 +193,7 @@ def manifest(conf_path, out):
             "library": lib["name"], "about": lib["about"], "doc": lib["doc"],
             "jam_lean": doc["jam_lean"], "witness_lean": doc["witness_lean"], "lean4export": doc["lean4export"],
             "lean_toolchain": doc["lean_toolchain"], "module": doc["module"],
-            "check_hash": doc["check_hash"], "goal": doc["goal"], "cite": doc["cite"],
+            "check_hash": doc["check_hash"], "goal": doc["goal"], "cite": doc["cite"], "base": doc.get("base"),
             "run": doc["run"], "same_as_runs": doc["same_as_runs"], "attest_slots": doc["attest_slots"],
             "batch_count": doc["batch_count"], "node_count": doc["node_count"],
             "attestations": [b["attestation"] for b in doc["batches"]],
