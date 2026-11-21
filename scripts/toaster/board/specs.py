@@ -7,7 +7,8 @@ of site/bounties-meta.json with a `spec`, and site/bounties/index.json listing t
 A spec is everything a hunter (or their agent) needs: the statement (Lean name, type, its full
 definition, the module to import, the statement node's hash), the pinned commits, the check, the
 attestation the bounty cites, its terms (reward, asset, check gas, expiry slot and approximate
-date, windows), the release of its library's attestations (each asset's URL and sha256) and the
+date, windows), the libraries a hunter trusts (`libraries`: the cited one, then any attested on top
+of it), the release of their attestations (each asset's URL and sha256) and the
 hunt workflow's commands (docs/HUNTING.md). The hand-kept source is bounties-meta.json; the rest
 comes from the release's manifest.json (downloaded, or from DIR) and the statement's definition from
 jam-lean at the pinned commit (raw.githubusercontent.com). The terms are what the chain holds:
@@ -62,7 +63,13 @@ def main(release_dir=None, check=False):
         assert lib["goal"]["theorem"] == st["theorem"] and int(bid) in lib["goal"]["bounties"], f"bounty {bid}: not the library's goal"
         assert lib["goal"]["node"] == b["node"], f"bounty {bid}: the statement node isn't the library's goal"
         expiry_utc = datetime.datetime.fromtimestamp(JCE + 6 * t["expiry"], datetime.timezone.utc)
-        names = ["manifest.json", *lib["files"]]
+        # The libraries a hunter trusts: the cited one first, then any attested on top of it.
+        libnames = [s["library"], *[n for n in s.get("libraries", []) if n != s["library"]]]
+        libs = [next(l for l in manifest["libraries"] if l["library"] == n) for n in libnames]
+        for l in libs[1:]:
+            assert l["check_hash"] == lib["check_hash"] and l["jam_lean"] == lib["jam_lean"], f"bounty {bid}: {l['library']} has another check or jam-lean"
+        files = {n: m for l in libs for n, m in l["files"].items()}
+        names = ["manifest.json", *files]
         cmd = lambda step, extra="": (f"gh workflow run toaster-hunt.yml -R YOU/witness -f bounty={bid} -f step={step}{extra}")
         spec = {
             "format": 1,
@@ -81,7 +88,7 @@ def main(release_dir=None, check=False):
             "check": {"hash": lib["check_hash"], "sha256": lib["files"]["lean-check.jam"]["sha256"],
                       "name": meta["checks"].get(lib["check_hash"][:10], {}).get("name")},
             "check_gas": t["check_gas"],
-            "library": s["library"], "cite": {**lib["cite"], "library": s["library"]},
+            "library": s["library"], "libraries": libnames, "cite": {**lib["cite"], "library": s["library"]},
             "reward": t["reward"], "asset": t["asset"],
             "expiry": {"slot": t["expiry"], "approx_utc": expiry_utc.strftime("%Y-%m-%dT%H:%M:%SZ")},
             "claim_window": t["claim_window"], "disclosure_window": t["disclosure_window"], "bind_claim": t["bind_claim"],
@@ -91,7 +98,7 @@ def main(release_dir=None, check=False):
                 "tag": tag, "url": f"{repo}/releases/tag/{tag}",
                 "manifest": f"{base}/manifest.json", "manifest_sha256": hashlib.sha256(raw).hexdigest(),
                 "assets": {n: f"{base}/{n}" for n in names},
-                "sha256": {n: m["sha256"] for n, m in lib["files"].items()},
+                "sha256": {n: m["sha256"] for n, m in files.items()},
             },
             "hunt": {
                 "guide": f"{repo}/blob/main/docs/HUNTING.md",

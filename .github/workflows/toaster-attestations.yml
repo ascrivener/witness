@@ -94,13 +94,19 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          for run in $(jq -r '.libraries[] | (.run, .same_as_runs[]) | tostring' scripts/toaster/attestations/libraries.json); do
-            name=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run/artifacts" -q '.artifacts[0].name')
-            expired=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run/artifacts" -q '.artifacts[0].expired')
+          # Each run's artifact is the conf's `artifact` for its main run, else the run's first; it holds `work`.
+          jq -r '.libraries[] | (.run, .same_as_runs[]) as $r
+                 | "\($r) \(if $r == .run and .artifact then .artifact else "-" end) \(.work)"' \
+            scripts/toaster/attestations/libraries.json | while read -r run name work; do
+            q=".artifacts[0]"
+            [ "$name" = - ] || q=".artifacts[] | select(.name == \"$name\")"
+            name=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run/artifacts?per_page=100" -q "$q | .name")
+            expired=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run/artifacts?per_page=100" -q "$q | .expired")
+            [ -n "$name" ] || { echo "run $run has no such artifact"; exit 1; }
             [ "$expired" = false ] || { echo "run $run's artifact $name has expired"; exit 1; }
             mkdir -p "$RUNNER_TEMP/runs/$run/work"
             gh run download "$run" -R "$GITHUB_REPOSITORY" -n "$name" -D "$RUNNER_TEMP/runs/$run"
-            tar xzf "$RUNNER_TEMP/runs/$run/lean-work.tgz" -C "$RUNNER_TEMP/runs/$run/work"
+            tar xzf "$RUNNER_TEMP/runs/$run/$work" -C "$RUNNER_TEMP/runs/$run/work"
             echo "run $run: $name, $(ls "$RUNNER_TEMP/runs/$run/work/w" | grep -c '\.claim$') claims"
           done
 
@@ -109,7 +115,12 @@ jobs:
           conf=scripts/toaster/attestations/libraries.json
           for name in $(jq -r '.libraries[].name' "$conf"); do
             run=$(jq -r --arg n "$name" '.libraries[] | select(.name == $n) | .run' "$conf")
-            python3 scripts/toaster/attestations/build.py library "$conf" "$name" "$RUNNER_TEMP/runs/$run/work" "$REL" target/release/witness
+            # A library on top of another (listed after it, so its lean-check.jam is there) has its own format.
+            if [ "$(jq -r --arg n "$name" '.libraries[] | select(.name == $n) | .base // ""' "$conf")" ]; then
+              python3 scripts/toaster/library/release.py "$conf" "$name" "$RUNNER_TEMP/runs/$run/work" "$REL" target/release/witness
+            else
+              python3 scripts/toaster/attestations/build.py library "$conf" "$name" "$RUNNER_TEMP/runs/$run/work" "$REL" target/release/witness
+            fi
             # A run resumed from an earlier one carries the same claims: check they agree.
             for other in $(jq -r --arg n "$name" '.libraries[] | select(.name == $n) | .same_as_runs[]' "$conf"); do
               for f in "$RUNNER_TEMP/runs/$run/work"/w/batch-*.claim; do
