@@ -72,8 +72,8 @@ if [ -z "${POLKAVM_BACKEND:-}" ] && grep -q BadCheckBlob <<<"$("$SIM" check out/
 	export POLKAVM_BACKEND=interpreter
 	echo "PolkaVM's recompiler is unavailable here: its interpreter (same gas)"
 fi
-python3 scripts/attest-batches.py "$OUT/lib-work" --witness "$W" --service "$SVC" --check "$REL/lean-check.jam" \
-	--check-gas 5000000000 --attesters hunt-test-pat,hunt-test-quinn --sim "$SIM" | tail -3
+(cd "$OUT/lib-work" && python3 "$WITNESS_DIR/scripts/attest-batches.py" . --witness "$W" --service "$SVC" --check "$REL/lean-check.jam" \
+	--check-gas 5000000000 --attesters hunt-test-pat,hunt-test-quinn --sim "$SIM") | tail -3
 n=$(lib batch_count)
 for ((i = 0; i < n; i++)); do
 	cmp -s "$OUT/lib-work/batch-$i.claim" "$REL/picoalloc/lib-$i.claim" || fail "batch $i's claim isn't the release's"
