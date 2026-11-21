@@ -84,8 +84,29 @@ on a machine.
   squeezed out of blocks, raise `settle_slots` or lower `attesters` (both only change pacing).
 - **The quiet window** (2026-11-27 11:45–12:45 UTC, the service upgrade): build.sh stops 10 minutes
   before it and waits it out. Don't dispatch a run that would start inside it.
-- **Then**: build release `toaster-attestations-v2` (picoalloc, acclogfail, and this library via
-  `scripts/toaster/library/release.py` from the last run's work), list both libraries in the
-  bounty-3 spec (`libraries` in `site/bounties-meta.json`, `scripts/toaster/board/specs.py`),
-  update HUNTING.md's limits, and re-measure the `acc_log_lineK` proxy reveal against both
-  libraries.
+- **Then, once every batch is attested** (in this order):
+  1. **Release v2.** In `scripts/toaster/attestations/libraries.json`, set `"release":
+     "toaster-attestations-v2"` and add a library `acclogfail-proofs` with `"base": "acclogfail"`,
+     `"run"` = the last live run (whose artifact holds the work with every claim), `"work":
+     "library-work.tgz"`, the same commits as acclogfail, `"module"` = the four modules,
+     `"bounties": [3]` and the attest slots from its `state`. In
+     `.github/workflows/toaster-attestations.yml`, build a library that has a `base` with
+     `scripts/toaster/library/release.py CONF NAME WORK REL target/release/witness` (after its base,
+     so `lean-check.jam` is there) instead of `build.py library`. The artifact's name is
+     `toaster-library-work-RUN`, not the default; take it from the conf. Also teach
+     `check-chain.py` to skip the bounty check for a library whose `goal` is null. Then dispatch it
+     with `publish`. v1 stays as it is.
+  2. **Specs.** In `site/bounties-meta.json`, set `release.tag` to v2 and add `"libraries":
+     ["acclogfail", "acclogfail-proofs"]` to bounty 3's `spec`. In `scripts/toaster/board/specs.py`,
+     carry `libraries` into the spec (cited library first) and every listed library's files into
+     `release.assets` and `release.sha256`. Run it, and check `hunt.py fetch site/bounties/3.json DIR`
+     downloads and verifies both libraries.
+  3. **HUNTING.md.** Rewrite "What a proof of `AccLogFailGoal` likely needs" under Limits: the
+     proof-side library is attested, so hunters trust it automatically. Give the new measurement.
+  4. **Re-measure the proxy.** Export `Services.Bootstrap.Fmt.acc_log_lineK` (module
+     `Services.Bootstrap.Acc.Final.LogLineK`) from jam-lean c22c197 and convert it. Then count the
+     nodes outside both libraries (`hunt.py`'s `prepare` walk, with both indexed), trace a reveal-like
+     check of it, and measure its gas in witness-sim (`lean-host args` + `witness-sim check`).
+     Expected: nothing left to carry but the hunter's own proof, and a reveal trusting a few hundred
+     attested nodes.
+  5. Update `docs/toaster-proof-library.md`'s status and `docs/toaster-attestations.md`'s table.
