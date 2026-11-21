@@ -13,6 +13,7 @@ and a release of attested libraries (scripts/toaster/attestations/build.py).
     hunt.py args SPEC REL NODES WORK OUT     the check's arguments for the reveal, for witness-sim
     hunt.py names SPEC WORK DECLS            refuse lemmas that could be front-run (attest mode)
     hunt.py replay REL LIB NODES WORK        rebuild LIB's batches from an export, for witness-sim
+                                             (paths relative to WORK: run attest-batches.py there)
     hunt.py probe OUT                        arguments for the Blake2b preimage check, to see
                                              whether PolkaVM's recompiler runs here
 
@@ -340,11 +341,14 @@ def replay(rel, lib, nodes, work):
     doc = load(f"{rel}/{lib}.json")
     os.makedirs(work, exist_ok=True)
     for n, b in enumerate(doc["batches"]):
-        paths = [f"{nodes}/{'nodes' if s[0] == 'n' else 'proofs'}/{s[2:]}" for s in b["subjects"]]
+        # Relative to WORK (run attest-batches.py there): each list is one command-line argument,
+        # which Linux caps at 128 KiB.
+        rel = os.path.relpath(nodes, work)
+        paths = [f"{rel}/{'nodes' if s[0] == 'n' else 'proofs'}/{s[2:]}" for s in b["subjects"]]
         w = pack([open(f"{nodes}/proofs/{h}", "rb").read() for h in b["witness"]])
         assert hashlib.sha256(w).hexdigest() == b["witness_sha256"], f"batch {n}: the witness differs"
         open(f"{work}/batch-{n}.subjects", "w").write(",".join(paths))
-        open(f"{work}/batch-{n}.trust", "w").write(",".join(f"{work}/batch-{m}.claim:{e}" for m, e in b["trust"]))
+        open(f"{work}/batch-{n}.trust", "w").write(",".join(f"batch-{m}.claim:{e}" for m, e in b["trust"]))
         open(f"{work}/batch-{n}.witness", "wb").write(w)
     print(f"{lib}: {len(doc['batches'])} batches rebuilt in {work}")
 

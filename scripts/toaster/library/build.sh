@@ -127,8 +127,8 @@ if [ "$(get dry_run)" != 1 ]; then
 	simitem "$($W propose --service "$DSVC" --nonce 0 --fee-asset test --commit-deposit 10 --attest-deposit 10)"
 	for who in ${ATTESTERS//,/ }; do simitem "$($W mint --to "$who" --amount 1000000)"; done
 	python3 "$WITNESS_DIR/scripts/toaster/hunt/hunt.py" replay "$REL" "$BASE" nodes "$OUT/base-work"
-	python3 "$WITNESS_DIR/scripts/attest-batches.py" "$OUT/base-work" --witness "$W" --service "$DSVC" --check "$CHECK" \
-		--check-gas "$GAS" --attesters "$ATTESTERS" --sim "$SIM" | tail -2
+	(cd "$OUT/base-work" && python3 "$WITNESS_DIR/scripts/attest-batches.py" . --witness "$W" --service "$DSVC" --check "$CHECK" \
+		--check-gas "$GAS" --attesters "$ATTESTERS" --sim "$SIM") | tail -2
 	n=$(python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1]))["batch_count"])' "$REL/$BASE.json")
 	for ((i = 0; i < n; i++)); do
 		cmp -s "$OUT/base-work/batch-$i.claim" "$REL/$BASE/lib-$i.claim" || fail "$BASE's batch $i rebuilt isn't the release's claim"
