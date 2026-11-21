@@ -2,6 +2,8 @@
 """Follow a JAM chain's per-block activity statistics for one service.
 
     stats.py watch SERVICE CSV [RAW_DIR]   follow the best chain, a row per block, until killed
+                                           (SERVICE `all`: a row per block and active service)
+    stats.py share CSV SLOT                of an `all` CSV, each service's totals from SLOT on
     stats.py since CSV SLOT                print the CSV's rows from SLOT on, summed
     stats.py decode FILE                   decode a raw statistics blob (for testing)
 
@@ -96,7 +98,8 @@ def watch(service, csv_path, raw_dir=None):
     new = not os.path.exists(csv_path)
     out = open(csv_path, "a")
     if new:
-        out.write("slot,header,refinements,refine_gas,accumulations,accumulate_gas\n")
+        out.write(("slot,header,service," if service == "all" else "slot,header,")
+                  + "refinements,refine_gas,accumulations,accumulate_gas\n")
         out.flush()
     if raw_dir:
         os.makedirs(raw_dir, exist_ok=True)
@@ -133,6 +136,17 @@ def watch(service, csv_path, raw_dir=None):
                       file=sys.stderr, flush=True)
                 continue
             validators = v
+            if service == "all":
+                # Every service with activity in the block: who else the chain carried, for backing off.
+                h = base64.b64decode(block["header_hash"]).hex()
+                for sid, r in svcs.items():
+                    if r["refinements"] or r["accumulations"]:
+                        out.write(f"{block['slot']},{h},{sid},{r['refinements']},{r['refine_gas']},"
+                                  f"{r['accumulations']},{r['accumulate_gas']}\n")
+                out.flush()
+                seen[block["header_hash"]] = True
+                last_slot = block["slot"]
+                continue
             r = svcs.get(int(service), {})
             out.write(f"{block['slot']},{base64.b64decode(block['header_hash']).hex()},"
                       f"{r.get('refinements', 0)},{r.get('refine_gas', 0)},"
@@ -154,6 +168,21 @@ def rows(csv_path, since):
     return out
 
 
+def share(csv_path, slot):
+    """Each service's totals in an `all` CSV from SLOT on, and how many blocks it was active in."""
+    tot, blocks = {}, set()
+    for line in open(csv_path).read().splitlines()[1:]:
+        sl, _, sid, r, rg, a, ag = line.split(",")
+        if int(sl) < int(slot):
+            continue
+        blocks.add(int(sl))
+        t = tot.setdefault(sid, {"blocks": 0, "refinements": 0, "refine_gas": 0, "accumulations": 0, "accumulate_gas": 0})
+        t["blocks"] += 1
+        for k, v in (("refinements", r), ("refine_gas", rg), ("accumulations", a), ("accumulate_gas", ag)):
+            t[k] += int(v)
+    print(json.dumps({"from": int(slot), "active_blocks": len(blocks), "services": tot}))
+
+
 def since(csv_path, slot):
     rs = rows(csv_path, int(slot))
     busy = [r for r in rs if r["refinements"] or r["accumulations"]]
@@ -165,6 +194,8 @@ if __name__ == "__main__":
     cmd = sys.argv[1] if len(sys.argv) > 1 else ""
     if cmd == "watch" and len(sys.argv) in (4, 5):
         watch(*sys.argv[2:])
+    elif cmd == "share" and len(sys.argv) == 4:
+        share(*sys.argv[2:])
     elif cmd == "since" and len(sys.argv) == 4:
         since(*sys.argv[2:])
     elif cmd == "decode" and len(sys.argv) in (4, 5):

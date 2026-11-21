@@ -204,6 +204,16 @@ done
 
 step "attesting $BATCHES batches"
 [ -n "$(get attest_slot)" ] || put attest_slot "$(slot)"
+# Every block's activity by service (scripts/toaster/lean/stats.py), into the logs: whether others
+# are squeezed out while we attest (raise SETTLE_SLOTS or lower the attesters if so).
+STATS=${LOGS:-$OUT}/stats-all.csv
+run_start=$(slot)
+python3 "$WITNESS_DIR/scripts/toaster/lean/stats.py" watch all "$STATS" >/dev/null 2>>"${LOGS:-$OUT}/stats.log" &
+stats_pid=$!
+# Not left holding the step's pipe to tee: killed on exit, and on the run's timeout (TERM).
+trap 'kill "$stats_pid" 2>/dev/null || true' EXIT
+trap 'kill "$stats_pid" 2>/dev/null; exit 124' TERM
+share() { python3 "$WITNESS_DIR/scripts/toaster/lean/stats.py" share "$STATS" "$run_start" 2>/dev/null | tee -a "${LOGS:-$OUT}/stats-share.jsonl" || true; }
 while :; do
 	read -r to_start to_end <<<"$(quiet)"
 	if [ "$to_start" -le "$QUIET_MARGIN" ] && [ "$to_end" -gt 0 ]; then
@@ -219,6 +229,7 @@ while :; do
 		${LAND_SLOTS:+--land-slots "$LAND_SLOTS"} --log "$OUT/attest.jsonl") 2>&1 | tee -a attest.log
 	status=${PIPESTATUS[0]}
 	set -e
+	share
 	[ "$status" = 0 ] && break
 	[ "$status" = 124 ] || fail "attest-batches.py failed ($status)"
 	echo "stopped before the quiet window; resuming after it"
