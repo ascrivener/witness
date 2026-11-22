@@ -49,6 +49,14 @@ def main(spec_path, rel, nodes, work, theorem):
     w = hunt.pack(items)
     open(f"{work}/witness.pack", "wb").write(w)
     hunt.dump([{"depth": 0, "subjects": subjects, "trusted": trusted}], f"{work}/reveal-plan.json")
+    # The reveal's first trusted blob is the bounty's cited node (its statement), which THEOREM's
+    # export doesn't hold: take its bytes from the cited claim, as a real reveal's would be.
+    cite = spec["cite"]
+    _, cited = hunt.read_claim(f"{rel}/{spec['library']}/{cite['claim']}")
+    node = cited[cite["entry"]]
+    assert hunt.blake2b(node).hex() == cite["node"], "the cited claim's entry isn't the cited node"
+    if not os.path.exists(f"{nodes}/nodes/{cite['node']}"):
+        open(f"{nodes}/nodes/{cite['node']}", "wb").write(node)
     proxy_spec = {**spec, "statement": {**spec["statement"], "theorem": theorem, "node": g}}
     hunt.dump(proxy_spec, f"{work}/spec.json")
     size = lambda d: sum(os.path.getsize(f"{nodes}/{d}/{h}") for h in outside if os.path.exists(f"{nodes}/{d}/{h}"))
