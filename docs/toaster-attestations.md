@@ -6,8 +6,10 @@ attestation holds which node depends on how the library was batched. That batchi
 planner's noisy native-time trace, so it can't be rebuilt from source. It exists only in the work
 of the runs that attested each library, and their artifacts expire after 90 days.
 
-So the release [`toaster-attestations-v1`](https://github.com/ascrivener/witness/releases/tag/toaster-attestations-v1)
-publishes them for good. Hunters use it through [HUNTING.md](HUNTING.md).
+So the release [`toaster-attestations-v2`](https://github.com/ascrivener/witness/releases/tag/toaster-attestations-v2)
+publishes them for good. Hunters use it through [HUNTING.md](HUNTING.md). It holds v1's two
+libraries unchanged (byte for byte; [`toaster-attestations-v1`](https://github.com/ascrivener/witness/releases/tag/toaster-attestations-v1)
+stays as it was) and adds `acclogfail-proofs`.
 
 ## What's in it
 
@@ -26,6 +28,12 @@ reads `batch-M.claim` in a trust reference as one of its own batches.
 |---|---|---|---|---|
 | `picoalloc` | [44758884737](https://github.com/ascrivener/witness/actions/runs/44758884737) (resuming [44751676237](https://github.com/ascrivener/witness/actions/runs/44751676237), same claims) | 114 | 2,579 | bounty 1, `Picoalloc.alloc_wf` ([toaster-lean.md](toaster-lean.md)) |
 | `acclogfail` | [44773292559](https://github.com/ascrivener/witness/actions/runs/44773292559) | 320 | 25,795 | bounty 3, `AccLogFailGoal` ([toaster-acclogfail.md](toaster-acclogfail.md)) |
+| `acclogfail-proofs` | [44985391809](https://github.com/ascrivener/witness/actions/runs/44985391809) (the last of four live runs, each resuming the one before, from the dry run [44906071989](https://github.com/ascrivener/witness/actions/runs/44906071989)) | 6,428 | 21,911 | bounty 3, on top of `acclogfail`: what jam-lean's proofs of the region reach ([toaster-proof-library.md](toaster-proof-library.md)) |
+
+A library on top of another (`acclogfail-proofs`, `"base": "acclogfail"`) has no goal or cited
+attestation of its own: its batches trust the base's claims as `[BASE, batch, entry]`, and each
+batch has a `kind` (`batch`, `op`: one judgment of a declaration too heavy for one refine, `final`:
+the declaration citing its judgments; subjects `j:SHA256` are judgment blobs).
 
 ## How it's made
 
@@ -34,14 +42,16 @@ reads `batch-M.claim` in a trust reference as one of its own batches.
 
 1. downloads the runs' artifacts (`scripts/toaster/attestations/libraries.json` names them), and
    checks that a resumed run's claims are the same as the run it resumed;
-2. builds the assets with `scripts/toaster/attestations/build.py`. It checks every claim's
+2. builds the assets with `scripts/toaster/attestations/build.py` (a library on top of another
+   with `scripts/toaster/library/release.py`, after its base). It checks every claim's
    subjects against the run's nodes (a node's hash is the blake2b-256 of its bytes) and every
    witness against its proofs. The output is deterministic: the tarballs carry no times or
    owners, so a rerun gives the same bytes;
 3. syncs a non-validating node, as `toaster.yml` does, and runs
    `scripts/toaster/attestations/check-chain.py`. Every attestation must be in service 7's
    storage, by the release's check, with empty attest params. Every bounty must be posted for its
-   library's goal, citing the release's cited attestation. Otherwise the run fails;
+   library's goal, citing the release's cited attestation (a library with no goal backs no
+   bounty itself). Otherwise the run fails;
 4. with `publish`, creates the release. It submits nothing to the chain.
 
 ## Checking it yourself

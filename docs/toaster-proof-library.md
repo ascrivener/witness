@@ -1,7 +1,9 @@
 # jam-lean's proof-side library for AccLogFail, attested on the Toaster
 
-**Status: planned and in its dry run; not yet attested live.** Approved by Adam (option (b) of the
-bounty-3 measurement in [HUNTING.md](HUNTING.md#limits)).
+**Status: attested live on service 7, all 6,428 batches, and published in
+[`toaster-attestations-v2`](https://github.com/ascrivener/witness/releases/tag/toaster-attestations-v2).**
+Approved by Adam (option (b) of the bounty-3 measurement in [HUNTING.md](HUNTING.md#limits)).
+Bounty 3's spec lists both libraries, so hunters trust them automatically.
 
 The [AccLogFail bounty](toaster-acclogfail.md)'s attested library is its statement's closure: what
 `AccLogFailGoal` mentions. A proof of it would use much more. jam-lean's proved success branch of
@@ -32,6 +34,33 @@ The library is every node those roots' proofs reach that acclogfail doesn't hold
 | Over budget alone | 148 declarations; measured in witness-sim, 103 fit under 3.5×10⁹ and stay whole |
 | Heavy | 45 declarations over 3.5×10⁹ (up to 9.0×10⁹), split into 1,819 judgment ops and 45 finals |
 | In all | 6,460 attestations; about 6.8×10¹² gas, an upper bound (35× the acclogfail library) |
+
+## How it went
+
+| | |
+|---|---|
+| Dry run | [44906071989](https://github.com/ascrivener/witness/actions/runs/44906071989): 6,428 attestations planned, none rejected in witness-sim, max 3.48×10⁹ gas, 6.31×10¹² in all |
+| Live | four runs, each resuming the one before (tag `proofs1`, 4 attesters, `settle_slots` 1): [44909677020](https://github.com/ascrivener/witness/actions/runs/44909677020) to 1,949, [44935599208](https://github.com/ascrivener/witness/actions/runs/44935599208) to 3,516, [44962051206](https://github.com/ascrivener/witness/actions/runs/44962051206) to 5,844, [44985391809](https://github.com/ascrivener/witness/actions/runs/44985391809) to 6,428 |
+| On chain | slots 9,922,660–9,932,193 (2026-11-21 13:46 to 2026-11-22 05:39 UTC), about 16.3 hours attesting, 350–520 attestations an hour; no rejections |
+| Neighbours | from the second run on, every service's per-block statistics were recorded (`stats-all.csv` in each run's logs). corevm's two services refined in every block, 2.00 refinements a block whether or not service 7 refined in it: nobody was squeezed out, so the pacing never changed |
+
+## What a hunter's reveal now looks like
+
+The proxy, re-measured against both libraries ([`scripts/toaster/library/proxy.py`](../scripts/toaster/library/proxy.py)):
+jam-lean's `acc_log_lineK` (c22c197), treated as a hunter's proof of the same region.
+
+| | Before (acclogfail alone) | Now (acclogfail and acclogfail-proofs) |
+|---|---|---|
+| Nodes its proof reaches outside the libraries | 21,585 (20 MB of statements, 151 MB of proofs) | **none**: the reveal carries only its own node and proof (a 78,654-byte witness) |
+| What the traced check trusts | 249 nodes, had they been attested | 249 attested nodes (168,590 bytes) and the bounty's cited one |
+| Its check gas (witness-sim, PolkaJam's) | 4.4×10⁸ | 4.40×10⁸ (439,900,604 of the bounty's 5×10⁹) |
+| The package | | 821,654 bytes, 6% of the chain's 13.8 MB input limit (the 516 KB check, the trusted nodes and their claims, the witness) |
+
+To repeat it: export `Services.Bootstrap.Fmt.acc_log_lineK` (module
+`Services.Bootstrap.Acc.Final.LogLineK`) with lean4export, `lean-host convert` it, then
+`proxy.py SPEC REL NODES WORK Services.Bootstrap.Fmt.acc_log_lineK` (REL from `hunt.py fetch`),
+`lean-host trace NODES WORK/reveal-plan.json WORK/reveal-traced.json 100000000`, and `hunt.py
+trust`, `hunt.py args` and `witness-sim check` with WORK/spec.json, as `hunt.sh`'s `measure` does.
 
 ## How it's attested
 
@@ -84,7 +113,7 @@ on a machine.
   squeezed out of blocks, raise `settle_slots` or lower `attesters` (both only change pacing).
 - **The quiet window** (2026-11-27 11:45–12:45 UTC, the service upgrade): build.sh stops 10 minutes
   before it and waits it out. Don't dispatch a run that would start inside it.
-- **Then, once every batch is attested** (in this order):
+- **Then, once every batch is attested** (done on 2026-11-22, as recorded above; kept for the record) (in this order):
   1. **Release v2.** In `scripts/toaster/attestations/libraries.json`, set `"release":
      "toaster-attestations-v2"` and add a library `acclogfail-proofs` with `"base": "acclogfail"`,
      `"run"` = the last live run (whose artifact holds the work with every claim), `"work":

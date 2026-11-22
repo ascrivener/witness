@@ -22,10 +22,10 @@ checked and paid.
   earliest commitment among valid reveals wins.
 - **Finalize:** after the window, anyone can finalize, which pays the winner.
 
-Your proof is checked trusting the bounty's **attested library**: its nodes were type-checked on
-chain earlier, in batches, and your reveal cites those attestations instead of re-checking them.
-The citations come from a published release,
-[`toaster-attestations-v1`](https://github.com/ascrivener/witness/releases/tag/toaster-attestations-v1)
+Your proof is checked trusting the bounty's **attested libraries** (its spec's `libraries`): their
+nodes were type-checked on chain earlier, in batches, and your reveal cites those attestations
+instead of re-checking them. The citations come from a published release,
+[`toaster-attestations-v2`](https://github.com/ascrivener/witness/releases/tag/toaster-attestations-v2)
 ([docs/toaster-attestations.md](toaster-attestations.md)). The workflow fetches them for you.
 
 ## 0. Pick a bounty and read its spec
@@ -44,7 +44,7 @@ The spec (also in this repository as `site/bounties/N.json`) has everything a hu
 | `statement.node` | the statement node's hash: the bounty's params. Your theorem must hash to it |
 | `pins` | the commits everything is built at: jam-lean, witness-lean, lean4export (and the service's witness build) |
 | `check`, `check_gas` | the check (witness-lean's Lean kernel) and the gas your reveal's check may use: 5×10⁹, one refine |
-| `cite`, `library`, `release` | the attested library, the attestation the bounty cites, and the release's asset URLs and sha256s |
+| `cite`, `library`, `libraries`, `release` | the attested library the bounty cites, every library you may trust (the cited one first), the attestation the bounty cites, and the release's asset URLs and sha256s |
 | `reward`, `asset`, `expiry`, `claim_window` | the terms. Commit before `expiry.slot` (`expiry.approx_utc` is its date) |
 | `hunt.commands` | the workflow commands below |
 | `status` | the board's snapshot of the chain, about hourly: is the bounty still `Open`? |
@@ -74,7 +74,7 @@ Rules the check enforces:
 
 - No `sorry`. The only axioms allowed are `propext`, `Classical.choice` and `Quot.sound`.
 - Import only jam-lean's modules, and Lean core and Std through them; the file is compiled inside
-  jam-lean at the pinned commit. Anything your proof uses that isn't in the attested library is
+  jam-lean at the pinned commit. Anything your proof uses that isn't in the attested libraries is
   carried in your reveal and checked there, which costs gas.
 - The type must be the spec's exactly: the same constant (`AccLogFailGoal`), not an unfolded copy.
   The statement node hashes the type as written.
@@ -206,7 +206,7 @@ curl -s https://ascrivener.github.io/witness/snapshot.json | jq '.bounties[] | s
 ## Your own lemmas
 
 By default (`lemmas=witness`) your reveal carries every node of yours, with its proof: your
-lemmas, and anything else you use that isn't in the attested library. That's simplest, but it all
+lemmas, and anything else you use that isn't in the attested libraries. That's simplest, but it all
 has to be checked in the one refine, within the bounty's 5×10⁹ gas, and fit one work package.
 
 If it doesn't fit (`check` says so), use `lemmas=attest`, at commit **and** reveal:
@@ -242,22 +242,25 @@ The bounties don't set `--bind-claim`, so a reveal may trust any number of attes
   how big it is. AccLogFail's library holds 17 MB of code facts alone, so a proof whose kernel run
   looks up much of it won't fit. Attest lemmas that need those facts (`lemmas=attest`), so that
   your reveal trusts your lemmas instead of the facts.
-- **What a proof of `AccLogFailGoal` likely needs.** The attested library is the statement's
-  closure: what `AccLogFailGoal` mentions, not what a proof of it would use. jam-lean's proved
-  success branch, `acc_log_lineK` (the same code, 6501 … 6630), measured against it:
-  - its proof reaches **21,585 nodes outside the library**: 20 MB of statements and 151 MB of
-    proofs (jam-lean's `Fmt`, `Alloc` and `memcpy` lemmas), in 32 dependency depths. Far too much
-    to carry in a reveal, so a proof built on them needs `lemmas=attest`, which attests them all;
-  - with those attested, `acc_log_lineK`'s own check is 4.4×10⁸ gas, trusting 249 nodes (167 KB):
-    a reveal citing lemmas like it is small;
-  - but two of those lemmas can't be checked in one refine: `Fmt.io_l` (6.6×10⁹ gas) and
-    `Fmt.dl_iter` (5.8×10⁹). The next heaviest are 1.3–4.6×10⁹ (`Alloc.reg_write` 4.6×10⁹:
-    over the default `MAX_ATTEST_GAS` of 3.5×10⁹, under 5×10⁹). Over-refine declarations need
-    witness-lean's judgment splitting (`lean-host judgments`), which the hunt workflow doesn't do
-    yet. A proof that avoids them, or proves leaner versions, can be attested as it is.
+- **What a proof of `AccLogFailGoal` likely needs.** Two attested libraries back bounty 3, and
+  its spec lists both (`libraries`), so `hunt.sh` trusts either automatically:
+  - `acclogfail`, the statement's closure: what `AccLogFailGoal` mentions;
+  - `acclogfail-proofs`, what jam-lean's own proofs of the same code region reach on top of it
+    (`acc_log_lineK`, `acc_log_line`, the allocation-failure traps, `AccAbort`, and the `Fmt`,
+    `Alloc` and `memcpy` lemmas under them): 21,911 nodes, the 45 declarations too heavy for
+    one refine (`Fmt.io_l`, `Fmt.dl_iter` …) attested as judgments ([toaster-proof-library.md](toaster-proof-library.md)).
+
+  Measured with jam-lean's proved success branch, `acc_log_lineK` (the same code, 6501 … 6630),
+  as if it were a hunter's proof: its proof reaches **nothing outside the two libraries**, so the
+  reveal carries only its own node and proof (a 79 KB witness). The check trusts 249 attested nodes
+  and uses 4.40×10⁸ gas of the bounty's 5×10⁹; the package is 822 KB, 6% of the chain's input
+  limit. A proof built from jam-lean's lemmas the same way should look much the same: your own
+  new lemmas are what's left to carry (`lemmas=witness`) or attest (`lemmas=attest`). A lemma of
+  yours too heavy for one refine (over `MAX_ATTEST_GAS`, 3.5×10⁹) still can't be attested by the
+  hunt workflow, which doesn't split judgments.
 
   (Exact PolkaJam gas, from witness-sim; `scripts/toaster/hunt/hunt.sh` does the same
-  measurement for your own lemmas before attesting.)
+  measurement for your own proof, and `scripts/toaster/library/proxy.py` repeats this one.)
 - **Build time.** Each run unpacks jam-lean's build for exactly the pinned commit, from the
   release `jam-lean-lake-<commit>` (`.github/workflows/jam-lean-cache.yml` copied it from
   jam-lean's own cache), so little rebuilds. Without that release it falls back to jam-lean's

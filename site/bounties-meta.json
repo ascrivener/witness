@@ -61,6 +61,7 @@
           "definition": "Services/Bootstrap/Acc/Final/Bounty.lean"
         },
         "library": "acclogfail",
+        "libraries": ["acclogfail", "acclogfail-proofs"],
         "witness_service": "71e585a634545b1cb90cf4737198a74865ee2100",
         "terms": {
           "reward": "1000000",
@@ -89,6 +90,6 @@
     "slot_zero_utc": "2025-01-01T12:00:00Z"
   },
   "release": {
-    "tag": "toaster-attestations-v1"
+    "tag": "toaster-attestations-v2"
   }
 }
