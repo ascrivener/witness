@@ -27,6 +27,14 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 from build import blake2b, read_claim, sha256  # noqa: E402
 
 
+def subject_path(work, p):
+    """A batch's subject path (relative to WORK/w). layout.py links WORK/w/nodes and WORK/w/heavy to
+    WORK/nodes and WORK/heavy by absolute path, which dangles once the work is unpacked elsewhere
+    (the release workflow): read those from WORK itself."""
+    top = p.split("/", 1)[0]
+    return f"{work}/{p}" if top in ("nodes", "heavy") else f"{work}/w/{p}"
+
+
 def main(conf_path, name, work, out, w):
     conf = json.load(open(conf_path))
     lib = next(l for l in conf["libraries"] if l["name"] == name)
@@ -47,7 +55,7 @@ def main(conf_path, name, work, out, w):
         assert len(paths) == len(subjects), f"batch {n}: {len(paths)} paths, {len(subjects)} subjects"
         listed = []
         for i, (p, data) in enumerate(zip(paths, subjects)):
-            assert open(f"{work}/w/{p}", "rb").read() == data, f"batch {n} entry {i}: not {p}"
+            assert open(subject_path(work, p), "rb").read() == data, f"batch {n} entry {i}: not {p}"
             if p.startswith("nodes/nodes/"):
                 h = p.rsplit("/", 1)[1]
                 assert blake2b(data).hex() == h, f"batch {n} entry {i}: hash"
