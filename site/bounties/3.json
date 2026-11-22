@@ -39,6 +39,10 @@
  },
  "check_gas": 5000000000,
  "library": "acclogfail",
+ "libraries": [
+  "acclogfail",
+  "acclogfail-proofs"
+ ],
  "cite": {
   "claim": "lib-319.claim",
   "entry": 0,
@@ -63,20 +67,24 @@
  "maker": "0xa66401bbfe551de493951fe49abc6384d4ee9b6c767e13db0c246d2fa891d894",
  "status": "https://ascrivener.github.io/witness/snapshot.json",
  "release": {
-  "tag": "toaster-attestations-v1",
-  "url": "https://github.com/ascrivener/witness/releases/tag/toaster-attestations-v1",
-  "manifest": "https://github.com/ascrivener/witness/releases/download/toaster-attestations-v1/manifest.json",
-  "manifest_sha256": "460548c869a7d675cbc08cf9ecfc61d75a9d3d0a577ef9e6b2089c4d89c56a3b",
+  "tag": "toaster-attestations-v2",
+  "url": "https://github.com/ascrivener/witness/releases/tag/toaster-attestations-v2",
+  "manifest": "https://github.com/ascrivener/witness/releases/download/toaster-attestations-v2/manifest.json",
+  "manifest_sha256": "7872ea939302b0ea8d17e815f8066910cff3dfd8dfb241cff151e81f2a6b56d9",
   "assets": {
-   "manifest.json": "https://github.com/ascrivener/witness/releases/download/toaster-attestations-v1/manifest.json",
-   "acclogfail.json": "https://github.com/ascrivener/witness/releases/download/toaster-attestations-v1/acclogfail.json",
-   "acclogfail-claims.tar.gz": "https://github.com/ascrivener/witness/releases/download/toaster-attestations-v1/acclogfail-claims.tar.gz",
-   "lean-check.jam": "https://github.com/ascrivener/witness/releases/download/toaster-attestations-v1/lean-check.jam"
+   "manifest.json": "https://github.com/ascrivener/witness/releases/download/toaster-attestations-v2/manifest.json",
+   "acclogfail.json": "https://github.com/ascrivener/witness/releases/download/toaster-attestations-v2/acclogfail.json",
+   "acclogfail-claims.tar.gz": "https://github.com/ascrivener/witness/releases/download/toaster-attestations-v2/acclogfail-claims.tar.gz",
+   "lean-check.jam": "https://github.com/ascrivener/witness/releases/download/toaster-attestations-v2/lean-check.jam",
+   "acclogfail-proofs.json": "https://github.com/ascrivener/witness/releases/download/toaster-attestations-v2/acclogfail-proofs.json",
+   "acclogfail-proofs-claims.tar.gz": "https://github.com/ascrivener/witness/releases/download/toaster-attestations-v2/acclogfail-proofs-claims.tar.gz"
   },
   "sha256": {
    "acclogfail.json": "4b75e1d767c188d66f02a6c5fb9f0bcae22b3ae76250b6bf6ade222046a8edc8",
    "acclogfail-claims.tar.gz": "c5e6db510c17c4bebfc65f3492ee27c991f9f2f076515d66c8c4ac5fde2db9e7",
-   "lean-check.jam": "dfecff134eb35022fb425fd037ca01cf2288646b7d11649b8c762b1201d7103a"
+   "lean-check.jam": "dfecff134eb35022fb425fd037ca01cf2288646b7d11649b8c762b1201d7103a",
+   "acclogfail-proofs.json": "01548a71b5195f0c227574234681aff68b045ba9864a81a4e802832d46bfcca8",
+   "acclogfail-proofs-claims.tar.gz": "06a6b2477c97fea8f6318c3f5d6fa0c42427f585e7848cac68e2008f416685ab"
   }
  },
  "hunt": {
