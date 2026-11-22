@@ -1,7 +1,7 @@
 {
   "_comment": "The libraries attested on the JAM Toaster's service 7, and the runs whose artifacts hold their work (scripts/toaster/attestations/build.py, .github/workflows/toaster-attestations.yml). `work` names the artifact's tarball of the run's work directory.",
   "service": 7,
-  "release": "toaster-attestations-v1",
+  "release": "toaster-attestations-v2",
   "libraries": [
     {
       "name": "picoalloc",
@@ -37,6 +37,23 @@
       "bounties": [3],
       "attest_slots": [9909960, 9910135],
       "doc": "docs/toaster-acclogfail.md"
+    },
+    {
+      "name": "acclogfail-proofs",
+      "about": "jam-lean's proof-side library for AccLogFail: what the proofs of the first log line's region (acc_log_lineK, acc_log_line, the allocation-failure traps, AccAbort) reach outside acclogfail, attested on top of it for bounty 3 (docs/toaster-proof-library.md)",
+      "base": "acclogfail",
+      "run": 44985391809,
+      "artifact": "toaster-library-work-44985391809",
+      "same_as_runs": [],
+      "work": "library-work.tgz",
+      "jam_lean": "c22c197c9c712809912827bf547e92bb8fd9330f",
+      "witness_lean": "77335dbe873d5d8036aecc54a8a848b88a5b1bf5",
+      "lean4export": "df81913eee5519d5a88ae5b0fd701b5298cc29ab",
+      "lean_toolchain": "leanprover/lean4:v4.36.0-rc1",
+      "module": ["Services.Bootstrap.Acc.Final.LogLineK", "Services.Bootstrap.Fmt.AccFmt", "Services.Bootstrap.Acc.Transfer.Trap", "Services.Bootstrap.Acc.Abort"],
+      "bounties": [3],
+      "attest_slots": [9922660, 9932193],
+      "doc": "docs/toaster-proof-library.md"
     }
   ]
 }

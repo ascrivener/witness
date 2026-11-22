@@ -49,7 +49,8 @@ def main(service, release, out):
         if missing:
             problems.append(f"{name}: {len(missing)} of {len(lib['batches'])} attestations not on chain, e.g. {missing[:3]}")
         bounties = []
-        for bid in lib["goal"]["bounties"]:
+        # A library with no goal (one on top of another, scripts/toaster/library/release.py) backs no bounty itself.
+        for bid in (lib["goal"]["bounties"] if lib["goal"] else []):
             v = get(snapshot.key_bounty(bid))
             if v is None:
                 problems.append(f"{name}: bounty {bid} isn't on chain")
